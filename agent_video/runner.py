@@ -67,6 +67,7 @@ class JobRunner:
             missing = {"main_product", "picks"} - set(payload)
             if missing:
                 raise ValueError(f"缺少字段: {', '.join(sorted(missing))}")
+            self._validate_edit_plan(payload)
             target = workspace / "engine" / "picks.json"
             title = "AI 音画编排"
         elif stage == "rough_cut":
@@ -84,6 +85,47 @@ class JobRunner:
         self.store.add_event(job_id, stage, "success", "decision_submitted", "已接收决策，任务重新排队")
         self.enqueue(job_id)
         return {"job_id": job_id, "accepted": True, "stage": stage}
+
+    @staticmethod
+    def _validate_edit_plan(payload: dict[str, Any]) -> None:
+        product = payload.get("main_product")
+        picks = payload.get("picks")
+        if not isinstance(product, str) or not product.strip():
+            raise ValueError("请填写主推款名称")
+        if not isinstance(picks, list) or not picks:
+            raise ValueError("请至少选择一个片段")
+        if len(picks) > 64:
+            raise ValueError("选段过多，请控制在 64 段以内")
+        roles = {"hook", "result", "pain", "proof", "fit", "material", "craft",
+                 "color", "styling", "scene", "demo", "close", "bridge"}
+        modules: set[str] = set()
+        seen: set[tuple[int, float, float]] = set()
+        for index, pick in enumerate(picks, 1):
+            if not isinstance(pick, dict):
+                raise ValueError(f"第 {index} 个选段格式无效")
+            try:
+                src = int(pick.get("src"))
+                start = float(pick.get("start"))
+                end = float(pick.get("end"))
+            except (TypeError, ValueError):
+                raise ValueError(f"第 {index} 个选段缺少有效时间") from None
+            module = str(pick.get("module", ""))
+            role = str(pick.get("role", ""))
+            if src < 1 or start < 0 or end <= start:
+                raise ValueError(f"第 {index} 个选段时间范围无效")
+            if module != "body" and not re.fullmatch(r"hook_[A-C]", module):
+                raise ValueError(f"第 {index} 个选段的模块无效")
+            if role not in roles:
+                raise ValueError(f"第 {index} 个选段的内容角色无效")
+            key = (src, start, end)
+            if key in seen:
+                raise ValueError("同一画面不能重复用于开头和正文")
+            seen.add(key)
+            modules.add(module)
+        if "body" not in modules:
+            raise ValueError("请至少选择一条正文片段")
+        if not any(name.startswith("hook_") for name in modules):
+            raise ValueError("请至少选择一条开头片段")
 
     def packet(self, job_id: str) -> dict[str, Any]:
         job = self.store.get_job(job_id)

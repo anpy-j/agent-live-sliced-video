@@ -58,6 +58,24 @@ class RunnerTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "不接受外部决策"):
             self.runner.submit(job_id, {"verdict": "approve"})
 
+    def test_edit_plan_requires_hook_body_and_unique_segments(self):
+        valid = {
+            "main_product": "白山茶",
+            "picks": [
+                {"src": 1, "start": 0, "end": 3, "text": "开头", "role": "hook", "module": "hook_A"},
+                {"src": 1, "start": 4, "end": 8, "text": "正文", "role": "proof", "module": "body"},
+            ],
+        }
+        self.runner._validate_edit_plan(valid)
+        no_body = json.loads(json.dumps(valid))
+        no_body["picks"][1]["module"] = "hook_A"
+        with self.assertRaisesRegex(ValueError, "正文"):
+            self.runner._validate_edit_plan(no_body)
+        duplicate = json.loads(json.dumps(valid))
+        duplicate["picks"][1].update({"start": 0, "end": 3})
+        with self.assertRaisesRegex(ValueError, "重复"):
+            self.runner._validate_edit_plan(duplicate)
+
     def test_delivery_reuses_snapshot_without_full_pipeline(self):
         source = self.root / "source.mp4"
         source.write_bytes(b"source")

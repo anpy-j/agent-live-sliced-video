@@ -21,6 +21,7 @@ async function api(url, options={}) {
 function escapeHtml(value=''){return String(value).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));}
 function formatTime(value){if(!value)return '—';const d=new Date(value);return new Intl.DateTimeFormat('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}).format(d);}
 function bytes(value=0){if(value<1024)return `${value} B`;if(value<1048576)return `${(value/1024).toFixed(1)} KB`;return `${(value/1048576).toFixed(1)} MB`;}
+function clipTime(value=0){const seconds=Math.max(0,Number(value)||0),m=Math.floor(seconds/60),s=Math.floor(seconds%60);return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;}
 function status(value){return `<span class="status ${value}">${labels[value]||value}</span>`;}
 function toast(message){const el=$('#toast');el.textContent=message;el.classList.add('show');clearTimeout(el.timer);el.timer=setTimeout(()=>el.classList.remove('show'),2400);}
 function loading(){app.innerHTML='<div class="loading"><div class="spinner"></div>正在读取本地任务状态</div>';}
@@ -52,11 +53,31 @@ function artifactCard(a){
   if((a.mime_type||'').startsWith('video/'))visual=`<video preload="metadata" src="${url}#t=0.1" aria-label="${escapeHtml(a.title)}"></video>`;
   return `<button class="artifact" data-preview="${a.id}" data-mime="${escapeHtml(a.mime_type||'')}" data-title="${escapeHtml(a.title)}"><span class="artifact-preview">${visual}</span><span class="artifact-meta"><b>${escapeHtml(a.title)}</b><small>${escapeHtml(a.kind)} · ${bytes(a.size)}</small></span></button>`;
 }
+function inferredProduct(title=''){
+  const bracket=String(title).match(/【([^】]+)】/);if(bracket)return bracket[1];
+  return String(title).replace(/\.[^.]+$/,'').replace(/[-_]?\d+(?:[-_]\d+)*$/,'').trim();
+}
+function candidateRole(category){return ({hook:'hook',result:'result',color:'color',craft:'craft',material:'material',fit:'fit',styling:'styling',scene:'scene',demo:'demo',close:'close',pain:'pain',proof:'proof'}[category]||'bridge');}
+function categoryLabel(category){return ({hook:'钩子',result:'效果',color:'颜色',craft:'工艺',material:'面料',fit:'版型',styling:'搭配',scene:'场景',demo:'展示',close:'收尾',pain:'痛点',proof:'佐证',other:'讲解'}[category]||category||'讲解');}
+function decisionPanel(job,packet){
+  const candidates=packet.candidate_digest||[];
+  const overview=(packet.artifacts||[]).find(a=>(a.mime_type||'').startsWith('image/')&&(a.title||'').includes('概览'));
+  const prompt=`调用 live-slicer 的 get_stage_packet 读取任务 ${job.id}，按照 LiveCut Skill 选择一个最强成片方案，并用 submit_stage_payload 提交 main_product 和 picks。默认只做 1 个钩子，不要重复使用同一画面，不要新建任务。`;
+  return `<section class="decision-panel" aria-labelledby="decisionTitle"><div class="decision-head"><div><span class="eyebrow">ACTION REQUIRED</span><h2 id="decisionTitle">需要完成音画编排</h2><p>素材分析已经完成。请选择一种方式提交方案，提交后流程才会继续。</p></div><span class="status waiting_input">等待你的决策</span></div>
+    <div class="agent-handoff"><div><b>让 WorkBuddy、Codex、Multica 等外部 Agent 决策</b><p>在已连接 LiveCut MCP 的客户端中发送下面这条指令，Agent 会读取候选、完成取舍并自动提交。</p><code>${escapeHtml(prompt)}</code></div><div class="handoff-actions"><button class="button primary" id="copyAgentPrompt">复制执行指令</button><a class="button ghost" href="#/mcp">查看 MCP 接入</a></div></div>
+    <details class="manual-decision" open><summary><span><b>或在这里手动决定</b><small>适合你想亲自选开头和正文时使用</small></span><span class="selection-summary" id="selectionSummary">已选 0 段 · 0 秒</span></summary>
+      <form id="editPlanForm"><div class="plan-toolbar"><label>主推款名称<input id="mainProduct" value="${escapeHtml(inferredProduct(job.title))}" required placeholder="例如：白山茶羊毛上衣"><small>用于字幕、文件记录和后续质检。</small></label><div class="plan-help"><b>怎么选</b><span>至少选 1 条“开头”和 1 条“正文”；同一画面只使用一次。片段按原视频时间顺序拼接。</span></div></div>
+      ${overview?`<button class="overview-link" type="button" data-preview="${overview.id}" data-mime="${escapeHtml(overview.mime_type||'')}" data-title="${escapeHtml(overview.title)}"><img src="/api/artifacts/${overview.id}/content" alt="全场素材概览"><span>打开全场概览大图</span></button>`:''}
+      <div class="candidate-list" aria-label="候选片段">${candidates.map(c=>`<label class="candidate-row"><input type="checkbox" data-candidate="${c.i}"><span class="candidate-time">${clipTime(c.s)}–${clipTime(c.e)}</span><span class="candidate-copy"><span class="candidate-tag ${escapeHtml(c.c)}">${escapeHtml(categoryLabel(c.c))}</span><span>${escapeHtml(c.t)}</span></span><select data-module="${c.i}" aria-label="片段用途" disabled><option value="${c.c==='hook'?'hook_A':'body'}">${c.c==='hook'?'开头':'正文'}</option><option value="${c.c==='hook'?'body':'hook_A'}">${c.c==='hook'?'正文':'开头'}</option></select></label>`).join('')}</div>
+      <div class="plan-submit"><p class="form-error" id="editPlanError" role="alert"></p><button class="button primary" type="submit" id="submitEditPlan">提交编排并继续</button></div></form></details></section>`;
+}
 async function renderJob(jobId){
   setCrumb('任务详情');loading();const job=await api(`/api/jobs/${jobId}`);state.job=job;
-  const active=['queued','running'].includes(job.status), canRetry=['failed','cancelled'].includes(job.status), canApprove=job.status==='waiting_input'&&job.current_stage==='rough_cut';
+  const active=['queued','running'].includes(job.status), canRetry=['failed','cancelled'].includes(job.status), canApprove=job.status==='waiting_input'&&job.current_stage==='rough_cut', canPlan=job.status==='waiting_input'&&job.current_stage==='edit_plan';
+  const packet=canPlan?await api(`/api/jobs/${jobId}/packet`):null;
   app.innerHTML=`<a href="#/queue" class="back-link">${icons.arrow}返回队列</a><div class="detail-head"><div class="detail-title"><span class="eyebrow">${escapeHtml(job.id)}</span><h1>${escapeHtml(job.title)}</h1><p>${escapeHtml(job.source_path)}</p></div><div class="detail-actions">${status(job.status)}${canRetry?'<button class="button ghost small" id="retryJob">重新排队</button>':''}${active?'<button class="button danger small" id="cancelJob">取消任务</button>':''}</div></div>
   ${job.error?`<div class="danger-box"><b>执行失败：</b> ${escapeHtml(job.error)}</div>`:''}${canApprove?'<div class="review-callout"><div><b>低清粗剪已就绪</b><p>先在下方播放实际视频；内容确认后再生成高清成片，避免无效高清渲染。</p></div><button class="button primary" id="approveRoughCut">粗剪通过，生成成片</button></div>':''}
+  ${canPlan?decisionPanel(job,packet):''}
   <div class="panel"><div class="panel-head"><div><h2>整体流程</h2><p>${Math.round(job.progress||0)}% · 当前节点 ${escapeHtml(job.current_stage||'—')}</p></div></div><div class="workflow">${job.stages.map((s,i)=>`<div class="stage ${s.status}"><span class="stage-dot">${s.status==='succeeded'?'✓':String(i+1).padStart(2,'0')}</span><b>${escapeHtml(s.name)}</b><small>${labels[s.status]||s.status}</small></div>`).join('')}</div></div>
   <div class="detail-grid"><div><div class="panel"><div class="panel-head"><div><h2>节点执行情况</h2><p>输入、结果与错误都保留在任务工作区</p></div></div><div class="stage-list">${job.stages.map((s,i)=>`<div class="stage-row"><span class="stage-index">${String(i+1).padStart(2,'0')}</span><div><h3>${escapeHtml(s.name)} · ${labels[s.status]||s.status}</h3><p>${escapeHtml(s.error||s.message||'等待上游节点')}</p></div><span class="stage-time">${formatTime(s.finished_at||s.started_at)}</span></div>`).join('')}</div></div>
   <div class="panel"><div class="panel-head"><div><h2>任务产物</h2><p>图片、时间线、日志与视频均可打开</p></div></div>${job.artifacts.length?`<div class="artifacts">${job.artifacts.map(artifactCard).join('')}</div>`:`<div class="empty">${icons.empty}<h3>暂无产物</h3><p>节点完成后会自动登记产物。</p></div>`}</div></div>
@@ -64,6 +85,13 @@ async function renderJob(jobId){
   $('#cancelJob')?.addEventListener('click',async()=>{await api(`/api/jobs/${jobId}/cancel`,{method:'POST',body:'{}'});toast('任务已取消');renderJob(jobId)});
   $('#retryJob')?.addEventListener('click',async()=>{await api(`/api/jobs/${jobId}/retry`,{method:'POST',body:'{}'});toast('任务已重新排队');renderJob(jobId)});
   $('#approveRoughCut')?.addEventListener('click',async e=>{e.currentTarget.disabled=true;try{await api(`/api/jobs/${jobId}/submit`,{method:'POST',body:JSON.stringify({verdict:'approve'})});toast('粗剪已通过，开始高清导出');renderJob(jobId)}catch(err){toast(err.message);e.currentTarget.disabled=false}});
+  if(canPlan){
+    const candidates=new Map((packet.candidate_digest||[]).map(c=>[String(c.i),c]));
+    const updateSelection=()=>{let count=0,duration=0;$$('[data-candidate]:checked').forEach(input=>{const c=candidates.get(input.dataset.candidate);count+=1;duration+=Number(c.e)-Number(c.s)});$('#selectionSummary').textContent=`已选 ${count} 段 · ${Math.round(duration)} 秒`;};
+    $$('[data-candidate]').forEach(input=>input.addEventListener('change',()=>{const select=$(`[data-module="${input.dataset.candidate}"]`);select.disabled=!input.checked;input.closest('.candidate-row').classList.toggle('selected',input.checked);updateSelection()}));
+    $('#copyAgentPrompt').addEventListener('click',async()=>{const text=$('.agent-handoff code').textContent;try{await navigator.clipboard.writeText(text);toast('执行指令已复制')}catch(_){toast('复制失败，请手动选择文字复制')}});
+    $('#editPlanForm').addEventListener('submit',async e=>{e.preventDefault();const error=$('#editPlanError'),button=$('#submitEditPlan');error.textContent='';const mainProduct=$('#mainProduct').value.trim();const picks=$$('[data-candidate]:checked').map(input=>{const c=candidates.get(input.dataset.candidate);return {src:1,start:Number(c.s),end:Number(c.e),text:c.t,role:candidateRole(c.c),module:$(`[data-module="${input.dataset.candidate}"]`).value};});if(!mainProduct){error.textContent='请填写主推款名称';return}if(!picks.some(p=>p.module==='hook_A')){error.textContent='请至少选择一条片段作为开头';return}if(!picks.some(p=>p.module==='body')){error.textContent='请至少选择一条片段作为正文';return}button.disabled=true;button.textContent='正在提交…';try{await api(`/api/jobs/${jobId}/submit`,{method:'POST',body:JSON.stringify({main_product:mainProduct,picks})});toast('编排已提交，任务继续执行');renderJob(jobId)}catch(err){error.textContent=err.message;button.disabled=false;button.textContent='提交编排并继续'}});
+  }
   $$('[data-preview]').forEach(x=>x.addEventListener('click',()=>previewArtifact(x.dataset.preview,x.dataset.mime,x.dataset.title)));
   if(['queued','running'].includes(job.status)){clearTimeout(state.poll);state.poll=setTimeout(()=>location.hash===`#/jobs/${jobId}`&&renderJob(jobId),1800);}
 }

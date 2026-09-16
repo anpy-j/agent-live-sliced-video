@@ -176,6 +176,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json_response(self.app.store.dashboard())
             if path == "/api/jobs":
                 return self.json_response({"jobs": self.app.store.list_jobs()})
+            if path.startswith("/api/jobs/") and path.endswith("/packet"):
+                parts = path.strip("/").split("/")
+                if len(parts) == 4:
+                    return self.json_response(self.app.runner.packet(parts[2]))
             if path.startswith("/api/jobs/"):
                 job_id = path.removeprefix("/api/jobs/").strip("/")
                 job = self.app.store.get_job(job_id)
