@@ -17,6 +17,7 @@ def tool_specs() -> list[dict[str, Any]]:
                 "title": {"type": "string"},
                 "brief": {"type": "string"},
                 "mode": {"type": "string", "enum": ["fast", "standard", "refined"]},
+                "ai_model": {"type": "string", "description": "如 workbuddy:auto、workbuddy:kimi-k2.5 或 manual"},
             }, "required": ["source_path"]},
         },
         {

@@ -67,6 +67,7 @@ class Store:
                   workspace TEXT NOT NULL,
                   error TEXT,
                   engine_state TEXT,
+                  model_provider TEXT NOT NULL DEFAULT 'manual',
                   model_name TEXT,
                   token_input INTEGER NOT NULL DEFAULT 0,
                   token_output INTEGER NOT NULL DEFAULT 0
@@ -117,21 +118,27 @@ class Store:
                 );
                 """
             )
+            columns = {row[1] for row in con.execute("PRAGMA table_info(jobs)").fetchall()}
+            if "model_provider" not in columns:
+                con.execute("ALTER TABLE jobs ADD COLUMN model_provider TEXT NOT NULL DEFAULT 'manual'")
 
     def create_job(self, *, title: str, source_path: str, brief: str, mode: str,
-                   workspace: str) -> str:
+                   workspace: str, model_provider: str = "manual",
+                   model_name: str | None = None) -> str:
         job_id = f"job_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
         now = utc_now()
         with self.connect() as con:
             con.execute(
-                "INSERT INTO jobs(id,title,source_path,brief,status,current_stage,progress,mode,created_at,updated_at,workspace) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (job_id, title, source_path, brief, "queued", "material_index", 0, mode, now, now, workspace),
+                "INSERT INTO jobs(id,title,source_path,brief,status,current_stage,progress,mode,created_at,updated_at,workspace,model_provider,model_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (job_id, title, source_path, brief, "queued", "material_index", 0, mode, now, now,
+                 workspace, model_provider, model_name),
             )
             con.executemany(
                 "INSERT INTO stages(job_id,stage_id,name,position) VALUES(?,?,?,?)",
                 [(job_id, stage_id, name, position) for stage_id, name, position in STAGE_DEFINITIONS],
             )
-        self.add_event(job_id, None, "info", "job_created", "任务已进入队列", {"mode": mode})
+        self.add_event(job_id, None, "info", "job_created", "任务已进入队列",
+                       {"mode": mode, "model_provider": model_provider, "model_name": model_name})
         return job_id
 
     def list_jobs(self, limit: int = 100) -> list[dict[str, Any]]:

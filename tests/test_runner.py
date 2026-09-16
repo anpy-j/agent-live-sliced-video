@@ -2,7 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from agent_video.db import Store
 from agent_video.runner import JobRunner
@@ -75,6 +75,40 @@ class RunnerTest(unittest.TestCase):
         duplicate["picks"][1].update({"start": 0, "end": 3})
         with self.assertRaisesRegex(ValueError, "重复"):
             self.runner._validate_edit_plan(duplicate)
+
+    def test_workbuddy_plan_is_validated_saved_and_requeued(self):
+        workspace = self.root / "job"
+        engine = workspace / "engine"
+        engine.mkdir(parents=True)
+        candidates = [
+            {"i": 1, "s": 1.0, "e": 3.0, "c": "hook", "t": "开头"},
+            {"i": 2, "s": 4.0, "e": 8.0, "c": "proof", "t": "正文"},
+        ]
+        (engine / "candidate_digest.json").write_text(json.dumps(candidates), encoding="utf-8")
+        job_id = self.store.create_job(title="白山茶", source_path="/tmp/source.mp4",
+                                       brief="", mode="fast", workspace=str(workspace),
+                                       model_provider="workbuddy", model_name="auto")
+        self.store.stage_wait(job_id, "edit_plan", "等待")
+        plan = {
+            "main_product": "白山茶",
+            "picks": [
+                {"src": 1, "start": 1.0, "end": 3.0, "text": "开头", "role": "hook", "module": "hook_A"},
+                {"src": 1, "start": 4.0, "end": 8.0, "text": "正文", "role": "proof", "module": "body"},
+            ],
+        }
+        provider = Mock()
+        provider.generate_plan.return_value = {
+            "plan": plan, "raw": {"result": plan}, "stderr": "", "seconds": 1.2,
+            "usage": {"input_tokens": 100, "output_tokens": 30},
+        }
+        with patch.object(self.runner, "_workbuddy", return_value=provider):
+            self.runner._run_ai_plan(self.store.get_job(job_id), engine)
+        job = self.store.get_job(job_id)
+        stage = next(item for item in job["stages"] if item["stage_id"] == "edit_plan")
+        self.assertEqual(stage["status"], "succeeded")
+        self.assertEqual(job["status"], "queued")
+        self.assertEqual(job["token_input"], 100)
+        self.assertEqual(json.loads((engine / "picks.json").read_text())["main_product"], "白山茶")
 
     def test_delivery_reuses_snapshot_without_full_pipeline(self):
         source = self.root / "source.mp4"

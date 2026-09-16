@@ -48,11 +48,18 @@
 
 .review-callout b { font-size: 13px; }
 .review-callout p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+.model-note { display: inline-block; margin-top: 7px; color: var(--blue); font-size: 11px; }
 
 .decision-panel { margin-bottom: 18px; border: 1px solid rgba(255, 198, 90, .32); border-radius: var(--radius); background: linear-gradient(145deg, rgba(255,198,90,.06), var(--panel) 34%); overflow: hidden; }
 .decision-head { padding: 18px; display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; border-bottom: 1px solid var(--line-soft); }
 .decision-head h2 { margin: 0 0 4px; font-size: 20px; }
 .decision-head p { margin: 0; color: var(--muted); font-size: 12px; }
+.ai-orchestrator { margin: 16px; padding: 16px; display: grid; grid-template-columns: minmax(260px,1fr) minmax(190px,.42fr) auto; align-items: end; gap: 14px; border: 1px solid rgba(168,255,53,.24); border-radius: 11px; background: rgba(168,255,53,.055); }
+.ai-orchestrator b { font-size: 13px; }.ai-orchestrator p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+.ai-orchestrator label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; }
+.external-agent { margin: 0 16px 16px; border: 1px solid var(--line-soft); border-radius: 10px; background: #0d131a; }
+.external-agent>summary { min-height: 46px; padding: 0 14px; display: flex; align-items: center; cursor: pointer; color: var(--muted); font-size: 12px; font-weight: 650; }
+.external-agent .agent-handoff { margin: 0; border: 0; border-top: 1px solid var(--line-soft); border-radius: 0; }
 .agent-handoff { margin: 16px; padding: 16px; display: grid; grid-template-columns: 1fr auto; align-items: end; gap: 18px; border: 1px solid rgba(104,167,255,.22); border-radius: 11px; background: rgba(104,167,255,.055); }
 .agent-handoff b { font-size: 13px; }
 .agent-handoff p { margin: 4px 0 10px; color: var(--muted); font-size: 12px; }
@@ -91,6 +98,7 @@
   .file-picker { grid-template-columns: 1fr; }
   .review-callout { align-items: stretch; flex-direction: column; }
   .decision-head,.agent-handoff { grid-template-columns: 1fr; align-items: stretch; flex-direction: column; }
+  .ai-orchestrator { grid-template-columns: 1fr; align-items: stretch; }
   .agent-handoff { display: grid; }
   .plan-toolbar { grid-template-columns: 1fr; }
   .candidate-row { grid-template-columns: 22px 1fr 82px; }

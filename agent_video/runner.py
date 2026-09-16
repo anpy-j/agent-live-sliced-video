@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .ai import WORKBUDDY_MODELS, WorkBuddyCli
 from .db import Store, utc_now
 
 
@@ -56,6 +57,26 @@ class JobRunner:
         self.store.update_job(job_id, status="cancelled", finished_at=utc_now())
         self.store.add_event(job_id, job.get("current_stage"), "warning", "cancelled", "任务已取消")
         return True
+
+    def workbuddy_info(self) -> dict[str, Any]:
+        return self._workbuddy().info()
+
+    def request_ai_plan(self, job_id: str, model: str) -> dict[str, Any]:
+        job = self.store.get_job(job_id)
+        if not job:
+            raise KeyError("任务不存在")
+        if job["current_stage"] != "edit_plan" or job["status"] not in {"waiting_input", "failed"}:
+            raise ValueError("当前任务不在可启动 AI 编排的状态")
+        if model not in {item[0] for item in WORKBUDDY_MODELS}:
+            raise ValueError("不支持的 WorkBuddy 模型")
+        digest = Path(job["workspace"]) / "engine" / "candidate_digest.json"
+        if not digest.is_file():
+            raise ValueError("候选摘要尚未生成")
+        self.store.update_job(job_id, model_provider="workbuddy", model_name=model, error=None)
+        self.store.update_stage(job_id, "edit_plan", status="pending", progress=0,
+                                message=f"已选择 WorkBuddy · {model}，等待执行", error=None)
+        self.enqueue(job_id)
+        return {"job_id": job_id, "queued": True, "provider": "workbuddy", "model": model}
 
     def submit(self, job_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         job = self.store.get_job(job_id)
@@ -185,7 +206,14 @@ class JobRunner:
         proxy_marker = workspace / "proxy_complete.json"
         approval = workspace / "rough_cut_approved.json"
         if not picks.is_file():
-            self._index_material(job, source, workspace, engine_work)
+            digest = engine_work / "candidate_digest.json"
+            if digest.is_file() and job.get("current_stage") == "edit_plan":
+                if job.get("model_provider") == "workbuddy":
+                    self._run_ai_plan(job, engine_work)
+                else:
+                    self.store.stage_wait(job["id"], "edit_plan", "等待手动完成音画编排决策")
+            else:
+                self._index_material(job, source, workspace, engine_work)
         elif not proxy_marker.is_file():
             self._build_proxy(job, source, workspace, engine_work, proxy_marker)
         elif approval.is_file():
@@ -205,10 +233,90 @@ class JobRunner:
         if summary.get("state") == "awaiting_picks":
             self.store.stage_done(job_id, "material_index", "素材索引与候选摘要已生成",
                                   {"source_seconds": summary.get("source_seconds"), "media": metadata})
-            self.store.stage_wait(job_id, "edit_plan", "等待 Agent 完成一次音画编排决策",
-                                  {"write": summary.get("write")})
+            if job.get("model_provider") == "workbuddy":
+                self._run_ai_plan(job, engine_work)
+            else:
+                self.store.stage_wait(job_id, "edit_plan", "等待手动完成音画编排决策",
+                                      {"write": summary.get("write")})
             return
         self._fail_engine(job_id, "material_index", code, summary)
+
+    def _workbuddy(self) -> WorkBuddyCli:
+        return WorkBuddyCli(Path(self.store.get_setting("workbuddy_cli_path", "")))
+
+    def _run_ai_plan(self, job: dict[str, Any], engine_work: Path) -> None:
+        job_id = job["id"]
+        model = str(job.get("model_name") or self.store.get_setting("workbuddy_default_model", "auto"))
+        candidates = self._read_json(engine_work / "candidate_digest.json", [])
+        self.store.stage_start(job_id, "edit_plan", f"正在调用 WorkBuddy · {model} 完成音画编排")
+        prompt = self._plan_prompt(job, candidates)
+        try:
+            result = self._workbuddy().generate_plan(
+                model=model, prompt=prompt, cwd=self.project_root,
+                on_process=lambda process: self._active.__setitem__(job_id, process),
+            )
+            plan = result["plan"]
+            self._validate_edit_plan(plan)
+            self._validate_candidate_picks(plan, candidates)
+            response_path = Path(job["workspace"]) / "workbuddy-plan-response.json"
+            response_path.write_text(json.dumps(result["raw"], ensure_ascii=False, indent=2), encoding="utf-8")
+            self.store.add_artifact(job_id, "edit_plan", "ai_response", "WorkBuddy 原始响应",
+                                    response_path, "application/json")
+            target = engine_work / "picks.json"
+            target.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+            self.store.add_artifact(job_id, "edit_plan", "decision", "AI 音画编排", target,
+                                    "application/json")
+            usage = result.get("usage") or {}
+            self.store.update_job(job_id, token_input=int(usage.get("input_tokens", 0)),
+                                  token_output=int(usage.get("output_tokens", 0)))
+            self.store.stage_done(job_id, "edit_plan",
+                                  f"WorkBuddy · {model} 已完成编排（{result['seconds']} 秒）",
+                                  {"model": model, "seconds": result["seconds"], "usage": usage,
+                                   "picks": len(plan["picks"])})
+            self.store.add_event(job_id, "edit_plan", "success", "ai_plan_completed",
+                                 f"AI 已选择 {len(plan['picks'])} 个片段", {"model": model, "usage": usage})
+            self.enqueue(job_id)
+        except Exception as exc:
+            current = self.store.get_job(job_id)
+            if current and current.get("status") == "cancelled":
+                return
+            self.store.add_event(job_id, "edit_plan", "warning", "ai_plan_failed", str(exc),
+                                 {"model": model})
+            self.store.stage_wait(job_id, "edit_plan",
+                                  f"WorkBuddy · {model} 编排失败，可换模型重试或手动决定",
+                                  {"model": model, "error": str(exc)})
+        finally:
+            self._active.pop(job_id, None)
+
+    @staticmethod
+    def _plan_prompt(job: dict[str, Any], candidates: list[dict[str, Any]]) -> str:
+        payload = json.dumps(candidates, ensure_ascii=False, separators=(",", ":"))
+        preference = job.get("brief") or "无额外偏好"
+        return f"""你是女装直播短视频的创意导演。请只从候选片段中选择一个最强成片方案，并返回符合 JSON Schema 的对象。
+
+任务：{job['title']}
+模式：{job['mode']}
+剪辑偏好：{preference}
+
+规则：
+1. 只做一个开头模块 hook_A，其余为 body；至少一条开头和一条正文。
+2. 只可原样复制候选里的 src=1、s、e、t，不得改写口播、杜撰时间或重复使用同一候选。
+3. 优先保证脱离直播后自然、可信、有观看欲；不要为了填时长保留弱信息。
+4. 避免开头与正文重复同一信息点；颜色、材质、工艺和效果表述必须保持原意。
+5. role 只能使用 hook/result/pain/proof/fit/material/craft/color/styling/scene/demo/close/bridge。
+6. 输出字段映射：start=s，end=e，text=t，src 固定为 1。
+
+候选片段：
+{payload}"""
+
+    @staticmethod
+    def _validate_candidate_picks(payload: dict[str, Any], candidates: list[dict[str, Any]]) -> None:
+        allowed = {(round(float(item["s"]), 3), round(float(item["e"]), 3), str(item["t"]))
+                   for item in candidates}
+        for index, pick in enumerate(payload["picks"], 1):
+            key = (round(float(pick["start"]), 3), round(float(pick["end"]), 3), str(pick["text"]))
+            if int(pick["src"]) != 1 or key not in allowed:
+                raise ValueError(f"AI 第 {index} 个选段不在候选摘要中")
 
     def _build_proxy(self, job: dict[str, Any], source: Path, workspace: Path,
                      engine_work: Path, proxy_marker: Path) -> None:

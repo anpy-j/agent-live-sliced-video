@@ -31,6 +31,14 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(stage["status"], "succeeded")
         self.assertEqual(stage["result"]["duration"], 42)
 
+    def test_job_persists_ai_provider_and_model(self):
+        job_id = self.store.create_job(title="测试", source_path="/tmp/source.mp4",
+                                       brief="", mode="fast", workspace="/tmp/job",
+                                       model_provider="workbuddy", model_name="kimi-k2.5")
+        job = self.store.get_job(job_id)
+        self.assertEqual(job["model_provider"], "workbuddy")
+        self.assertEqual(job["model_name"], "kimi-k2.5")
+
 
 if __name__ == "__main__":
     unittest.main()
