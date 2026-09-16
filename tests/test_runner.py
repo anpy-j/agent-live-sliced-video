@@ -142,6 +142,70 @@ class RunnerTest(unittest.TestCase):
         run_ai_plan.assert_called_once()
         self.assertEqual(run_ai_plan.call_args.args[0]["model_provider"], "opencode")
 
+    def test_editing_constraints_adapt_to_available_spoken_material(self):
+        candidates = [
+            {"s": 0, "e": 4}, {"s": 5, "e": 9}, {"s": 10, "e": 14},
+            {"s": 15, "e": 19}, {"s": 20, "e": 24}, {"s": 25, "e": 29},
+            {"s": 30, "e": 34}, {"s": 35, "e": 39}, {"s": 40, "e": 44},
+            {"s": 45, "e": 49}, {"s": 50, "e": 54}, {"s": 55, "e": 59},
+        ]
+        limits = self.runner._editing_constraints(candidates)
+        self.assertEqual(limits["min_total"], 31)
+        self.assertEqual(limits["max_total"], 48)
+        self.assertEqual(limits["min_segments"], 9)
+        prompt = self.runner._plan_prompt({"title": "测试", "mode": "fast", "brief": ""}, candidates)
+        self.assertIn("31-48 秒", prompt)
+        self.assertIn("proof 或 demo", prompt)
+
+    def test_validation_failure_message_lists_actionable_issues(self):
+        workspace = self.root / "job"
+        workspace.mkdir()
+        job_id = self.store.create_job(title="测试", source_path="/tmp/source.mp4",
+                                       brief="", mode="fast", workspace=str(workspace))
+        summary = {"state": "failed", "issues": [
+            {"code": "too_few_segments", "detail": "9 segments; minimum 14"},
+            {"code": "missing_proof", "detail": "timeline needs proof or demo"},
+        ]}
+        self.runner._fail_engine(job_id, "validation", 1, summary)
+        error = self.store.get_job(job_id)["error"]
+        self.assertIn("入选片段数量不足", error)
+        self.assertIn("缺少效果佐证或展示", error)
+
+    def test_validation_can_request_one_bounded_ai_repair(self):
+        workspace = self.root / "job"
+        engine = workspace / "engine"
+        engine.mkdir(parents=True)
+        candidates = [
+            {"i": 1, "s": 1.0, "e": 3.0, "c": "hook", "t": "开头"},
+            {"i": 2, "s": 4.0, "e": 8.0, "c": "proof", "t": "证明"},
+        ]
+        old = {"main_product": "旧方案", "picks": []}
+        (engine / "picks.json").write_text(json.dumps(old), encoding="utf-8")
+        job_id = self.store.create_job(
+            title="自动修复", source_path="/tmp/source.mp4", brief="", mode="fast",
+            workspace=str(workspace), model_provider="opencode", model_name="jysd/glm-5.3-flash",
+        )
+        plan = {"main_product": "新方案", "picks": [
+            {"src": 1, "start": 1.0, "end": 3.0, "text": "开头", "role": "hook", "module": "hook_A"},
+            {"src": 1, "start": 4.0, "end": 8.0, "text": "证明", "role": "proof", "module": "body"},
+        ]}
+        provider = Mock(display_name="OpenCode CLI")
+        provider.generate_plan.return_value = {
+            "plan": plan, "raw": {"result": plan}, "seconds": 1,
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+        }
+        job = self.store.get_job(job_id)
+        with patch.object(self.runner, "_provider", return_value=provider), \
+                patch.object(self.runner, "enqueue") as enqueue:
+            repaired = self.runner._try_validation_repair(
+                job, engine, {"issues": [{"code": "missing_proof", "detail": "missing"}]},
+                candidates,
+            )
+        self.assertTrue(repaired)
+        enqueue.assert_called_once_with(job_id)
+        self.assertEqual(json.loads((engine / "picks.json").read_text())["main_product"], "新方案")
+        self.assertEqual(json.loads((workspace / "validation-repair.json").read_text())["attempts"], 1)
+
     def test_delivery_reuses_snapshot_without_full_pipeline(self):
         source = self.root / "source.mp4"
         source.write_bytes(b"source")
