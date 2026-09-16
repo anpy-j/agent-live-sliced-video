@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any
 
 from .db import Store, utc_now
-from .ai import WORKBUDDY_MODELS
 from .mcp import McpEndpoint, tool_specs
 from .runner import JobRunner
 
@@ -41,6 +40,9 @@ class Application:
             "max_parallel_jobs": 1,
             "workbuddy_cli_path": "/Applications/AI/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy",
             "workbuddy_default_model": "auto",
+            "antigravity_cli_path": str(Path.home() / ".local" / "bin" / "agy"),
+            "codex_cli_path": shutil.which("codex") or "/opt/homebrew/bin/codex",
+            "ai_default_selection": "workbuddy:auto",
         }
         for key, value in defaults.items():
             if self.store.get_setting(key) is None:
@@ -57,19 +59,9 @@ class Application:
         if not title:
             raise ValueError("请填写成片名称")
         brief = str(payload.get("brief") or "").strip()
-        default_model = str(self.store.get_setting("workbuddy_default_model", "auto"))
-        ai_model = str(payload.get("ai_model") or f"workbuddy:{default_model}")
-        if ai_model == "manual":
-            model_provider, model_name = "manual", None
-        elif ai_model.startswith("workbuddy:"):
-            model_provider, model_name = "workbuddy", ai_model.split(":", 1)[1]
-            if model_name not in {item[0] for item in WORKBUDDY_MODELS}:
-                raise ValueError("不支持的 WorkBuddy 模型")
-        else:
-            model_provider = str(payload.get("model_provider") or "workbuddy")
-            model_name = str(payload.get("model_name") or self.store.get_setting("workbuddy_default_model", "auto"))
-        if model_provider not in {"manual", "workbuddy"}:
-            raise ValueError("不支持的 AI 提供方")
+        default_selection = str(self.store.get_setting("ai_default_selection", "workbuddy:auto"))
+        ai_model = str(payload.get("ai_model") or default_selection)
+        model_provider, model_name = self.runner.resolve_ai_selection(ai_model)
         placeholder = self.workspace_root / "pending"
         job_id = self.store.create_job(title=title, source_path=str(source), brief=brief,
                                        mode=mode, workspace=str(placeholder),
@@ -124,12 +116,16 @@ class Application:
 
     def settings(self) -> dict[str, Any]:
         keys = ["engine_path", "engine_python", "skill_path", "mcp_enabled", "mcp_token",
-                "max_parallel_jobs", "workbuddy_cli_path", "workbuddy_default_model"]
+                "max_parallel_jobs", "workbuddy_cli_path", "workbuddy_default_model",
+                "antigravity_cli_path", "codex_cli_path", "ai_default_selection"]
         return {key: self.store.get_setting(key) for key in keys}
 
     def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
         allowed = {"engine_path", "engine_python", "skill_path", "mcp_enabled", "max_parallel_jobs",
-                   "workbuddy_cli_path", "workbuddy_default_model"}
+                   "workbuddy_cli_path", "workbuddy_default_model", "antigravity_cli_path",
+                   "codex_cli_path", "ai_default_selection"}
+        if "ai_default_selection" in payload:
+            self.runner.resolve_ai_selection(str(payload["ai_default_selection"]))
         for key in allowed & payload.keys():
             self.store.set_setting(key, payload[key])
         return self.settings()
@@ -176,8 +172,8 @@ class Application:
         return token
 
     def ai_providers(self) -> dict[str, Any]:
-        default_model = self.store.get_setting("workbuddy_default_model", "auto")
-        return {"providers": [self.runner.workbuddy_info()], "default": f"workbuddy:{default_model}",
+        default_selection = self.store.get_setting("ai_default_selection", "workbuddy:auto")
+        return {"providers": self.runner.provider_infos(), "default": default_selection,
                 "manual": {"id": "manual", "name": "在编排节点手动决定"}}
 
 
@@ -245,8 +241,11 @@ class Handler(BaseHTTPRequestHandler):
                     if action == "submit":
                         return self.json_response(self.app.runner.submit(job_id, payload))
                     if action == "ai-plan":
-                        return self.json_response(self.app.runner.request_ai_plan(
-                            job_id, str(payload.get("model") or "auto")))
+                        selection = payload.get("ai_model")
+                        if not selection:
+                            selection = f"workbuddy:{payload.get('model') or 'auto'}"
+                        return self.json_response(
+                            self.app.runner.request_ai_plan(job_id, str(selection)))
             if path == "/api/mcp/token":
                 return self.json_response({"token": self.app.rotate_token()})
             if path == "/mcp":

@@ -97,11 +97,12 @@ class RunnerTest(unittest.TestCase):
             ],
         }
         provider = Mock()
+        provider.display_name = "WorkBuddy CLI"
         provider.generate_plan.return_value = {
             "plan": plan, "raw": {"result": plan}, "stderr": "", "seconds": 1.2,
             "usage": {"input_tokens": 100, "output_tokens": 30},
         }
-        with patch.object(self.runner, "_workbuddy", return_value=provider):
+        with patch.object(self.runner, "_provider", return_value=provider):
             self.runner._run_ai_plan(self.store.get_job(job_id), engine)
         job = self.store.get_job(job_id)
         stage = next(item for item in job["stages"] if item["stage_id"] == "edit_plan")
@@ -109,6 +110,19 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(job["status"], "queued")
         self.assertEqual(job["token_input"], 100)
         self.assertEqual(json.loads((engine / "picks.json").read_text())["main_product"], "白山茶")
+
+    def test_ai_provider_selection_accepts_codex_and_antigravity(self):
+        for provider_id, model in (("codex", "gpt-5.6-sol"),
+                                   ("antigravity", "gemini-3.1-pro-high")):
+            provider = Mock()
+            provider.display_name = provider_id
+            provider.info.return_value = {"available": True}
+            provider.models.return_value = [(model, model)]
+            provider.validate_model.side_effect = lambda value, expected=model: (
+                None if value == expected else (_ for _ in ()).throw(ValueError("unsupported")))
+            with patch.object(self.runner, "_provider", return_value=provider):
+                self.assertEqual(self.runner.resolve_ai_selection(f"{provider_id}:{model}"),
+                                 (provider_id, model))
 
     def test_delivery_reuses_snapshot_without_full_pipeline(self):
         source = self.root / "source.mp4"

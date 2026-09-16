@@ -49,6 +49,9 @@
 .review-callout b { font-size: 13px; }
 .review-callout p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
 .model-note { display: inline-block; margin-top: 7px; color: var(--blue); font-size: 11px; }
+.settings-section { grid-column: 1 / -1; padding: 14px 0 2px; border-top: 1px solid var(--line-soft); display: grid; gap: 4px; }
+.settings-section b { font-size: 13px; }
+.settings-section small { color: var(--muted); font-size: 11px; }
 
 .decision-panel { margin-bottom: 18px; border: 1px solid rgba(255, 198, 90, .32); border-radius: var(--radius); background: linear-gradient(145deg, rgba(255,198,90,.06), var(--panel) 34%); overflow: hidden; }
 .decision-head { padding: 18px; display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; border-bottom: 1px solid var(--line-soft); }

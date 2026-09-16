@@ -7,8 +7,8 @@
 - 本地任务队列与独立工作区
 - 五个真实生产节点的流程总览、执行事件、错误和结果
 - 图片、JSON、日志和 MP4 产物预览
-- LiveCut 可主动调用 WorkBuddy CLI 完成一次创意编排，也可回退为人工或外部 MCP Agent 决策
-- 新建任务和待编排节点都可选择 WorkBuddy 模型
+- LiveCut 可主动调用 WorkBuddy、Antigravity 或 Codex CLI 完成一次创意编排，也可回退为人工或外部 MCP Agent 决策
+- 新建任务和待编排节点都可选择 AI 提供方与模型
 - 在线编辑并自动备份薄 Skill
 - 带 Bearer Token 的 Streamable HTTP MCP 入口
 - 兼容现有 `douyin-womenswear-slicing` 执行引擎
@@ -41,7 +41,7 @@ python3 -m agent_video
 
 1. 页面或 MCP 创建任务。
 2. 「素材索引」读取媒体、转写并生成精简候选摘要。
-3. 「AI 音画编排」由 LiveCut 主动调用所选 WorkBuddy 模型，取得一个最强方案的 `picks`；AI 调用失败才进入人工决策。
+3. 「AI 音画编排」由 LiveCut 主动调用所选 CLI 模型，取得一个最强方案的 `picks`；AI 调用失败才进入人工决策。
 4. 「校验与自动修复」执行时间线边界和画面结构规则校验，不再单独等待联系表审核。
 5. 「低清粗剪与审片」在标准/精修模式生成 720p 粗剪并看实际视频确认；快速模式跳过独立粗剪，只渲染一次高清成片。
 6. 「高清导出与 QC」仅在粗剪通过后读取已验证双轨时间线，直接高清渲染，不再重复抽帧、对齐或验证；最终 MP4 使用任务的成片名称。
@@ -60,5 +60,5 @@ python3 -m unittest discover -s tests
 - MCP 需要 Bearer Token。
 - 素材使用绝对路径读取，不自动复制或上传。
 - 不向 MCP 暴露任意 Shell 执行接口。
-- WorkBuddy 编排进程禁用全部内置工具，只允许返回符合 JSON Schema 的编排结果。
+- WorkBuddy、Antigravity 与 Codex 编排进程均使用一次性会话和 JSON Schema；Antigravity/Codex 在隔离临时目录中运行，Codex 使用只读沙箱。
 - AI 选段必须逐条来自候选摘要；伪造时间、改写原声或重复画面会在渲染前被拒绝。
