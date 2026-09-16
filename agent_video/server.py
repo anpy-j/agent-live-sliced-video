@@ -42,6 +42,7 @@ class Application:
             "workbuddy_default_model": "auto",
             "antigravity_cli_path": str(Path.home() / ".local" / "bin" / "agy"),
             "codex_cli_path": shutil.which("codex") or "/opt/homebrew/bin/codex",
+            "opencode_cli_path": shutil.which("opencode") or str(Path.home() / ".opencode" / "bin" / "opencode"),
             "ai_default_selection": "workbuddy:auto",
         }
         for key, value in defaults.items():
@@ -117,13 +118,13 @@ class Application:
     def settings(self) -> dict[str, Any]:
         keys = ["engine_path", "engine_python", "skill_path", "mcp_enabled", "mcp_token",
                 "max_parallel_jobs", "workbuddy_cli_path", "workbuddy_default_model",
-                "antigravity_cli_path", "codex_cli_path", "ai_default_selection"]
+                "antigravity_cli_path", "codex_cli_path", "opencode_cli_path", "ai_default_selection"]
         return {key: self.store.get_setting(key) for key in keys}
 
     def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
         allowed = {"engine_path", "engine_python", "skill_path", "mcp_enabled", "max_parallel_jobs",
                    "workbuddy_cli_path", "workbuddy_default_model", "antigravity_cli_path",
-                   "codex_cli_path", "ai_default_selection"}
+                   "codex_cli_path", "opencode_cli_path", "ai_default_selection"}
         if "ai_default_selection" in payload:
             self.runner.resolve_ai_selection(str(payload["ai_default_selection"]))
         for key in allowed & payload.keys():
@@ -163,6 +164,8 @@ class Application:
                 "antigravity": {"mcpServers": {"live-slicer": {"url": url, "headers": {"Authorization": f"Bearer {token}"}}}},
                 "workbuddy": {"name": "live-slicer", "transport": "streamableHttp", "url": url,
                               "headers": {"Authorization": f"Bearer {token}"}},
+                "opencode": {"mcp": {"live-slicer": {"type": "remote", "url": url, "enabled": True,
+                                                        "headers": {"Authorization": f"Bearer {token}"}}}},
             },
         }
 

@@ -111,9 +111,10 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(job["token_input"], 100)
         self.assertEqual(json.loads((engine / "picks.json").read_text())["main_product"], "白山茶")
 
-    def test_ai_provider_selection_accepts_codex_and_antigravity(self):
+    def test_ai_provider_selection_accepts_codex_antigravity_and_opencode(self):
         for provider_id, model in (("codex", "gpt-5.6-sol"),
-                                   ("antigravity", "gemini-3.1-pro-high")):
+                                   ("antigravity", "gemini-3.1-pro-high"),
+                                   ("opencode", "openai/gpt-5.6-sol")):
             provider = Mock()
             provider.display_name = provider_id
             provider.info.return_value = {"available": True}

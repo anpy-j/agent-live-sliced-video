@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .ai import AntigravityCli, CliProvider, CodexCli, WorkBuddyCli
+from .ai import AntigravityCli, CliProvider, CodexCli, OpenCodeCli, WorkBuddyCli
 from .db import Store, utc_now
 
 
@@ -60,7 +60,7 @@ class JobRunner:
 
     def provider_infos(self) -> list[dict[str, Any]]:
         return [self._provider(provider_id).info()
-                for provider_id in ("workbuddy", "antigravity", "codex")]
+                for provider_id in ("workbuddy", "antigravity", "codex", "opencode")]
 
     def resolve_ai_selection(self, selection: str) -> tuple[str, str | None]:
         if selection == "manual":
@@ -248,7 +248,7 @@ class JobRunner:
         if summary.get("state") == "awaiting_picks":
             self.store.stage_done(job_id, "material_index", "素材索引与候选摘要已生成",
                                   {"source_seconds": summary.get("source_seconds"), "media": metadata})
-            if job.get("model_provider") in {"workbuddy", "antigravity", "codex"}:
+            if job.get("model_provider") in {"workbuddy", "antigravity", "codex", "opencode"}:
                 self._run_ai_plan(job, engine_work)
             else:
                 self.store.stage_wait(job_id, "edit_plan", "等待手动完成音画编排决策",
@@ -261,6 +261,7 @@ class JobRunner:
             "workbuddy": WorkBuddyCli(Path(self.store.get_setting("workbuddy_cli_path", ""))),
             "antigravity": AntigravityCli(Path(self.store.get_setting("antigravity_cli_path", ""))),
             "codex": CodexCli(Path(self.store.get_setting("codex_cli_path", ""))),
+            "opencode": OpenCodeCli(Path(self.store.get_setting("opencode_cli_path", ""))),
         }
         if provider_id not in providers:
             raise ValueError(f"不支持的 AI 提供方: {provider_id}")

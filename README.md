@@ -7,7 +7,7 @@
 - 本地任务队列与独立工作区
 - 五个真实生产节点的流程总览、执行事件、错误和结果
 - 图片、JSON、日志和 MP4 产物预览
-- LiveCut 可主动调用 WorkBuddy、Antigravity 或 Codex CLI 完成一次创意编排，也可回退为人工或外部 MCP Agent 决策
+- LiveCut 可主动调用 WorkBuddy、Antigravity、Codex 或 OpenCode CLI 完成一次创意编排，也可回退为人工或外部 MCP Agent 决策
 - 新建任务和待编排节点都可选择 AI 提供方与模型
 - 在线编辑并自动备份薄 Skill
 - 带 Bearer Token 的 Streamable HTTP MCP 入口
@@ -60,5 +60,5 @@ python3 -m unittest discover -s tests
 - MCP 需要 Bearer Token。
 - 素材使用绝对路径读取，不自动复制或上传。
 - 不向 MCP 暴露任意 Shell 执行接口。
-- WorkBuddy、Antigravity 与 Codex 编排进程均使用一次性会话和 JSON Schema；Antigravity/Codex 在隔离临时目录中运行，Codex 使用只读沙箱。
+- WorkBuddy、Antigravity、Codex 与 OpenCode 编排进程均只接收候选摘要并返回结构化 JSON；Antigravity、Codex、OpenCode 在隔离临时目录中运行，Codex 使用只读沙箱，OpenCode 使用专用禁工具 Agent。
 - AI 选段必须逐条来自候选摘要；伪造时间、改写原声或重复画面会在渲染前被拒绝。

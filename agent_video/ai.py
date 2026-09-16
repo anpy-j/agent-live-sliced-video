@@ -42,6 +42,23 @@ CODEX_MODELS = [
     ("gpt-5.5", "GPT-5.5"),
 ]
 
+OPENCODE_RECOMMENDED_MODELS = [
+    ("opencode-go/gpt-5.6-luna", "OpenCode Go · GPT-5.6 Luna"),
+    ("opencode-go/glm-5.3", "OpenCode Go · GLM 5.3"),
+    ("opencode-go/kimi-k3", "OpenCode Go · Kimi K3"),
+    ("opencode-go/deepseek-v4-pro", "OpenCode Go · DeepSeek V4 Pro"),
+    ("opencode-go/minimax-m3", "OpenCode Go · MiniMax M3"),
+    ("openai/gpt-6-astra", "OpenAI · GPT-6 Astra"),
+    ("openai/gpt-5.6-sol", "OpenAI · GPT-5.6 Sol"),
+    ("openai/gpt-5.6-terra", "OpenAI · GPT-5.6 Terra"),
+    ("openai/gpt-5.6-luna", "OpenAI · GPT-5.6 Luna"),
+    ("google/gemini-3.8-flash", "Google · Gemini 3.8 Flash"),
+    ("google/gemini-3.1-pro-preview", "Google · Gemini 3.1 Pro Preview"),
+    ("kimi-for-coding/k3", "Kimi · K3"),
+    ("deepseek/deepseek-v4-pro", "DeepSeek · V4 Pro"),
+    ("opencode/big-pickle", "OpenCode · Big Pickle"),
+]
+
 
 PLAN_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -104,11 +121,12 @@ class CliProvider:
 
     def _complete(self, command: list[str], *, cwd: Path,
                   on_process: Callable[[subprocess.Popen[str]], None] | None,
-                  timeout: int, started: float) -> tuple[str, str, float]:
+                  timeout: int, started: float,
+                  env_overrides: dict[str, str] | None = None) -> tuple[str, str, float]:
         process = subprocess.Popen(
             command, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace",
-            env={**os.environ, "NO_COLOR": "1", "TERM": "xterm"},
+            env={**os.environ, "NO_COLOR": "1", "TERM": "xterm", **(env_overrides or {})},
         )
         if on_process:
             on_process(process)
@@ -170,6 +188,12 @@ class CliProvider:
     def _find_usage(cls, value: Any) -> dict[str, int]:
         result = {"input_tokens": 0, "output_tokens": 0}
         if isinstance(value, dict):
+            tokens = value.get("tokens")
+            if isinstance(tokens, dict):
+                if isinstance(tokens.get("input"), (int, float)):
+                    result["input_tokens"] = int(tokens["input"])
+                if isinstance(tokens.get("output"), (int, float)):
+                    result["output_tokens"] = int(tokens["output"])
             for key, target in (("input_tokens", "input_tokens"), ("prompt_tokens", "input_tokens"),
                                 ("output_tokens", "output_tokens"), ("completion_tokens", "output_tokens")):
                 if isinstance(value.get(key), (int, float)):
@@ -308,3 +332,95 @@ class CodexCli(CliProvider):
             raise RuntimeError("Codex 已返回结果，但没有找到 main_product 和 picks")
         return {"plan": normalized, "raw": {"result": plan, "events": events},
                 "stderr": stderr.strip(), "seconds": seconds, "usage": self._find_usage(events)}
+
+
+class OpenCodeCli(CliProvider):
+    provider_id = "opencode"
+    display_name = "OpenCode CLI"
+    _model_cache: tuple[float, list[tuple[str, str]]] | None = None
+
+    def models(self) -> list[tuple[str, str]]:
+        now = time.monotonic()
+        cache = type(self)._model_cache
+        if cache and now - cache[0] < 300:
+            return cache[1]
+        choices = [("auto", "默认配置"), *OPENCODE_RECOMMENDED_MODELS]
+        if self.executable.is_file() and os.access(self.executable, os.X_OK):
+            try:
+                result = subprocess.run(
+                    [str(self.executable), "models"], capture_output=True, text=True,
+                    encoding="utf-8", errors="replace", timeout=20,
+                    env={**os.environ, "TERM": "xterm", "NO_COLOR": "1"},
+                )
+                available = {line.strip() for line in result.stdout.splitlines() if "/" in line}
+                discovered = [item for item in OPENCODE_RECOMMENDED_MODELS if item[0] in available]
+                if discovered:
+                    choices = [("auto", "默认配置"), *discovered]
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        type(self)._model_cache = (now, choices)
+        return choices
+
+    @staticmethod
+    def _runtime_config() -> str:
+        return json.dumps({
+            "$schema": "https://opencode.ai/config.json",
+            "plugin": [],
+            "agent": {
+                "livecut": {
+                    "description": "Return one structured LiveCut edit plan without using tools.",
+                    "mode": "primary",
+                    "steps": 1,
+                    "permission": {"*": "deny"},
+                    "tools": {"*": False},
+                },
+            },
+        }, ensure_ascii=False, separators=(",", ":"))
+
+    @classmethod
+    def _parse_events(cls, stdout: str) -> tuple[list[Any], dict[str, Any] | None]:
+        events: list[Any] = []
+        text_parts: list[str] = []
+        for line in stdout.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            events.append(event)
+            plan = cls._find_plan(event)
+            if plan:
+                return events, plan
+            if isinstance(event, dict):
+                part = event.get("part")
+                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                    text_parts.append(part["text"])
+                elif isinstance(event.get("text"), str):
+                    text_parts.append(event["text"])
+        return events, cls._find_plan("".join(text_parts)) if text_parts else None
+
+    def generate_plan(self, *, model: str, prompt: str, cwd: Path,
+                      on_process: Callable[[subprocess.Popen[str]], None] | None = None,
+                      timeout: int = 360) -> dict[str, Any]:
+        self._ensure_available()
+        self.validate_model(model)
+        schema = json.dumps(PLAN_SCHEMA, ensure_ascii=False, separators=(",", ":"))
+        constrained_prompt = f"{prompt}\n\n只输出 JSON，不要 Markdown。输出必须符合此 JSON Schema：{schema}"
+        started = time.monotonic()
+        with tempfile.TemporaryDirectory(prefix="livecut-opencode-") as temp_dir:
+            temp = Path(temp_dir)
+            command = [
+                str(self.executable), "run", "--format", "json", "--pure",
+                "--agent", "livecut", "--dir", str(temp),
+            ]
+            if model != "auto":
+                command.extend(["--model", model])
+            command.append(constrained_prompt)
+            stdout, stderr, seconds = self._complete(
+                command, cwd=temp, on_process=on_process, timeout=timeout, started=started,
+                env_overrides={"OPENCODE_CONFIG_CONTENT": self._runtime_config()},
+            )
+        events, plan = self._parse_events(stdout)
+        if not plan:
+            raise RuntimeError("OpenCode 已返回结果，但没有找到 main_product 和 picks")
+        return {"plan": plan, "raw": {"events": events}, "stderr": stderr.strip(),
+                "seconds": seconds, "usage": self._find_usage(events)}
