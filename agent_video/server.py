@@ -5,6 +5,8 @@ import mimetypes
 import os
 import secrets
 import shutil
+import subprocess
+import sys
 import threading
 import urllib.parse
 from http import HTTPStatus
@@ -49,6 +51,8 @@ class Application:
         if mode not in {"fast", "standard", "refined"}:
             raise ValueError("mode 必须是 fast、standard 或 refined")
         title = str(payload.get("title") or source.stem).strip()[:120]
+        if not title:
+            raise ValueError("请填写成片名称")
         brief = str(payload.get("brief") or "").strip()
         placeholder = self.workspace_root / "pending"
         job_id = self.store.create_job(title=title, source_path=str(source), brief=brief,
@@ -58,6 +62,23 @@ class Application:
         self.store.update_job(job_id, workspace=str(workspace))
         self.runner.enqueue(job_id)
         return self.store.get_job(job_id) or {"id": job_id}
+
+    def pick_video_file(self) -> dict[str, Any]:
+        if sys.platform != "darwin":
+            raise ValueError("当前系统暂不支持原生文件选择器")
+        script = 'POSIX path of (choose file with prompt "选择直播视频素材")'
+        result = subprocess.run(["/usr/bin/osascript", "-e", script], capture_output=True,
+                                text=True, encoding="utf-8", errors="replace", timeout=300)
+        if result.returncode:
+            message = result.stderr.strip()
+            if "User canceled" in message or "-128" in message:
+                return {"cancelled": True}
+            raise ValueError(message or "无法打开文件选择器")
+        path = Path(result.stdout.strip()).resolve()
+        allowed = {".mp4", ".mov", ".mkv", ".m4v", ".avi", ".webm", ".ts"}
+        if not path.is_file() or path.suffix.lower() not in allowed:
+            raise ValueError("请选择 MP4、MOV、MKV、M4V、AVI、WebM 或 TS 视频")
+        return {"cancelled": False, "path": str(path), "name": path.stem}
 
     def invoke_tool(self, name: str, args: dict[str, Any]) -> Any:
         if name == "create_video_job":
@@ -178,6 +199,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             path = self.path.partition("?")[0]
             payload = self.read_json()
+            if path == "/api/files/pick":
+                return self.json_response(self.app.pick_video_file())
             if path == "/api/jobs":
                 return self.json_response(self.app.create_job(payload), 201)
             if path.startswith("/api/jobs/"):

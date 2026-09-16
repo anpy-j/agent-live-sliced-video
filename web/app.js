@@ -3,6 +3,7 @@ const $$ = (selector, root=document) => [...root.querySelectorAll(selector)];
 const app = $('#app');
 const state = { dashboard:null, job:null, poll:null, mcp:null };
 const labels = {queued:'排队中',running:'执行中',waiting_input:'待决策',completed:'已完成',failed:'失败',cancelled:'已取消',pending:'等待',succeeded:'完成'};
+const stageLabels = {material_index:'素材索引',edit_plan:'AI 音画编排',validation:'校验与自动修复',rough_cut:'低清粗剪与审片',delivery:'高清导出与 QC'};
 const icons = {
   video:'<svg viewBox="0 0 24 24"><rect x="3" y="5" width="14" height="14" rx="2"/><path d="m17 10 4-2v8l-4-2z"/></svg>',
   file:'<svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v5h5M9 13h6M9 17h6"/></svg>',
@@ -29,7 +30,7 @@ function jobRows(jobs){
   if(!jobs.length)return `<div class="empty">${icons.empty}<h3>还没有剪辑任务</h3><p>添加第一段直播素材，流程节点、日志和产物会在这里持续更新。</p><button class="button primary" data-new-job>新建剪辑任务</button></div>`;
   return `<table class="jobs-table"><thead><tr><th>任务</th><th>当前节点</th><th>进度</th><th>状态</th><th></th></tr></thead><tbody>${jobs.map(j=>`<tr>
     <td><div class="job-name"><span class="job-thumb">${icons.video}</span><div><b>${escapeHtml(j.title)}</b><small>${escapeHtml(j.source_path)}</small></div></div></td>
-    <td><small>${escapeHtml(j.current_stage||'—')}</small></td>
+    <td><small>${escapeHtml(stageLabels[j.current_stage]||j.current_stage||'—')}</small></td>
     <td><div class="progress"><div class="progress-line"><i style="width:${Math.max(2,j.progress||0)}%"></i></div><small>${Math.round(j.progress||0)}% · ${formatTime(j.updated_at)}</small></div></td>
     <td>${status(j.status)}</td><td><button class="link-button" data-open-job="${j.id}">查看详情 →</button></td></tr>`).join('')}</tbody></table>`;
 }
@@ -53,15 +54,16 @@ function artifactCard(a){
 }
 async function renderJob(jobId){
   setCrumb('任务详情');loading();const job=await api(`/api/jobs/${jobId}`);state.job=job;
-  const active=['queued','running'].includes(job.status), canRetry=['failed','waiting_input','cancelled'].includes(job.status);
+  const active=['queued','running'].includes(job.status), canRetry=['failed','cancelled'].includes(job.status), canApprove=job.status==='waiting_input'&&job.current_stage==='rough_cut';
   app.innerHTML=`<a href="#/queue" class="back-link">${icons.arrow}返回队列</a><div class="detail-head"><div class="detail-title"><span class="eyebrow">${escapeHtml(job.id)}</span><h1>${escapeHtml(job.title)}</h1><p>${escapeHtml(job.source_path)}</p></div><div class="detail-actions">${status(job.status)}${canRetry?'<button class="button ghost small" id="retryJob">重新排队</button>':''}${active?'<button class="button danger small" id="cancelJob">取消任务</button>':''}</div></div>
-  ${job.error?`<div class="danger-box"><b>执行失败：</b> ${escapeHtml(job.error)}</div>`:''}
+  ${job.error?`<div class="danger-box"><b>执行失败：</b> ${escapeHtml(job.error)}</div>`:''}${canApprove?'<div class="review-callout"><div><b>低清粗剪已就绪</b><p>先在下方播放实际视频；内容确认后再生成高清成片，避免无效高清渲染。</p></div><button class="button primary" id="approveRoughCut">粗剪通过，生成成片</button></div>':''}
   <div class="panel"><div class="panel-head"><div><h2>整体流程</h2><p>${Math.round(job.progress||0)}% · 当前节点 ${escapeHtml(job.current_stage||'—')}</p></div></div><div class="workflow">${job.stages.map((s,i)=>`<div class="stage ${s.status}"><span class="stage-dot">${s.status==='succeeded'?'✓':String(i+1).padStart(2,'0')}</span><b>${escapeHtml(s.name)}</b><small>${labels[s.status]||s.status}</small></div>`).join('')}</div></div>
   <div class="detail-grid"><div><div class="panel"><div class="panel-head"><div><h2>节点执行情况</h2><p>输入、结果与错误都保留在任务工作区</p></div></div><div class="stage-list">${job.stages.map((s,i)=>`<div class="stage-row"><span class="stage-index">${String(i+1).padStart(2,'0')}</span><div><h3>${escapeHtml(s.name)} · ${labels[s.status]||s.status}</h3><p>${escapeHtml(s.error||s.message||'等待上游节点')}</p></div><span class="stage-time">${formatTime(s.finished_at||s.started_at)}</span></div>`).join('')}</div></div>
   <div class="panel"><div class="panel-head"><div><h2>任务产物</h2><p>图片、时间线、日志与视频均可打开</p></div></div>${job.artifacts.length?`<div class="artifacts">${job.artifacts.map(artifactCard).join('')}</div>`:`<div class="empty">${icons.empty}<h3>暂无产物</h3><p>节点完成后会自动登记产物。</p></div>`}</div></div>
   <div class="panel"><div class="panel-head"><div><h2>实时事件</h2><p>最近 200 条</p></div></div><div class="timeline">${job.events.map(e=>`<div class="event ${e.level}"><time>${formatTime(e.created_at)} · ${escapeHtml(e.stage_id||'任务')}</time><p>${escapeHtml(e.message)}</p></div>`).join('')||'<div class="empty">暂无事件</div>'}</div></div></div>`;
   $('#cancelJob')?.addEventListener('click',async()=>{await api(`/api/jobs/${jobId}/cancel`,{method:'POST',body:'{}'});toast('任务已取消');renderJob(jobId)});
   $('#retryJob')?.addEventListener('click',async()=>{await api(`/api/jobs/${jobId}/retry`,{method:'POST',body:'{}'});toast('任务已重新排队');renderJob(jobId)});
+  $('#approveRoughCut')?.addEventListener('click',async e=>{e.currentTarget.disabled=true;try{await api(`/api/jobs/${jobId}/submit`,{method:'POST',body:JSON.stringify({verdict:'approve'})});toast('粗剪已通过，开始高清导出');renderJob(jobId)}catch(err){toast(err.message);e.currentTarget.disabled=false}});
   $$('[data-preview]').forEach(x=>x.addEventListener('click',()=>previewArtifact(x.dataset.preview,x.dataset.mime,x.dataset.title)));
   if(['queued','running'].includes(job.status)){clearTimeout(state.poll);state.poll=setTimeout(()=>location.hash===`#/jobs/${jobId}`&&renderJob(jobId),1800);}
 }
@@ -93,8 +95,12 @@ async function renderSettings(){
   $('#settingsForm').addEventListener('submit',async e=>{e.preventDefault();const f=new FormData(e.target);await api('/api/settings',{method:'PUT',body:JSON.stringify({engine_path:f.get('engine_path'),engine_python:f.get('engine_python'),skill_path:f.get('skill_path'),max_parallel_jobs:Number(f.get('max_parallel_jobs')),mcp_enabled:f.get('mcp_enabled')==='on'})});toast('设置已保存')});
 }
 
+function openNewJob(){
+  $('#newJobError').textContent='';
+  $('#newJobDialog').showModal();
+}
 function bindCommon(){
-  $$('[data-new-job]').forEach(x=>x.addEventListener('click',()=>$('#newJobDialog').showModal()));
+  $$('[data-new-job]').forEach(x=>x.addEventListener('click',openNewJob));
   $$('[data-open-job]').forEach(x=>x.addEventListener('click',()=>location.hash=`#/jobs/${x.dataset.openJob}`));
 }
 async function route(){
@@ -102,10 +108,20 @@ async function route(){
   try{if(hash.startsWith('#/jobs/'))return renderJob(hash.split('/')[2]);if(hash==='#/queue')return renderQueue();if(hash==='#/skill')return renderSkill();if(hash==='#/mcp')return renderMcp();if(hash==='#/settings')return renderSettings();return renderDashboard();}catch(e){app.innerHTML=`<div class="danger-box">${escapeHtml(e.message)}</div>`;}
 }
 
-$('#newJobButton').addEventListener('click',()=>$('#newJobDialog').showModal());
+$('#newJobButton').addEventListener('click',openNewJob);
+$$('[data-close-new-job]').forEach(button=>button.addEventListener('click',()=>$('#newJobDialog').close()));
+$('#newJobDialog').addEventListener('cancel',e=>{e.preventDefault();$('#newJobDialog').close()});
+$('#newJobDialog').addEventListener('click',e=>{if(e.target===$('#newJobDialog'))$('#newJobDialog').close()});
+$('#newJobForm [name="title"]').addEventListener('input',e=>{e.target.dataset.userEdited=e.target.value?'true':''});
+$('#pickSourceButton').addEventListener('click',async e=>{
+  const button=e.currentTarget, source=$('#newJobForm [name="source_path"]'), title=$('#newJobForm [name="title"]');
+  button.disabled=true;button.textContent='正在选择…';$('#newJobError').textContent='';
+  try{const result=await api('/api/files/pick',{method:'POST',body:'{}'});if(result.cancelled)return;source.value=result.path;if(title.dataset.userEdited!=='true')title.value=result.name;}
+  catch(err){$('#newJobError').textContent=err.message}finally{button.disabled=false;button.textContent='选择视频';}
+});
 $('#newJobForm').addEventListener('submit',async e=>{
   e.preventDefault();const submit=$('#createJobSubmit');submit.disabled=true;submit.textContent='正在创建…';$('#newJobError').textContent='';
-  try{const f=new FormData(e.target);const data=await api('/api/jobs',{method:'POST',body:JSON.stringify(Object.fromEntries(f.entries()))});$('#newJobDialog').close();e.target.reset();location.hash=`#/jobs/${data.id}`;toast('任务已加入队列');}
+  try{const f=new FormData(e.target);const data=await api('/api/jobs',{method:'POST',body:JSON.stringify(Object.fromEntries(f.entries()))});$('#newJobDialog').close();e.target.reset();$('#newJobForm [name="title"]').dataset.userEdited='';location.hash=`#/jobs/${data.id}`;toast('任务已加入队列');}
   catch(err){$('#newJobError').textContent=err.message}finally{submit.disabled=false;submit.textContent='加入队列';}
 });
 $('#previewDialog .preview-close').addEventListener('click',()=>{$('#previewDialog video')?.pause();$('#previewDialog').close()});

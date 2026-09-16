@@ -11,15 +11,11 @@ from typing import Any, Iterator
 
 
 STAGE_DEFINITIONS = [
-    ("ingest", "读取素材", 5),
-    ("material_index", "素材理解", 18),
-    ("creative_direction", "创意方向", 34),
-    ("timeline", "时间线编排", 50),
-    ("visual_review", "画面复核", 64),
-    ("proxy_render", "低清粗剪", 76),
-    ("rough_cut_review", "成片审片", 86),
-    ("final_render", "高清渲染", 95),
-    ("quality_control", "发布前质检", 100),
+    ("material_index", "素材索引", 20),
+    ("edit_plan", "AI 音画编排", 40),
+    ("validation", "校验与自动修复", 60),
+    ("rough_cut", "低清粗剪与审片", 80),
+    ("delivery", "高清导出与 QC", 100),
 ]
 
 
@@ -129,7 +125,7 @@ class Store:
         with self.connect() as con:
             con.execute(
                 "INSERT INTO jobs(id,title,source_path,brief,status,current_stage,progress,mode,created_at,updated_at,workspace) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (job_id, title, source_path, brief, "queued", "ingest", 0, mode, now, now, workspace),
+                (job_id, title, source_path, brief, "queued", "material_index", 0, mode, now, now, workspace),
             )
             con.executemany(
                 "INSERT INTO stages(job_id,stage_id,name,position) VALUES(?,?,?,?)",
@@ -258,4 +254,3 @@ class Store:
             counts[job["status"]] = counts.get(job["status"], 0) + 1
         active = sum(counts.get(x, 0) for x in ("queued", "running", "waiting_input"))
         return {"jobs": jobs, "counts": counts, "active": active, "total": len(jobs)}
-

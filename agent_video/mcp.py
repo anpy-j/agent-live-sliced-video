@@ -36,7 +36,7 @@ def tool_specs() -> list[dict[str, Any]]:
         },
         {
             "name": "submit_stage_payload",
-            "description": "提交当前等待节点的结构化决策。创意节点提交 main_product+picks；画面节点提交 decisions。",
+            "description": "提交当前等待节点的结构化决策。编排节点提交 main_product+picks；粗剪节点提交 verdict=approve。",
             "inputSchema": {"type": "object", "properties": {
                 "job_id": {"type": "string"},
                 "payload": {"type": "object"},
@@ -97,4 +97,3 @@ class McpEndpoint:
     @staticmethod
     def _error(request_id: Any, code: int, message: str) -> dict[str, Any]:
         return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
-
