@@ -15,6 +15,8 @@ from typing import Any
 from .ai import AntigravityCli, CliProvider, CodexCli, OpenCodeCli, WorkBuddyCli
 from .db import Store, utc_now
 
+AI_PROVIDER_IDS = frozenset({"workbuddy", "antigravity", "codex", "opencode"})
+
 
 class JobRunner:
     """Run the local engine with one creative decision and one real-video review."""
@@ -223,7 +225,7 @@ class JobRunner:
         if not picks.is_file():
             digest = engine_work / "candidate_digest.json"
             if digest.is_file() and job.get("current_stage") == "edit_plan":
-                if job.get("model_provider") in {"workbuddy", "antigravity", "codex"}:
+                if job.get("model_provider") in AI_PROVIDER_IDS:
                     self._run_ai_plan(job, engine_work)
                 else:
                     self.store.stage_wait(job["id"], "edit_plan", "等待手动完成音画编排决策")
@@ -248,7 +250,7 @@ class JobRunner:
         if summary.get("state") == "awaiting_picks":
             self.store.stage_done(job_id, "material_index", "素材索引与候选摘要已生成",
                                   {"source_seconds": summary.get("source_seconds"), "media": metadata})
-            if job.get("model_provider") in {"workbuddy", "antigravity", "codex", "opencode"}:
+            if job.get("model_provider") in AI_PROVIDER_IDS:
                 self._run_ai_plan(job, engine_work)
             else:
                 self.store.stage_wait(job_id, "edit_plan", "等待手动完成音画编排决策",

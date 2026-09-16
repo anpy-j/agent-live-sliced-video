@@ -125,6 +125,23 @@ class RunnerTest(unittest.TestCase):
                 self.assertEqual(self.runner.resolve_ai_selection(f"{provider_id}:{model}"),
                                  (provider_id, model))
 
+    def test_waiting_opencode_job_runs_ai_plan_instead_of_returning_to_manual(self):
+        source = self.root / "source.mp4"
+        source.write_bytes(b"source")
+        workspace = self.root / "job"
+        engine = workspace / "engine"
+        engine.mkdir(parents=True)
+        (engine / "candidate_digest.json").write_text("[]", encoding="utf-8")
+        job_id = self.store.create_job(
+            title="OpenCode 编排", source_path=str(source), brief="", mode="fast",
+            workspace=str(workspace), model_provider="opencode", model_name="jysd/glm-5.3-flash",
+        )
+        self.store.stage_wait(job_id, "edit_plan", "等待编排")
+        with patch.object(self.runner, "_run_ai_plan") as run_ai_plan:
+            self.runner._run(self.store.get_job(job_id))
+        run_ai_plan.assert_called_once()
+        self.assertEqual(run_ai_plan.call_args.args[0]["model_provider"], "opencode")
+
     def test_delivery_reuses_snapshot_without_full_pipeline(self):
         source = self.root / "source.mp4"
         source.write_bytes(b"source")
