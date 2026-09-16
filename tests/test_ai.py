@@ -39,17 +39,17 @@ class WorkBuddyCliTest(unittest.TestCase):
                 patch("agent_video.ai.subprocess.run", return_value=result):
             self.assertIn(("gemini-test", "Gemini Test"), provider.models())
 
-    def test_opencode_models_are_curated_from_installed_models(self):
+    def test_opencode_models_include_every_installed_model(self):
         provider = OpenCodeCli(Path("/tmp/opencode"))
         OpenCodeCli._model_cache = None
-        result = Mock(stdout="openai/gpt-5.6-sol\nunknown/example\nopencode-go/glm-5.3\n")
+        result = Mock(stdout="openai/gpt-5.6-sol\njysd/glm-5.2-reasoning\nopencode-go/glm-5.3\n")
         with patch.object(Path, "is_file", return_value=True), \
                 patch("agent_video.ai.os.access", return_value=True), \
                 patch("agent_video.ai.subprocess.run", return_value=result):
             models = provider.models()
-        self.assertIn(("openai/gpt-5.6-sol", "OpenAI · GPT-5.6 Sol"), models)
-        self.assertIn(("opencode-go/glm-5.3", "OpenCode Go · GLM 5.3"), models)
-        self.assertNotIn(("unknown/example", "unknown/example"), models)
+        self.assertIn(("openai/gpt-5.6-sol", "gpt-5.6-sol"), models)
+        self.assertIn(("jysd/glm-5.2-reasoning", "glm-5.2-reasoning"), models)
+        self.assertIn(("opencode-go/glm-5.3", "glm-5.3"), models)
 
     def test_opencode_parses_jsonl_text_event(self):
         plan = {"main_product": "风衣", "picks": []}

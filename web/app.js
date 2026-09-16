@@ -61,7 +61,13 @@ function candidateRole(category){return ({hook:'hook',result:'result',color:'col
 function categoryLabel(category){return ({hook:'钩子',result:'效果',color:'颜色',craft:'工艺',material:'面料',fit:'版型',styling:'搭配',scene:'场景',demo:'展示',close:'收尾',pain:'痛点',proof:'佐证',other:'讲解'}[category]||category||'讲解');}
 function providerLabel(id){return ({workbuddy:'WorkBuddy',antigravity:'Antigravity',codex:'Codex',opencode:'OpenCode',manual:'手动'}[id]||id||'手动');}
 function providerModelOptions(providers,selected='workbuddy:auto'){
-  return (providers||[]).map(provider=>`<optgroup label="${escapeHtml(provider.name)}${provider.available?'':' · 不可用'}" ${provider.available?'':'disabled'}>${(provider.models||[]).map(model=>{const value=`${provider.id}:${model.id}`;return `<option value="${escapeHtml(value)}" ${value===selected?'selected':''}>${escapeHtml(model.name)}${model.id==='auto'?' · 推荐':''}</option>`}).join('')}</optgroup>`).join('');
+  return (providers||[]).map(provider=>{
+    const disabled=provider.available?'':'disabled';
+    if(provider.id!=='opencode')return `<optgroup label="${escapeHtml(provider.name)}${provider.available?'':' · 不可用'}" ${disabled}>${(provider.models||[]).map(model=>{const value=`${provider.id}:${model.id}`;return `<option value="${escapeHtml(value)}" ${value===selected?'selected':''}>${escapeHtml(model.name)}${model.id==='auto'?' · 推荐':''}</option>`}).join('')}</optgroup>`;
+    const groups=new Map();
+    (provider.models||[]).forEach(model=>{const group=model.id==='auto'?'默认配置':model.id.split('/',1)[0];if(!groups.has(group))groups.set(group,[]);groups.get(group).push(model)});
+    return [...groups].map(([group,models])=>`<optgroup label="OpenCode · ${escapeHtml(group==='默认配置'?group:group.toUpperCase())}${provider.available?'':' · 不可用'}" ${disabled}>${models.map(model=>{const value=`opencode:${model.id}`;return `<option value="${escapeHtml(value)}" ${value===selected?'selected':''}>${escapeHtml(model.name)}${model.id==='auto'?' · 推荐':''}</option>`}).join('')}</optgroup>`).join('');
+  }).join('');
 }
 function decisionPanel(job,packet,ai){
   const candidates=packet.candidate_digest||[];

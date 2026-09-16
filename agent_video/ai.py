@@ -42,21 +42,12 @@ CODEX_MODELS = [
     ("gpt-5.5", "GPT-5.5"),
 ]
 
-OPENCODE_RECOMMENDED_MODELS = [
-    ("opencode-go/gpt-5.6-luna", "OpenCode Go · GPT-5.6 Luna"),
-    ("opencode-go/glm-5.3", "OpenCode Go · GLM 5.3"),
-    ("opencode-go/kimi-k3", "OpenCode Go · Kimi K3"),
-    ("opencode-go/deepseek-v4-pro", "OpenCode Go · DeepSeek V4 Pro"),
-    ("opencode-go/minimax-m3", "OpenCode Go · MiniMax M3"),
-    ("openai/gpt-6-astra", "OpenAI · GPT-6 Astra"),
-    ("openai/gpt-5.6-sol", "OpenAI · GPT-5.6 Sol"),
-    ("openai/gpt-5.6-terra", "OpenAI · GPT-5.6 Terra"),
-    ("openai/gpt-5.6-luna", "OpenAI · GPT-5.6 Luna"),
-    ("google/gemini-3.8-flash", "Google · Gemini 3.8 Flash"),
-    ("google/gemini-3.1-pro-preview", "Google · Gemini 3.1 Pro Preview"),
-    ("kimi-for-coding/k3", "Kimi · K3"),
-    ("deepseek/deepseek-v4-pro", "DeepSeek · V4 Pro"),
-    ("opencode/big-pickle", "OpenCode · Big Pickle"),
+OPENCODE_FALLBACK_MODELS = [
+    ("opencode-go/gpt-5.6-luna", "gpt-5.6-luna"),
+    ("opencode-go/glm-5.3", "glm-5.3"),
+    ("openai/gpt-5.6-sol", "gpt-5.6-sol"),
+    ("google/gemini-3.8-flash", "gemini-3.8-flash"),
+    ("jysd/glm-5.3-flash", "glm-5.3-flash"),
 ]
 
 
@@ -344,7 +335,7 @@ class OpenCodeCli(CliProvider):
         cache = type(self)._model_cache
         if cache and now - cache[0] < 300:
             return cache[1]
-        choices = [("auto", "默认配置"), *OPENCODE_RECOMMENDED_MODELS]
+        choices = [("auto", "默认配置"), *OPENCODE_FALLBACK_MODELS]
         if self.executable.is_file() and os.access(self.executable, os.X_OK):
             try:
                 result = subprocess.run(
@@ -352,8 +343,14 @@ class OpenCodeCli(CliProvider):
                     encoding="utf-8", errors="replace", timeout=20,
                     env={**os.environ, "TERM": "xterm", "NO_COLOR": "1"},
                 )
-                available = {line.strip() for line in result.stdout.splitlines() if "/" in line}
-                discovered = [item for item in OPENCODE_RECOMMENDED_MODELS if item[0] in available]
+                discovered = []
+                seen = set()
+                for line in result.stdout.splitlines():
+                    model_id = line.strip()
+                    if not re.fullmatch(r"[A-Za-z0-9_.-]+/\S+", model_id) or model_id in seen:
+                        continue
+                    seen.add(model_id)
+                    discovered.append((model_id, model_id.split("/", 1)[1]))
                 if discovered:
                     choices = [("auto", "默认配置"), *discovered]
             except (OSError, subprocess.TimeoutExpired):
