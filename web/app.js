@@ -1,7 +1,7 @@
 const $ = (selector, root=document) => root.querySelector(selector);
 const $$ = (selector, root=document) => [...root.querySelectorAll(selector)];
 const app = $('#app');
-const state = { dashboard:null, job:null, poll:null, mcp:null };
+const state = { dashboard:null, job:null, poll:null, mcp:null, selectedStage:null };
 const labels = {queued:'排队中',running:'执行中',waiting_input:'待决策',completed:'已完成',failed:'失败',cancelled:'已取消',pending:'等待',succeeded:'完成'};
 const stageLabels = {material_index:'素材索引',edit_plan:'AI 音画编排',validation:'校验与自动修复',rough_cut:'低清粗剪与审片',delivery:'高清导出与 QC'};
 const icons = {
@@ -20,6 +20,8 @@ async function api(url, options={}) {
 }
 function escapeHtml(value=''){return String(value).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));}
 function formatTime(value){if(!value)return '—';const d=new Date(value);return new Intl.DateTimeFormat('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}).format(d);}
+function formatExactTime(value){if(!value)return '—';const d=new Date(value);return new Intl.DateTimeFormat('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}).format(d);}
+function durationText(seconds=0){seconds=Math.max(0,Math.floor(seconds));const h=Math.floor(seconds/3600),m=Math.floor(seconds%3600/60),s=seconds%60;return h?`${h} 小时 ${m} 分`:m?`${m} 分 ${s} 秒`:`${s} 秒`;}
 function bytes(value=0){if(value<1024)return `${value} B`;if(value<1048576)return `${(value/1024).toFixed(1)} KB`;return `${(value/1048576).toFixed(1)} MB`;}
 function clipTime(value=0){const seconds=Math.max(0,Number(value)||0),m=Math.floor(seconds/60),s=Math.floor(seconds%60);return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;}
 function status(value){return `<span class="status ${value}">${labels[value]||value}</span>`;}
@@ -116,16 +118,33 @@ function decisionPanel(job,packet,ai){
 function jobFlags(job){return {active:['queued','running'].includes(job.status),canRetry:['failed','cancelled'].includes(job.status),canApprove:job.status==='waiting_input'&&job.current_stage==='rough_cut',canPlan:job.status==='waiting_input'&&job.current_stage==='edit_plan'};}
 function jobControlsHtml(job){const {active,canRetry}=jobFlags(job);return `${status(job.status)}${canRetry?'<button class="button ghost small" id="retryJob">重新排队</button>':''}${active?'<button class="button danger small" id="cancelJob">取消任务</button>':''}`;}
 function jobActionsHtml(job,packet,ai){const {canApprove,canPlan}=jobFlags(job);return `${job.error?`<div class="danger-box"><b>执行失败：</b> ${escapeHtml(job.error)}</div>`:''}${canApprove?'<div class="review-callout"><div><b>低清粗剪已就绪</b><p>先在下方播放实际视频；内容确认后再生成高清成片，避免无效高清渲染。</p></div><button class="button primary" id="approveRoughCut">粗剪通过，生成成片</button></div>':''}${canPlan?decisionPanel(job,packet,ai):''}`;}
-function workflowHtml(job){return job.stages.map((s,i)=>`<div class="stage ${s.status}"><span class="stage-dot">${s.status==='succeeded'?'✓':String(i+1).padStart(2,'0')}</span><b>${escapeHtml(s.name)}</b><small>${labels[s.status]||s.status}</small></div>`).join('');}
-function stageListHtml(job){return job.stages.map((s,i)=>`<div class="stage-row"><span class="stage-index">${String(i+1).padStart(2,'0')}</span><div><h3>${escapeHtml(s.name)} · ${labels[s.status]||s.status}</h3><p>${escapeHtml(s.error||s.message||'等待上游节点')}</p></div><span class="stage-time">${formatTime(s.finished_at||s.started_at)}</span></div>`).join('');}
+function selectedStageId(job){return job.stages.some(s=>s.stage_id===state.selectedStage)?state.selectedStage:(job.current_stage||job.stages[0]?.stage_id);}
+function workflowHtml(job){const selected=selectedStageId(job);return job.stages.map((s,i)=>`<button type="button" class="stage ${s.status} ${s.stage_id===selected?'selected':''}" data-stage-select="${escapeHtml(s.stage_id)}" aria-pressed="${s.stage_id===selected}"><span class="stage-dot">${s.status==='succeeded'?'✓':String(i+1).padStart(2,'0')}</span><b>${escapeHtml(s.name)}</b><small>${labels[s.status]||s.status}</small></button>`).join('');}
+function payloadHtml(payload){if(!payload)return '';const value=JSON.stringify(payload,null,2);return `<details class="event-data"><summary>查看执行数据</summary><pre>${escapeHtml(value.length>6000?`${value.slice(0,6000)}\n……`:value)}</pre></details>`;}
+function stageDetailHtml(job){
+  const id=selectedStageId(job),stage=job.stages.find(s=>s.stage_id===id)||job.stages[0],events=job.events.filter(e=>e.stage_id===id),artifacts=job.artifacts.filter(a=>a.stage_id===id),isCurrent=job.current_stage===id&&['queued','running'].includes(job.status),runtime=job.runtime||{};
+  const runState=isCurrent?(runtime.process_active?'本地子进程正在执行':runtime.worker_alive?'工作进程正在处理':'后台服务未运行'):(labels[stage.status]||stage.status);
+  return `<div class="stage-detail-head"><div><span class="eyebrow">NODE ${String(job.stages.indexOf(stage)+1).padStart(2,'0')}</span><h2>${escapeHtml(stage.name)}</h2><p>${escapeHtml(stage.error||stage.message||'等待上游节点完成')}</p></div><span class="runtime-state ${isCurrent&&runtime.worker_alive?'live':''}"><i></i>${escapeHtml(runState)}</span></div>
+  <div class="stage-metrics"><div><span>开始时间</span><b>${formatExactTime(stage.started_at)}</b></div><div><span>运行耗时</span><b data-elapsed-from="${escapeHtml(stage.started_at||'')}" data-elapsed-to="${escapeHtml(stage.finished_at||'')}">${stage.started_at?durationText((new Date(stage.finished_at||Date.now())-new Date(stage.started_at))/1000):'—'}</b></div><div><span>最后心跳</span><b data-relative-time="${escapeHtml(job.updated_at||'')}">刚刚</b></div><div><span>节点进度</span><b>${Math.round((stage.progress||0)*100)}%</b></div></div>
+  ${isCurrent&&!runtime.worker_alive?'<div class="service-warning"><b>后台服务已停止</b><span>这不是正常等待；重启 LiveCut 后任务会恢复进队。</span></div>':''}
+  <div class="node-section"><div class="node-section-title"><b>该节点执行记录</b><span>${events.length} 条</span></div><div class="node-events">${events.length?events.map(e=>`<article class="node-event ${e.level}"><span class="event-mark"></span><div><time>${formatExactTime(e.created_at)}</time><p>${escapeHtml(e.message)}</p>${payloadHtml(e.payload)}</div></article>`).join(''):'<p class="muted-empty">还没有执行记录。</p>'}</div></div>
+  <div class="node-section"><div class="node-section-title"><b>该节点产物</b><span>${artifacts.length} 个</span></div>${artifacts.length?`<div class="node-artifacts">${artifacts.map(artifactCard).join('')}</div>`:'<p class="muted-empty">节点完成后，日志、报告或视频会出现在这里。</p>'}</div>`;
+}
+function stageDetailKey(job){const stage=job.stages.find(s=>s.stage_id===selectedStageId(job));return JSON.stringify([selectedStageId(job),job.status,job.current_stage,job.runtime,stage,job.events.filter(x=>x.stage_id===selectedStageId(job)).map(x=>x.id),job.artifacts.filter(x=>x.stage_id===selectedStageId(job)).map(x=>[x.id,x.size])]);}
 function artifactsHtml(job){return job.artifacts.length?`<div class="artifacts">${job.artifacts.map(artifactCard).join('')}</div>`:`<div class="empty">${icons.empty}<h3>暂无产物</h3><p>节点完成后会自动登记产物。</p></div>`;}
 function eventsHtml(job){return job.events.map(e=>`<div class="event ${e.level}"><time>${formatTime(e.created_at)} · ${escapeHtml(e.stage_id||'任务')}</time><p>${escapeHtml(e.message)}</p></div>`).join('')||'<div class="empty">暂无事件</div>';}
 function patchJobRegion(selector,html,key){const region=$(selector);if(!region||region.dataset.renderKey===key)return false;region.innerHTML=html;region.dataset.renderKey=key;return true;}
-function scheduleJobPoll(jobId,job){clearTimeout(state.poll);if(jobFlags(job).active)state.poll=setTimeout(()=>{if(location.hash===`#/jobs/${jobId}`)refreshJob(jobId).catch(()=>scheduleJobPoll(jobId,state.job||job))},1800);}
+function markJobDisconnected(){const indicator=$('#jobConnectionState');if(indicator){indicator.classList.add('offline');indicator.textContent='连接已中断 · 正在重试'}const runtime=$('.runtime-state.live');if(runtime){runtime.classList.remove('live');runtime.innerHTML='<i></i>无法连接后台服务';}}
+function scheduleJobPoll(jobId,job){clearTimeout(state.poll);if(jobFlags(job).active)state.poll=setTimeout(()=>{if(location.hash===`#/jobs/${jobId}`)refreshJob(jobId).catch(()=>{markJobDisconnected();scheduleJobPoll(jobId,state.job||job)})},1800);}
 function bindArtifactPreviews(root=document){$$('[data-preview]',root).forEach(x=>{if(x.dataset.previewBound)return;x.dataset.previewBound='true';x.addEventListener('click',()=>previewArtifact(x.dataset.preview,x.dataset.mime,x.dataset.title))});}
 function bindJobControls(jobId){
   $('#cancelJob')?.addEventListener('click',async()=>{await api(`/api/jobs/${jobId}/cancel`,{method:'POST',body:'{}'});toast('任务已取消');await refreshJob(jobId)});
   $('#retryJob')?.addEventListener('click',async()=>{await api(`/api/jobs/${jobId}/retry`,{method:'POST',body:'{}'});toast('任务已重新排队');await refreshJob(jobId)});
+}
+function bindStageSelection(jobId){$$('[data-stage-select]').forEach(button=>button.addEventListener('click',()=>{state.selectedStage=button.dataset.stageSelect;patchJobRegion('#jobWorkflow',workflowHtml(state.job),`selected:${state.selectedStage}:${JSON.stringify(state.job.stages.map(x=>[x.stage_id,x.status]))}`);patchJobRegion('#jobStageDetail',stageDetailHtml(state.job),stageDetailKey(state.job));bindStageSelection(jobId);bindArtifactPreviews($('#jobStageDetail'));updateLiveTimes()}));}
+function updateLiveTimes(){
+  $$('[data-elapsed-from]').forEach(el=>{if(!el.dataset.elapsedFrom)return;const end=el.dataset.elapsedTo?new Date(el.dataset.elapsedTo):new Date();el.textContent=durationText((end-new Date(el.dataset.elapsedFrom))/1000)});
+  $$('[data-relative-time]').forEach(el=>{if(!el.dataset.relativeTime)return;const seconds=Math.max(0,Math.floor((Date.now()-new Date(el.dataset.relativeTime))/1000));el.textContent=seconds<5?'刚刚':`${durationText(seconds)}前`});
 }
 function bindJobActions(jobId,job,packet){
   $('#approveRoughCut')?.addEventListener('click',async e=>{e.currentTarget.disabled=true;try{await api(`/api/jobs/${jobId}/submit`,{method:'POST',body:JSON.stringify({verdict:'approve'})});toast('粗剪已通过，开始高清导出');await refreshJob(jobId)}catch(err){toast(err.message);e.currentTarget.disabled=false}});
@@ -144,26 +163,28 @@ async function refreshJob(jobId){
   const job=await api(`/api/jobs/${jobId}`),flags=jobFlags(job),actionKey=JSON.stringify([job.status,job.current_stage,job.error,job.model_provider,job.model_name]),actionsChanged=$('#jobActions')?.dataset.renderKey!==actionKey;
   let packet=null,ai=null;if(flags.canPlan&&actionsChanged)[packet,ai]=await Promise.all([api(`/api/jobs/${jobId}/packet`),api('/api/ai/providers')]);
   state.job=job;
+  const connection=$('#jobConnectionState');if(connection){connection.classList.remove('offline');connection.textContent='实时连接正常';}
   if(patchJobRegion('#jobControls',jobControlsHtml(job),JSON.stringify([job.status,flags.active,flags.canRetry])))bindJobControls(jobId);
   const note=$('#jobModelNote');if(note){note.textContent=job.model_provider&&job.model_provider!=='manual'?`AI 编排：${providerLabel(job.model_provider)} · ${job.model_name||'auto'}`:'';note.hidden=!note.textContent;}
   const beforeActionScroll=window.scrollY;if(actionsChanged&&patchJobRegion('#jobActions',jobActionsHtml(job,packet,ai),actionKey)){bindJobActions(jobId,job,packet);window.scrollTo(0,Math.min(beforeActionScroll,Math.max(0,document.documentElement.scrollHeight-window.innerHeight)));}
-  $('#jobProgressMeta').textContent=`${Math.round(job.progress||0)}% · 当前节点 ${job.current_stage||'—'}`;
-  patchJobRegion('#jobWorkflow',workflowHtml(job),JSON.stringify(job.stages.map(x=>[x.stage_id,x.status])));
-  patchJobRegion('#jobStageList',stageListHtml(job),JSON.stringify(job.stages.map(x=>[x.stage_id,x.status,x.message,x.error,x.finished_at,x.started_at])));
+  $('#jobProgressMeta').textContent=`${Math.round(job.progress||0)}% · 当前节点 ${stageLabels[job.current_stage]||job.current_stage||'—'}`;
+  if(patchJobRegion('#jobWorkflow',workflowHtml(job),`${selectedStageId(job)}:${JSON.stringify(job.stages.map(x=>[x.stage_id,x.status]))}`))bindStageSelection(jobId);
+  if(patchJobRegion('#jobStageDetail',stageDetailHtml(job),stageDetailKey(job))){bindArtifactPreviews($('#jobStageDetail'));updateLiveTimes();}
+  const heartbeat=$('[data-relative-time]');if(heartbeat)heartbeat.dataset.relativeTime=job.updated_at||'';
   if(patchJobRegion('#jobArtifacts',artifactsHtml(job),JSON.stringify(job.artifacts.map(x=>[x.id,x.size,x.title]))))bindArtifactPreviews($('#jobArtifacts'));
   patchJobRegion('#jobEvents',eventsHtml(job),JSON.stringify(job.events.map(x=>x.id)));
   scheduleJobPoll(jobId,job);
 }
 async function renderJob(jobId){
-  setCrumb('任务详情');loading();const job=await api(`/api/jobs/${jobId}`),flags=jobFlags(job);state.job=job;
+  setCrumb('任务详情');loading();const job=await api(`/api/jobs/${jobId}`),flags=jobFlags(job);state.job=job;state.selectedStage=job.current_stage||job.stages[0]?.stage_id;
   const decisionData=flags.canPlan?await Promise.all([api(`/api/jobs/${jobId}/packet`),api('/api/ai/providers')]):[null,null],packet=decisionData[0],ai=decisionData[1],actionKey=JSON.stringify([job.status,job.current_stage,job.error,job.model_provider,job.model_name]),stageKey=JSON.stringify(job.stages.map(x=>[x.stage_id,x.status,x.message,x.error,x.finished_at,x.started_at])),artifactKey=JSON.stringify(job.artifacts.map(x=>[x.id,x.size,x.title])),eventKey=JSON.stringify(job.events.map(x=>x.id));
   app.innerHTML=`<a href="#/queue" class="back-link">${icons.arrow}返回队列</a><div class="detail-head"><div class="detail-title"><span class="eyebrow">${escapeHtml(job.id)}</span><h1>${escapeHtml(job.title)}</h1><p>${escapeHtml(job.source_path)}</p><small class="model-note" id="jobModelNote" ${job.model_provider&&job.model_provider!=='manual'?'':'hidden'}>${job.model_provider&&job.model_provider!=='manual'?`AI 编排：${escapeHtml(providerLabel(job.model_provider))} · ${escapeHtml(job.model_name||'auto')}`:''}</small></div><div class="detail-actions" id="jobControls" data-render-key="${escapeHtml(JSON.stringify([job.status,flags.active,flags.canRetry]))}">${jobControlsHtml(job)}</div></div>
   <div id="jobActions" data-render-key="${escapeHtml(actionKey)}">${jobActionsHtml(job,packet,ai)}</div>
-  <div class="panel"><div class="panel-head"><div><h2>整体流程</h2><p id="jobProgressMeta">${Math.round(job.progress||0)}% · 当前节点 ${escapeHtml(job.current_stage||'—')}</p></div></div><div class="workflow" id="jobWorkflow" data-render-key="${escapeHtml(JSON.stringify(job.stages.map(x=>[x.stage_id,x.status])))}">${workflowHtml(job)}</div></div>
-  <div class="detail-grid"><div><div class="panel"><div class="panel-head"><div><h2>节点执行情况</h2><p>输入、结果与错误都保留在任务工作区</p></div></div><div class="stage-list" id="jobStageList" data-render-key="${escapeHtml(stageKey)}">${stageListHtml(job)}</div></div>
+  <div class="panel"><div class="panel-head"><div><h2>整体流程</h2><p id="jobProgressMeta">${Math.round(job.progress||0)}% · 当前节点 ${escapeHtml(stageLabels[job.current_stage]||job.current_stage||'—')}</p></div><div class="workflow-meta"><span class="connection-state" id="jobConnectionState"><i></i>实时连接正常</span><span class="panel-hint">点击节点查看详情</span></div></div><div class="workflow" id="jobWorkflow" data-render-key="${escapeHtml(`${selectedStageId(job)}:${JSON.stringify(job.stages.map(x=>[x.stage_id,x.status]))}`)}">${workflowHtml(job)}</div></div>
+  <div class="detail-grid"><div><div class="panel stage-detail" id="jobStageDetail" data-render-key="${escapeHtml(stageDetailKey(job))}">${stageDetailHtml(job)}</div>
   <div class="panel"><div class="panel-head"><div><h2>任务产物</h2><p>图片、时间线、日志与视频均可打开</p></div></div><div id="jobArtifacts" data-render-key="${escapeHtml(artifactKey)}">${artifactsHtml(job)}</div></div></div>
   <div class="panel"><div class="panel-head"><div><h2>实时事件</h2><p>后台局部更新，不影响滚动和操作</p></div></div><div class="timeline" id="jobEvents" data-render-key="${escapeHtml(eventKey)}">${eventsHtml(job)}</div></div></div>`;
-  bindJobControls(jobId);bindJobActions(jobId,job,packet);bindArtifactPreviews(app);scheduleJobPoll(jobId,job);
+  bindJobControls(jobId);bindJobActions(jobId,job,packet);bindStageSelection(jobId);bindArtifactPreviews(app);updateLiveTimes();scheduleJobPoll(jobId,job);
 }
 
 async function previewArtifact(id,mime,title){
@@ -228,6 +249,6 @@ $('#newJobForm').addEventListener('submit',async e=>{
 $('#previewDialog .preview-close').addEventListener('click',()=>{$('#previewDialog video')?.pause();$('#previewDialog').close()});
 $('#menuButton').addEventListener('click',()=>$('.sidebar').classList.toggle('open'));
 window.addEventListener('hashchange',()=>{$('.sidebar').classList.remove('open');route()});
-setInterval(()=>{$('#clock').textContent=new Intl.DateTimeFormat('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit'}).format(new Date())},1000);
+setInterval(()=>{$('#clock').textContent=new Intl.DateTimeFormat('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit'}).format(new Date());updateLiveTimes()},1000);
 api('/api/health').then(x=>$('#systemVersion').textContent=`v${x.version} · MCP online`).catch(()=>$('#systemVersion').textContent='连接失败');
 route();

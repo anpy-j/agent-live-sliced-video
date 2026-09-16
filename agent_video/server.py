@@ -206,6 +206,8 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/api/jobs/"):
                 job_id = path.removeprefix("/api/jobs/").strip("/")
                 job = self.app.store.get_job(job_id)
+                if job:
+                    job["runtime"] = self.app.runner.runtime(job_id)
                 return self.json_response(job or {"error": "任务不存在"}, 200 if job else 404)
             if path == "/api/settings":
                 return self.json_response(self.app.settings())

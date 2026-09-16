@@ -206,6 +206,42 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(json.loads((engine / "picks.json").read_text())["main_product"], "新方案")
         self.assertEqual(json.loads((workspace / "validation-repair.json").read_text())["attempts"], 1)
 
+    def test_interrupted_validation_repair_resumes_only_once(self):
+        workspace = self.root / "job"
+        engine = workspace / "engine"
+        engine.mkdir(parents=True)
+        candidates = [
+            {"i": 1, "s": 1.0, "e": 3.0, "c": "hook", "t": "开头"},
+            {"i": 2, "s": 4.0, "e": 8.0, "c": "proof", "t": "证明"},
+        ]
+        (engine / "picks.json").write_text(
+            json.dumps({"main_product": "旧方案", "picks": []}), encoding="utf-8")
+        (workspace / "validation-repair.json").write_text(
+            json.dumps({"attempts": 1, "status": "running", "started_at": "2026-01-01T00:00:00Z"}),
+            encoding="utf-8",
+        )
+        job_id = self.store.create_job(
+            title="恢复修复", source_path="/tmp/source.mp4", brief="", mode="fast",
+            workspace=str(workspace), model_provider="opencode", model_name="jysd/glm-5.3-flash",
+        )
+        provider = Mock(display_name="OpenCode CLI")
+        provider.generate_plan.side_effect = RuntimeError("模型失败")
+        with patch.object(self.runner, "_provider", return_value=provider):
+            repaired = self.runner._try_validation_repair(
+                self.store.get_job(job_id), engine,
+                {"issues": [{"code": "missing_proof", "detail": "missing"}]}, candidates,
+            )
+        self.assertFalse(repaired)
+        marker = json.loads((workspace / "validation-repair.json").read_text())
+        self.assertEqual(marker["resumes"], 1)
+        self.assertEqual(marker["status"], "failed")
+        with patch.object(self.runner, "_provider") as provider_lookup:
+            self.assertFalse(self.runner._try_validation_repair(
+                self.store.get_job(job_id), engine,
+                {"issues": [{"code": "missing_proof", "detail": "missing"}]}, candidates,
+            ))
+        provider_lookup.assert_not_called()
+
     def test_delivery_reuses_snapshot_without_full_pipeline(self):
         source = self.root / "source.mp4"
         source.write_bytes(b"source")

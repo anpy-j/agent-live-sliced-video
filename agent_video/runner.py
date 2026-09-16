@@ -61,6 +61,30 @@ class JobRunner:
         self.store.add_event(job_id, job.get("current_stage"), "warning", "cancelled", "任务已取消")
         return True
 
+    def runtime(self, job_id: str) -> dict[str, Any]:
+        process = self._active.get(job_id)
+        return {
+            "worker_alive": bool(self._thread and self._thread.is_alive()),
+            "process_active": bool(process and process.poll() is None),
+            "process_id": process.pid if process and process.poll() is None else None,
+        }
+
+    def _heartbeat(self, job_id: str, stop: threading.Event) -> None:
+        """Keep the job visibly alive while a CLI is silent or buffering output."""
+        while not stop.wait(2):
+            self.store.touch_job(job_id)
+
+    def _with_heartbeat(self, job_id: str, operation: Any) -> Any:
+        stop = threading.Event()
+        thread = threading.Thread(target=self._heartbeat, args=(job_id, stop),
+                                  name=f"heartbeat-{job_id}", daemon=True)
+        thread.start()
+        try:
+            return operation()
+        finally:
+            stop.set()
+            thread.join(timeout=1)
+
     def provider_infos(self) -> list[dict[str, Any]]:
         return [self._provider(provider_id).info()
                 for provider_id in ("workbuddy", "antigravity", "codex", "opencode")]
@@ -280,10 +304,10 @@ class JobRunner:
                                f"正在调用 {provider.display_name} · {model} 完成音画编排")
         prompt = self._plan_prompt(job, candidates)
         try:
-            result = provider.generate_plan(
+            result = self._with_heartbeat(job_id, lambda: provider.generate_plan(
                 model=model, prompt=prompt, cwd=self.project_root,
                 on_process=lambda process: self._active.__setitem__(job_id, process),
-            )
+            ))
             plan = result["plan"]
             self._validate_edit_plan(plan)
             self._validate_candidate_picks(plan, candidates)
@@ -389,6 +413,10 @@ class JobRunner:
         ]
         code, summary = self._execute(job_id, source, workspace, engine_work, "validation", options)
         if summary.get("state") != "complete" or not summary.get("publish_ready"):
+            issues = summary.get("issues") or []
+            self.store.add_event(job_id, "validation", "warning", "validation_checked",
+                                 f"规则校验完成，发现 {len(issues)} 个需要修正的问题",
+                                 {"issues": issues, "state": summary.get("state")})
             if self._try_validation_repair(job, engine_work, summary, candidates):
                 return
             self._fail_engine(job_id, "validation", code, summary)
@@ -422,7 +450,11 @@ class JobRunner:
         provider_id = str(job.get("model_provider") or "manual")
         marker = Path(job["workspace"]) / "validation-repair.json"
         previous = self._read_json(marker, {})
-        if not issues or provider_id not in AI_PROVIDER_IDS or int(previous.get("attempts", 0)) >= 1:
+        attempts = int(previous.get("attempts", 0))
+        resumes = int(previous.get("resumes", 0))
+        interrupted = (attempts == 1 and previous.get("status") in {None, "running"}
+                       and resumes < 1)
+        if not issues or provider_id not in AI_PROVIDER_IDS or (attempts >= 1 and not interrupted):
             return False
         provider = self._provider(provider_id)
         model = str(job.get("model_name") or "auto")
@@ -430,17 +462,22 @@ class JobRunner:
         repair_prompt = self._plan_prompt(job, candidates) + "\n\n上一版未通过校验。必须返回完整替代方案，不是补丁。\n" + \
             "上一版：" + json.dumps(old_plan, ensure_ascii=False, separators=(",", ":")) + \
             "\n校验错误：" + json.dumps(issues, ensure_ascii=False, separators=(",", ":"))
-        marker.write_text(json.dumps({"attempts": 1, "issues": issues, "started_at": utc_now()},
+        marker.write_text(json.dumps({"attempts": 1, "resumes": resumes + int(interrupted),
+                                     "status": "running", "issues": issues,
+                                     "started_at": previous.get("started_at") or utc_now(),
+                                     "resumed_at": utc_now() if interrupted else None},
                                      ensure_ascii=False, indent=2), encoding="utf-8")
         self.store.update_stage(job["id"], "validation", status="running", progress=0.5,
-                                message=f"校验未通过，正在由 {provider.display_name} 自动修正一次")
+                                message=f"校验未通过，正在由 {provider.display_name} 自动修正编排")
         self.store.add_event(job["id"], "validation", "warning", "auto_repair_started",
-                             "校验发现结构问题，正在自动修正编排", {"issues": issues})
+                             "上次修复被中断，正在恢复自动修复" if interrupted else
+                             "校验发现结构问题，正在自动修正编排",
+                             {"issues": issues, "resumed": interrupted, "model": model})
         try:
-            result = provider.generate_plan(
+            result = self._with_heartbeat(job["id"], lambda: provider.generate_plan(
                 model=model, prompt=repair_prompt, cwd=self.project_root,
                 on_process=lambda process: self._active.__setitem__(job["id"], process),
-            )
+            ))
             plan = result["plan"]
             self._validate_edit_plan(plan)
             self._validate_candidate_picks(plan, candidates)
@@ -452,6 +489,10 @@ class JobRunner:
                                     f"{provider.display_name} 自动修复响应", response,
                                     "application/json")
             usage = result.get("usage") or {}
+            marker.write_text(json.dumps({"attempts": 1, "resumes": resumes + int(interrupted),
+                                         "status": "completed", "issues": issues,
+                                         "completed_at": utc_now(), "seconds": result.get("seconds")},
+                                         ensure_ascii=False, indent=2), encoding="utf-8")
             self.store.update_job(
                 job["id"], error=None,
                 token_input=int(job.get("token_input") or 0) + int(usage.get("input_tokens", 0)),
@@ -466,6 +507,12 @@ class JobRunner:
             return True
         except Exception as exc:
             summary["auto_repair_error"] = str(exc)
+            marker.write_text(json.dumps({"attempts": 1, "resumes": resumes + int(interrupted),
+                                         "status": "failed", "issues": issues,
+                                         "failed_at": utc_now(), "error": str(exc)},
+                                         ensure_ascii=False, indent=2), encoding="utf-8")
+            self.store.add_event(job["id"], "validation", "error", "auto_repair_failed",
+                                 f"自动修复未完成：{exc}", {"model": model})
             return False
         finally:
             self._active.pop(job["id"], None)
@@ -554,6 +601,10 @@ class JobRunner:
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                    text=True, encoding="utf-8", errors="replace")
         self._active[job_id] = process
+        heartbeat_stop = threading.Event()
+        heartbeat = threading.Thread(target=self._heartbeat, args=(job_id, heartbeat_stop),
+                                     name=f"heartbeat-{job_id}", daemon=True)
+        heartbeat.start()
         lines: list[str] = []
         assert process.stdout
         for line in process.stdout:
@@ -563,6 +614,8 @@ class JobRunner:
             self.store.update_stage(job_id, "delivery", progress=progress,
                                     message=f"{label}：{line.strip()[-120:] or '处理中'}")
         code = process.wait()
+        heartbeat_stop.set()
+        heartbeat.join(timeout=1)
         self._active.pop(job_id, None)
         step = {"name": label, "seconds": round(time.monotonic() - started, 2), "ok": code == 0}
         if code:
@@ -617,6 +670,10 @@ class JobRunner:
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                    text=True, encoding="utf-8", errors="replace")
         self._active[job_id] = process
+        heartbeat_stop = threading.Event()
+        heartbeat = threading.Thread(target=self._heartbeat, args=(job_id, heartbeat_stop),
+                                     name=f"heartbeat-{job_id}", daemon=True)
+        heartbeat.start()
         lines: list[str] = []
         assert process.stdout
         for line in process.stdout:
@@ -626,6 +683,8 @@ class JobRunner:
             self.store.update_stage(job_id, stage, progress=0.45,
                                     message=line.strip()[-180:] or "处理中")
         code = process.wait()
+        heartbeat_stop.set()
+        heartbeat.join(timeout=1)
         self._active.pop(job_id, None)
         log = workspace / f"{stage}.log"
         log.write_text("\n".join(lines), encoding="utf-8")

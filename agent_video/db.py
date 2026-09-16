@@ -176,6 +176,10 @@ class Store:
         with self.connect() as con:
             con.execute(f"UPDATE jobs SET {clause} WHERE id=?", values)
 
+    def touch_job(self, job_id: str) -> None:
+        with self.connect() as con:
+            con.execute("UPDATE jobs SET updated_at=? WHERE id=?", (utc_now(), job_id))
+
     def update_stage(self, job_id: str, stage_id: str, **fields: Any) -> None:
         if not fields:
             return
