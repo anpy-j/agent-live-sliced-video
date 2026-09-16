@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import queue
 import re
@@ -7,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -194,7 +196,11 @@ class JobRunner:
             return
         self.store.stage_start(job_id, "rough_cut", "正在登记低清粗剪")
         proxy_files = self._save_proxy(job, workspace, summary)
-        marker_data = {"created_at": utc_now(), "files": [str(path) for path in proxy_files]}
+        marker_data = {
+            "created_at": utc_now(),
+            "files": [str(path) for path in proxy_files],
+            "validated_inputs": self._delivery_inputs(source, engine_work),
+        }
         proxy_marker.write_text(json.dumps(marker_data, ensure_ascii=False, indent=2), encoding="utf-8")
         self.store.add_artifact(job_id, "rough_cut", "report", "粗剪摘要", proxy_marker, "application/json")
         self.store.stage_wait(job_id, "rough_cut", "低清粗剪已生成，请观看实际视频后确认", marker_data)
@@ -203,16 +209,136 @@ class JobRunner:
                  engine_work: Path) -> None:
         job_id = job["id"]
         self._ensure_done(job_id, "rough_cut", "粗剪已确认")
-        self.store.stage_start(job_id, "delivery", "正在高清导出并执行完整 QC")
-        code, summary = self._execute(job_id, source, workspace, engine_work, "delivery", ["--auto-approve-visual"])
-        if summary.get("state") == "complete" and summary.get("publish_ready"):
-            final_path = self._save_final(job, workspace, summary)
-            self.store.stage_done(job_id, "delivery", f"高清成片已生成：{final_path.name}",
-                                  {**summary, "final_output": str(final_path)})
-            self.store.update_job(job_id, status="completed", progress=100, current_stage="delivery",
-                                  finished_at=utc_now(), error=None, engine_state="complete")
-            return
-        self._fail_engine(job_id, "delivery", code, summary)
+        self.store.stage_start(job_id, "delivery", "正在复用已验证时间线，仅执行高清渲染与最终 QC")
+        marker = self._read_json(workspace / "proxy_complete.json", {})
+        validated = marker.get("validated_inputs")
+        if not validated:
+            raise RuntimeError("粗剪缺少已验证时间线快照，请重新生成粗剪")
+        self._assert_delivery_inputs(validated, source)
+
+        engine = Path(self.store.get_setting("engine_path", ""))
+        scripts = engine / "scripts"
+        engine_python = Path(self.store.get_setting("engine_python", sys.executable)).expanduser()
+        final_work = workspace / "final-render"
+        renders = final_work / "renders"
+        qc_dir = final_work / "qc"
+        renders.mkdir(parents=True, exist_ok=True)
+        qc_dir.mkdir(parents=True, exist_ok=True)
+        steps: list[dict[str, Any]] = []
+        outputs: dict[str, Path] = {}
+        total_renders = max(1, len(validated["dual_timelines"]))
+        for index, (name, item) in enumerate(sorted(validated["dual_timelines"].items()), 1):
+            output = renders / f"{name}.mp4"
+            outputs[name] = output
+            if output.is_file() and output.stat().st_size > 0:
+                steps.append({"name": f"render_{name}", "cached": True, "seconds": 0})
+                continue
+            command = [str(engine_python), str(scripts / "render_dual.py"), item["path"], str(output),
+                       "--src", f"1={source}", "--width", "1440", "--height", "2560",
+                       "--crf", "16", "--preset", "slow", "--audio-bitrate", "256k",
+                       "--loudness", "-6.5"]
+            self._run_delivery_step(job_id, f"高清渲染 {name}", command, steps,
+                                    0.08 + 0.58 * index / total_renders)
+        if "body" not in outputs:
+            raise RuntimeError("已验证时间线缺少 body")
+        hooks = {name.removeprefix("hook_"): str(path) for name, path in outputs.items()
+                 if name.startswith("hook_")}
+        summary: dict[str, Any] = {
+            "state": "complete",
+            "publish_ready": False,
+            "source": str(source),
+            "reused_validation": True,
+            "render": {"width": 1440, "height": 2560, "fps": "source", "crf": 16,
+                       "preset": "slow", "audio_bitrate": "256k", "loudness_target": -6.5},
+            "deliverables": {"body": str(outputs["body"]), "hooks": hooks},
+            "steps": steps,
+        }
+        final_path = self._save_final(job, workspace, summary)
+
+        combined_timeline = final_work / "final_timeline.json"
+        primary_hook = sorted(hooks)[0] if hooks else None
+        rows: list[dict[str, Any]] = []
+        if primary_hook:
+            rows.extend(self._read_json(Path(validated["module_timelines"][f"hook_{primary_hook}"]["path"]), []))
+        rows.extend(self._read_json(Path(validated["module_timelines"]["body"]["path"]), []))
+        combined_timeline.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.store.add_artifact(job_id, "delivery", "timeline", "最终成片时间线", combined_timeline,
+                                "application/json")
+        qc_command = [str(engine_python), str(scripts / "qc.py"), str(final_path), str(qc_dir),
+                      "--timeline", str(combined_timeline), "--backend", "auto"]
+        self._run_delivery_step(job_id, "最终成片完整 QC", qc_command, steps, 0.92)
+        qc_report = qc_dir / "qc_report.json"
+        qc = self._read_json(qc_report, {})
+        self.store.add_artifact(job_id, "delivery", "report", "最终 QC 报告", qc_report,
+                                "application/json")
+        summary.update({"publish_ready": bool(qc.get("ok")), "final_output": str(final_path),
+                        "qc": qc, "steps": steps})
+        result_path = final_work / "delivery_summary.json"
+        result_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.store.add_artifact(job_id, "delivery", "report", "高清交付摘要", result_path,
+                                "application/json")
+        if not summary["publish_ready"]:
+            raise RuntimeError("最终成片 QC 未通过")
+        self.store.stage_done(job_id, "delivery", f"高清成片已生成：{final_path.name}", summary)
+        self.store.update_job(job_id, status="completed", progress=100, current_stage="delivery",
+                              finished_at=utc_now(), error=None, engine_state="complete")
+
+    def _run_delivery_step(self, job_id: str, label: str, command: list[str],
+                           steps: list[dict[str, Any]], progress: float) -> None:
+        started = time.monotonic()
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                   text=True, encoding="utf-8", errors="replace")
+        self._active[job_id] = process
+        lines: list[str] = []
+        assert process.stdout
+        for line in process.stdout:
+            lines.append(line.rstrip())
+            if len(lines) > 80:
+                lines.pop(0)
+            self.store.update_stage(job_id, "delivery", progress=progress,
+                                    message=f"{label}：{line.strip()[-120:] or '处理中'}")
+        code = process.wait()
+        self._active.pop(job_id, None)
+        step = {"name": label, "seconds": round(time.monotonic() - started, 2), "ok": code == 0}
+        if code:
+            step["log_tail"] = lines[-20:]
+        steps.append(step)
+        if code:
+            raise RuntimeError(f"{label}失败：{' | '.join(lines[-5:]) or f'退出码 {code}'}")
+
+    @classmethod
+    def _delivery_inputs(cls, source: Path, engine_work: Path) -> dict[str, Any]:
+        report = cls._read_json(engine_work / "visual_report.json", {})
+        dual = report.get("dual_timelines") or {}
+        if "body" not in dual:
+            raise RuntimeError("画面规则报告缺少已验证的正文时间线")
+        module_dir = engine_work / "timelines"
+        modules = {name: module_dir / f"{name}.json" for name in dual}
+        def snapshot(path: Path) -> dict[str, Any]:
+            if not path.is_file():
+                raise RuntimeError(f"已验证时间线不存在: {path}")
+            return {"path": str(path.resolve()), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+        stat = source.stat()
+        return {
+            "source": {"path": str(source.resolve()), "size": stat.st_size,
+                       "mtime_ns": stat.st_mtime_ns},
+            "dual_timelines": {name: snapshot(Path(path)) for name, path in dual.items()},
+            "module_timelines": {name: snapshot(path) for name, path in modules.items()},
+        }
+
+    @staticmethod
+    def _assert_delivery_inputs(validated: dict[str, Any], source: Path) -> None:
+        source_info = validated.get("source") or {}
+        stat = source.stat()
+        if (str(source.resolve()) != source_info.get("path") or stat.st_size != source_info.get("size")
+                or stat.st_mtime_ns != source_info.get("mtime_ns")):
+            raise RuntimeError("原素材在粗剪确认后发生变化，请重新生成粗剪")
+        for group in ("dual_timelines", "module_timelines"):
+            for item in (validated.get(group) or {}).values():
+                path = Path(item["path"])
+                digest = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+                if digest != item.get("sha256"):
+                    raise RuntimeError("已验证时间线在粗剪确认后发生变化，请重新生成粗剪")
 
     def _execute(self, job_id: str, source: Path, workspace: Path, engine_work: Path,
                  stage: str, options: list[str]) -> tuple[int, dict[str, Any]]:
@@ -249,43 +375,51 @@ class JobRunner:
 
     def _save_proxy(self, job: dict[str, Any], workspace: Path,
                     summary: dict[str, Any]) -> list[Path]:
-        candidates = self._preview_candidates(summary.get("deliverables") or {})
-        if not candidates:
-            raise RuntimeError("低清渲染完成，但没有找到可审片视频")
+        deliverables = summary.get("deliverables") or {}
         target_dir = workspace / "rough-cut"
         target_dir.mkdir(parents=True, exist_ok=True)
-        saved: list[Path] = []
-        for index, source in enumerate(candidates, 1):
-            suffix = "" if index == 1 else f"-{index}"
-            target = target_dir / f"{self._safe_title(job['title'])}-粗剪{suffix}.mp4"
-            shutil.copy2(source, target)
-            self.store.add_artifact(job["id"], "rough_cut", "video", target.stem, target, "video/mp4")
-            saved.append(target)
-        return saved
+        target = target_dir / f"{self._safe_title(job['title'])}-粗剪.mp4"
+        self._combine_full_video(deliverables, target)
+        self.store.add_artifact(job["id"], "rough_cut", "video", target.stem, target, "video/mp4")
+        return [target]
 
     def _save_final(self, job: dict[str, Any], workspace: Path,
                     summary: dict[str, Any]) -> Path:
-        candidates = self._preview_candidates(summary.get("deliverables") or {})
-        if not candidates:
-            raise RuntimeError("高清渲染完成，但没有找到最终视频")
         target_dir = workspace / "deliverables"
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / f"{self._safe_title(job['title'])}.mp4"
-        shutil.copy2(candidates[0], target)
+        self._combine_full_video(summary.get("deliverables") or {}, target)
         self.store.add_artifact(job["id"], "delivery", "video", f"最终成片 · {target.name}", target, "video/mp4")
         return target
 
     @staticmethod
-    def _preview_candidates(deliverables: dict[str, Any]) -> list[Path]:
-        previews_value = deliverables.get("previews")
-        previews = Path(previews_value) if previews_value else None
-        if previews and previews.is_dir():
-            files = sorted(previews.glob("*.mp4"))
-            if files:
-                return files[:1]
+    def _combine_full_video(deliverables: dict[str, Any], target: Path) -> None:
         body_value = deliverables.get("body")
         body = Path(body_value) if body_value else None
-        return [body] if body and body.is_file() else []
+        if not body or not body.is_file():
+            raise RuntimeError("渲染完成，但没有找到正文视频")
+        hooks = sorted((deliverables.get("hooks") or {}).items())
+        if not hooks:
+            shutil.copy2(body, target)
+            return
+        hook = Path(hooks[0][1])
+        if not hook.is_file():
+            raise RuntimeError(f"没有找到钩子视频: {hook}")
+        concat = target.with_suffix(".concat.txt")
+        partial = target.with_name(f"{target.stem}.partial.mp4")
+        def quote(path: Path) -> str:
+            return str(path.resolve()).replace("'", "'\\''")
+        concat.write_text(f"file '{quote(hook)}'\nfile '{quote(body)}'\n", encoding="utf-8")
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(concat),
+             "-c", "copy", "-movflags", "+faststart", str(partial)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        concat.unlink(missing_ok=True)
+        if result.returncode:
+            partial.unlink(missing_ok=True)
+            raise RuntimeError(result.stderr.strip() or "无法拼接钩子和完整正文")
+        partial.replace(target)
 
     @staticmethod
     def _safe_title(title: str) -> str:
