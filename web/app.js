@@ -60,14 +60,44 @@ function inferredProduct(title=''){
 function candidateRole(category){return ({hook:'hook',result:'result',color:'color',craft:'craft',material:'material',fit:'fit',styling:'styling',scene:'scene',demo:'demo',close:'close',pain:'pain',proof:'proof'}[category]||'bridge');}
 function categoryLabel(category){return ({hook:'钩子',result:'效果',color:'颜色',craft:'工艺',material:'面料',fit:'版型',styling:'搭配',scene:'场景',demo:'展示',close:'收尾',pain:'痛点',proof:'佐证',other:'讲解'}[category]||category||'讲解');}
 function providerLabel(id){return ({workbuddy:'WorkBuddy',antigravity:'Antigravity',codex:'Codex',opencode:'OpenCode',manual:'手动'}[id]||id||'手动');}
-function providerModelOptions(providers,selected='workbuddy:auto'){
-  return (providers||[]).map(provider=>{
-    const disabled=provider.available?'':'disabled';
-    if(provider.id!=='opencode')return `<optgroup label="${escapeHtml(provider.name)}${provider.available?'':' · 不可用'}" ${disabled}>${(provider.models||[]).map(model=>{const value=`${provider.id}:${model.id}`;return `<option value="${escapeHtml(value)}" ${value===selected?'selected':''}>${escapeHtml(model.name)}${model.id==='auto'?' · 推荐':''}</option>`}).join('')}</optgroup>`;
-    const groups=new Map();
-    (provider.models||[]).forEach(model=>{const group=model.id==='auto'?'默认配置':model.id.split('/',1)[0];if(!groups.has(group))groups.set(group,[]);groups.get(group).push(model)});
-    return [...groups].map(([group,models])=>`<optgroup label="OpenCode · ${escapeHtml(group==='默认配置'?group:group.toUpperCase())}${provider.available?'':' · 不可用'}" ${disabled}>${models.map(model=>{const value=`opencode:${model.id}`;return `<option value="${escapeHtml(value)}" ${value===selected?'selected':''}>${escapeHtml(model.name)}${model.id==='auto'?' · 推荐':''}</option>`}).join('')}</optgroup>`).join('');
-  }).join('');
+let modelPickerSequence=0;
+function modelPickerGroups(providers,includeManual=false){
+  const groups=[];
+  (providers||[]).forEach(provider=>{
+    if(provider.id!=='opencode')groups.push({label:provider.name,disabled:!provider.available,items:(provider.models||[]).map(model=>({value:`${provider.id}:${model.id}`,label:`${model.name}${model.id==='auto'?' · 推荐':''}`,search:`${provider.id} ${provider.name} ${model.id} ${model.name}`}))});
+    else {
+      const split=new Map();
+      (provider.models||[]).forEach(model=>{const group=model.id==='auto'?'默认配置':model.id.split('/',1)[0];if(!split.has(group))split.set(group,[]);split.get(group).push({value:`opencode:${model.id}`,label:`${model.name}${model.id==='auto'?' · 推荐':''}`,search:`opencode ${group} ${model.id} ${model.name}`})});
+      split.forEach((items,group)=>groups.push({label:`OpenCode · ${group==='默认配置'?group:group.toUpperCase()}`,disabled:!provider.available,items}));
+    }
+  });
+  if(includeManual)groups.push({label:'手动编排',disabled:false,items:[{value:'manual',label:'暂不调用 AI · 到编排节点手动决定',search:'manual 手动 暂不调用 ai'}]});
+  return groups;
+}
+function modelPickerHtml(providers,selected='workbuddy:auto',{name='',id='',includeManual=false}={}){
+  const listId=`modelPickerList${++modelPickerSequence}`,groups=modelPickerGroups(providers,includeManual),items=groups.flatMap(group=>group.items.map(item=>({...item,group:group.label,disabled:group.disabled}))),chosen=items.find(item=>item.value===selected&&!item.disabled)||items.find(item=>!item.disabled)||{value:'',label:'没有可用模型',group:''};
+  return `<div class="model-picker" data-model-picker><input type="hidden" data-model-value ${name?`name="${escapeHtml(name)}"`:''} ${id?`id="${escapeHtml(id)}"`:''} value="${escapeHtml(chosen.value)}"><div class="model-picker-control"><input class="model-picker-search" type="search" role="combobox" aria-label="搜索并选择 AI 模型" aria-autocomplete="list" aria-expanded="false" aria-controls="${listId}" autocomplete="off" spellcheck="false" value="${escapeHtml(`${chosen.group} · ${chosen.label}`)}" placeholder="输入提供商或模型名称"><button class="model-picker-toggle" type="button" aria-label="展开模型列表" tabindex="-1"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg></button></div><div class="model-picker-menu" id="${listId}" role="listbox" hidden>${groups.map(group=>`<section class="model-picker-group" data-model-group><b>${escapeHtml(group.label)}${group.disabled?' · 不可用':''}</b>${group.items.map(item=>`<button type="button" role="option" data-model-option data-value="${escapeHtml(item.value)}" data-label="${escapeHtml(`${group.label} · ${item.label}`)}" data-search="${escapeHtml(item.search.toLowerCase())}" aria-selected="${item.value===chosen.value?'true':'false'}" ${group.disabled?'disabled':''}>${escapeHtml(item.label)}</button>`).join('')}</section>`).join('')}<p class="model-picker-empty" hidden>没有匹配的模型</p></div></div>`;
+}
+function bindModelPickers(root=document){
+  $$('[data-model-picker]',root).forEach(picker=>{
+    if(picker.dataset.bound)return;picker.dataset.bound='true';
+    const input=$('.model-picker-search',picker),hidden=$('[data-model-value]',picker),menu=$('.model-picker-menu',picker),toggle=$('.model-picker-toggle',picker),empty=$('.model-picker-empty',picker);
+    const options=()=>$$('[data-model-option]',menu).filter(option=>!option.hidden&&!option.disabled);
+    const filter=query=>{const terms=query.toLowerCase().trim().split(/\s+/).filter(Boolean);let count=0;$$('[data-model-group]',menu).forEach(group=>{let groupCount=0;$$('[data-model-option]',group).forEach(option=>{const match=!terms.length||terms.every(term=>(`${option.dataset.search} ${option.dataset.label.toLowerCase()}`).includes(term));option.hidden=!match;if(match){groupCount++;count++}});group.hidden=!groupCount});empty.hidden=count!==0;activate(options()[0])};
+    const open=()=>{menu.hidden=false;input.setAttribute('aria-expanded','true');filter(input.value===input.dataset.selectedLabel?'':input.value)};
+    const close=(restore=true)=>{menu.hidden=true;input.setAttribute('aria-expanded','false');input.removeAttribute('aria-activedescendant');if(restore)input.value=input.dataset.selectedLabel||'';$$('.active',menu).forEach(x=>x.classList.remove('active'))};
+    const activate=option=>{$$('.active',menu).forEach(x=>x.classList.remove('active'));if(option){option.classList.add('active');option.scrollIntoView({block:'nearest'});input.setAttribute('aria-activedescendant',option.id||(option.id=`${menu.id}Option${[...menu.querySelectorAll('[data-model-option]')].indexOf(option)}`))}};
+    const choose=option=>{if(!option||option.disabled)return;hidden.value=option.dataset.value;input.dataset.selectedLabel=option.dataset.label;input.value=option.dataset.label;$$('[data-model-option]',menu).forEach(x=>x.setAttribute('aria-selected',String(x===option)));hidden.dispatchEvent(new Event('change',{bubbles:true}));close(false)};
+    const selected=$(`[data-model-option][data-value="${CSS.escape(hidden.value)}"]`,menu);input.dataset.selectedLabel=selected?.dataset.label||input.value;
+    input.addEventListener('focus',()=>{open();input.select()});
+    input.addEventListener('input',()=>{open();filter(input.value)});
+    input.addEventListener('keydown',event=>{const visible=options(),active=$('.active',menu);if(event.key==='ArrowDown'||event.key==='ArrowUp'){event.preventDefault();open();const index=visible.indexOf(active),next=event.key==='ArrowDown'?Math.min(visible.length-1,index+1):Math.max(0,index<0?visible.length-1:index-1);activate(visible[next])}else if(event.key==='Enter'&&!menu.hidden){event.preventDefault();choose(active||visible[0])}else if(event.key==='Escape'){event.preventDefault();close()}});
+    input.addEventListener('blur',()=>setTimeout(()=>{if(!picker.contains(document.activeElement))close()},0));
+    toggle.addEventListener('mousedown',event=>event.preventDefault());
+    toggle.addEventListener('click',()=>{if(menu.hidden){input.focus();open()}else close()});
+    menu.addEventListener('mousedown',event=>event.preventDefault());
+    menu.addEventListener('click',event=>choose(event.target.closest('[data-model-option]')));
+  });
 }
 function decisionPanel(job,packet,ai){
   const candidates=packet.candidate_digest||[];
@@ -75,7 +105,7 @@ function decisionPanel(job,packet,ai){
   const overview=(packet.artifacts||[]).find(a=>(a.mime_type||'').startsWith('image/')&&(a.title||'').includes('概览'));
   const prompt=`调用 live-slicer 的 get_stage_packet 读取任务 ${job.id}，按照 LiveCut Skill 选择一个最强成片方案，并用 submit_stage_payload 提交 main_product 和 picks。默认只做 1 个钩子，不要重复使用同一画面，不要新建任务。`;
   return `<section class="decision-panel" aria-labelledby="decisionTitle"><div class="decision-head"><div><span class="eyebrow">ACTION REQUIRED</span><h2 id="decisionTitle">需要完成音画编排</h2><p>素材分析已经完成。请选择一种方式提交方案，提交后流程才会继续。</p></div><span class="status waiting_input">等待你的决策</span></div>
-    <div class="ai-orchestrator"><div><b>让 LiveCut 调用 AI</b><p>可选择 WorkBuddy、Antigravity、Codex 或 OpenCode。模型只读取候选摘要并返回结构化编排；失败时会停回这里。</p></div><label>提供方与模型<select id="aiPlanModel">${providerModelOptions(providers,selected)}</select></label><button class="button primary" id="startAiPlan" ${available?'':'disabled'}>${available?'开始 AI 编排':'没有可用的 AI CLI'}</button></div>
+    <div class="ai-orchestrator"><div><b>让 LiveCut 调用 AI</b><p>可输入提供商或模型关键词快速筛选。模型只读取候选摘要并返回结构化编排；失败时会停回这里。</p></div><label>提供方与模型${modelPickerHtml(providers,selected,{id:'aiPlanModel'})}</label><button class="button primary" id="startAiPlan" ${available?'':'disabled'}>${available?'开始 AI 编排':'没有可用的 AI CLI'}</button></div>
     <details class="external-agent"><summary>由外部 Agent 通过 MCP 提交</summary><div class="agent-handoff"><div><p>如果你希望 WorkBuddy、Codex、OpenCode 或 Multica 自己主导，也可以在对应客户端发送下面的指令。</p><code>${escapeHtml(prompt)}</code></div><div class="handoff-actions"><button class="button ghost" id="copyAgentPrompt">复制执行指令</button><a class="button ghost" href="#/mcp">查看 MCP 接入</a></div></div></details>
     <details class="manual-decision" open><summary><span><b>或在这里手动决定</b><small>适合你想亲自选开头和正文时使用</small></span><span class="selection-summary" id="selectionSummary">已选 0 段 · 0 秒</span></summary>
       <form id="editPlanForm"><div class="plan-toolbar"><label>主推款名称<input id="mainProduct" value="${escapeHtml(inferredProduct(job.title))}" required placeholder="例如：白山茶羊毛上衣"><small>用于字幕、文件记录和后续质检。</small></label><div class="plan-help"><b>怎么选</b><span>至少选 1 条“开头”和 1 条“正文”；同一画面只使用一次。片段按原视频时间顺序拼接。</span></div></div>
@@ -98,6 +128,7 @@ async function renderJob(jobId){
   $('#retryJob')?.addEventListener('click',async()=>{await api(`/api/jobs/${jobId}/retry`,{method:'POST',body:'{}'});toast('任务已重新排队');renderJob(jobId)});
   $('#approveRoughCut')?.addEventListener('click',async e=>{e.currentTarget.disabled=true;try{await api(`/api/jobs/${jobId}/submit`,{method:'POST',body:JSON.stringify({verdict:'approve'})});toast('粗剪已通过，开始高清导出');renderJob(jobId)}catch(err){toast(err.message);e.currentTarget.disabled=false}});
   if(canPlan){
+    bindModelPickers(app);
     const candidates=new Map((packet.candidate_digest||[]).map(c=>[String(c.i),c]));
     const updateSelection=()=>{let count=0,duration=0;$$('[data-candidate]:checked').forEach(input=>{const c=candidates.get(input.dataset.candidate);count+=1;duration+=Number(c.e)-Number(c.s)});$('#selectionSummary').textContent=`已选 ${count} 段 · ${Math.round(duration)} 秒`;};
     $$('[data-candidate]').forEach(input=>input.addEventListener('change',()=>{const select=$(`[data-module="${input.dataset.candidate}"]`);select.disabled=!input.checked;input.closest('.candidate-row').classList.toggle('selected',input.checked);updateSelection()}));
@@ -133,14 +164,15 @@ async function renderMcp(){
 async function renderSettings(){
   setCrumb('系统设置');loading();const [data,ai]=await Promise.all([api('/api/settings'),api('/api/ai/providers')]);
   const provider=id=>ai.providers.find(x=>x.id===id)||{};
-  app.innerHTML=`<div class="hero"><div><span class="eyebrow">LOCAL RUNTIME</span><h1>系统设置</h1><p>配置底层切片引擎、AI 提供方、Skill 路径和本地接入策略。</p></div></div><div class="panel"><div class="panel-head"><div><h2>运行配置</h2><p>保存后对新任务生效</p></div></div><form class="settings-form" id="settingsForm"><label>切片引擎目录<input name="engine_path" value="${escapeHtml(data.engine_path||'')}"><small>目录内需要存在 scripts/run_slice.py。</small></label><label>引擎 Python<input name="engine_python" value="${escapeHtml(data.engine_python||'')}"><small>建议使用项目独立的 Python 3.13 环境。</small></label><div class="settings-section"><b>AI 提供方</b><small>四个 CLI 都以受限模式运行，只接收候选摘要并返回结构化编排。</small></div><label>WorkBuddy CLI<input name="workbuddy_cli_path" value="${escapeHtml(data.workbuddy_cli_path||'')}"><small>${provider('workbuddy').available?'已检测到可执行程序。':'当前路径不可用。'}</small></label><label>Antigravity CLI<input name="antigravity_cli_path" value="${escapeHtml(data.antigravity_cli_path||'')}"><small>${provider('antigravity').available?'已检测到可执行程序。':'当前路径不可用。'}</small></label><label>Codex CLI<input name="codex_cli_path" value="${escapeHtml(data.codex_cli_path||'')}"><small>${provider('codex').available?'已检测到可执行程序。':'当前路径不可用。'}</small></label><label>OpenCode CLI<input name="opencode_cli_path" value="${escapeHtml(data.opencode_cli_path||'')}"><small>${provider('opencode').available?'已检测到可执行程序。':'当前路径不可用。'}</small></label><label>默认 AI 提供方与模型<select name="ai_default_selection">${providerModelOptions(ai.providers,data.ai_default_selection||ai.default)}</select><small>新建任务仍可单独修改。</small></label><label>Skill 文件路径<input name="skill_path" value="${escapeHtml(data.skill_path||'')}"></label><label>并行任务数<input name="max_parallel_jobs" type="number" min="1" max="4" value="${data.max_parallel_jobs||1}"><small>第一版实际采用单工作进程，避免视频转码争抢资源。</small></label><label><span><input name="mcp_enabled" type="checkbox" style="width:auto;min-height:0" ${data.mcp_enabled?'checked':''}> 启用 MCP HTTP 入口</span></label><div><button class="button primary" type="submit">保存设置</button></div></form></div>`;
+  app.innerHTML=`<div class="hero"><div><span class="eyebrow">LOCAL RUNTIME</span><h1>系统设置</h1><p>配置底层切片引擎、AI 提供方、Skill 路径和本地接入策略。</p></div></div><div class="panel model-picker-panel"><div class="panel-head"><div><h2>运行配置</h2><p>保存后对新任务生效</p></div></div><form class="settings-form" id="settingsForm"><label>切片引擎目录<input name="engine_path" value="${escapeHtml(data.engine_path||'')}"><small>目录内需要存在 scripts/run_slice.py。</small></label><label>引擎 Python<input name="engine_python" value="${escapeHtml(data.engine_python||'')}"><small>建议使用项目独立的 Python 3.13 环境。</small></label><div class="settings-section"><b>AI 提供方</b><small>四个 CLI 都以受限模式运行，只接收候选摘要并返回结构化编排。</small></div><label>WorkBuddy CLI<input name="workbuddy_cli_path" value="${escapeHtml(data.workbuddy_cli_path||'')}"><small>${provider('workbuddy').available?'已检测到可执行程序。':'当前路径不可用。'}</small></label><label>Antigravity CLI<input name="antigravity_cli_path" value="${escapeHtml(data.antigravity_cli_path||'')}"><small>${provider('antigravity').available?'已检测到可执行程序。':'当前路径不可用。'}</small></label><label>Codex CLI<input name="codex_cli_path" value="${escapeHtml(data.codex_cli_path||'')}"><small>${provider('codex').available?'已检测到可执行程序。':'当前路径不可用。'}</small></label><label>OpenCode CLI<input name="opencode_cli_path" value="${escapeHtml(data.opencode_cli_path||'')}"><small>${provider('opencode').available?'已检测到可执行程序。':'当前路径不可用。'}</small></label><label>默认 AI 提供方与模型${modelPickerHtml(ai.providers,data.ai_default_selection||ai.default,{name:'ai_default_selection'})}<small>输入关键词可模糊筛选，新建任务仍可单独修改。</small></label><label>Skill 文件路径<input name="skill_path" value="${escapeHtml(data.skill_path||'')}"></label><label>并行任务数<input name="max_parallel_jobs" type="number" min="1" max="4" value="${data.max_parallel_jobs||1}"><small>第一版实际采用单工作进程，避免视频转码争抢资源。</small></label><label><span><input name="mcp_enabled" type="checkbox" style="width:auto;min-height:0" ${data.mcp_enabled?'checked':''}> 启用 MCP HTTP 入口</span></label><div><button class="button primary" type="submit">保存设置</button></div></form></div>`;
+  bindModelPickers(app);
   $('#settingsForm').addEventListener('submit',async e=>{e.preventDefault();const f=new FormData(e.target);await api('/api/settings',{method:'PUT',body:JSON.stringify({engine_path:f.get('engine_path'),engine_python:f.get('engine_python'),workbuddy_cli_path:f.get('workbuddy_cli_path'),antigravity_cli_path:f.get('antigravity_cli_path'),codex_cli_path:f.get('codex_cli_path'),opencode_cli_path:f.get('opencode_cli_path'),ai_default_selection:f.get('ai_default_selection'),skill_path:f.get('skill_path'),max_parallel_jobs:Number(f.get('max_parallel_jobs')),mcp_enabled:f.get('mcp_enabled')==='on'})});toast('设置已保存')});
 }
 
 async function openNewJob(){
   $('#newJobError').textContent='';
   $('#newJobDialog').showModal();
-  try{const ai=await api('/api/ai/providers'),select=$('#newJobForm [name="ai_model"]'),available=ai.providers.filter(x=>x.available);select.innerHTML=`${providerModelOptions(ai.providers,ai.default)}<option value="manual">暂不调用 AI · 到编排节点手动决定</option>`;if(!available.length)$('#newJobError').textContent='未检测到可用的 AI CLI，可在系统设置中修正路径。';}catch(err){$('#newJobError').textContent=err.message}
+  try{const ai=await api('/api/ai/providers'),container=$('#newJobModelPicker'),available=ai.providers.filter(x=>x.available);container.innerHTML=modelPickerHtml(ai.providers,ai.default,{name:'ai_model',includeManual:true});bindModelPickers(container);if(!available.length)$('#newJobError').textContent='未检测到可用的 AI CLI，可在系统设置中修正路径。';}catch(err){$('#newJobError').textContent=err.message}
 }
 function bindCommon(){
   $$('[data-new-job]').forEach(x=>x.addEventListener('click',openNewJob));

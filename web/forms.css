@@ -53,6 +53,25 @@
 .settings-section b { font-size: 13px; }
 .settings-section small { color: var(--muted); font-size: 11px; }
 
+.model-picker { position: relative; width: 100%; font-weight: 400; }
+.model-picker-control { position: relative; }
+.model-picker-search { padding-right: 44px; }
+.model-picker-search::-webkit-search-cancel-button { display: none; }
+.model-picker-toggle { position: absolute; right: 1px; top: 1px; width: 42px; height: 42px; padding: 0; border: 0; border-left: 1px solid var(--line-soft); border-radius: 0 8px 8px 0; display: grid; place-items: center; background: transparent; color: var(--muted); }
+.model-picker-toggle:hover { color: var(--text); background: var(--panel-2); }
+.model-picker-toggle svg { width: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+.model-picker-menu { position: absolute; z-index: 80; top: calc(100% + 6px); left: 0; right: 0; max-height: 340px; overflow: auto; padding: 7px; border: 1px solid var(--line); border-radius: 10px; background: #0b1117; box-shadow: var(--shadow); }
+.model-picker-menu[hidden],.model-picker-menu [hidden] { display: none !important; }
+.model-picker-group { display: grid; gap: 2px; padding: 5px 0; }
+.model-picker-group+.model-picker-group { border-top: 1px solid var(--line-soft); }
+.model-picker-group>b { padding: 5px 9px; color: var(--dim); font-size: 10px; letter-spacing: .7px; text-transform: uppercase; }
+.model-picker-group button { min-height: 38px; padding: 8px 9px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); text-align: left; font-size: 12px; }
+.model-picker-group button:hover,.model-picker-group button.active { background: #1a242e; color: var(--text); }
+.model-picker-group button[aria-selected="true"] { color: var(--accent); }
+.model-picker-group button:disabled { opacity: .4; cursor: not-allowed; }
+.model-picker-empty { margin: 0; padding: 24px 10px; color: var(--muted); text-align: center; font-size: 12px; }
+.model-picker-panel,.decision-panel:has(.model-picker),.modal:has(.model-picker) { overflow: visible; }
+
 .decision-panel { margin-bottom: 18px; border: 1px solid rgba(255, 198, 90, .32); border-radius: var(--radius); background: linear-gradient(145deg, rgba(255,198,90,.06), var(--panel) 34%); overflow: hidden; }
 .decision-head { padding: 18px; display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; border-bottom: 1px solid var(--line-soft); }
 .decision-head h2 { margin: 0 0 4px; font-size: 20px; }
