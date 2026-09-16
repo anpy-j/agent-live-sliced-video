@@ -1,0 +1,7 @@
+interface:
+  display_name: "LiveCut 本地剪辑 Agent"
+  short_description: "通过 MCP 排队、观察并完成直播视频切片"
+  default_prompt: "使用 $live-sliced-video-agent 为这段直播素材创建切片任务，持续推进到需要我选择或最终成片。"
+policy:
+  allow_implicit_invocation: true
+

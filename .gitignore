@@ -1,0 +1,11 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.venv/
+data/*.db
+data/*.db-*
+data/runtime.json
+data/skill-history/
+workspaces/*
+!workspaces/.gitkeep
+

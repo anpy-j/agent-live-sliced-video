@@ -1,0 +1,261 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+import threading
+import uuid
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Iterator
+
+
+STAGE_DEFINITIONS = [
+    ("ingest", "读取素材", 5),
+    ("material_index", "素材理解", 18),
+    ("creative_direction", "创意方向", 34),
+    ("timeline", "时间线编排", 50),
+    ("visual_review", "画面复核", 64),
+    ("proxy_render", "低清粗剪", 76),
+    ("rough_cut_review", "成片审片", 86),
+    ("final_render", "高清渲染", 95),
+    ("quality_control", "发布前质检", 100),
+]
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+class Store:
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
+        self.init()
+
+    @contextmanager
+    def connect(self) -> Iterator[sqlite3.Connection]:
+        with self._lock:
+            con = sqlite3.connect(self.path, timeout=30)
+            con.row_factory = sqlite3.Row
+            con.execute("PRAGMA journal_mode=WAL")
+            con.execute("PRAGMA foreign_keys=ON")
+            try:
+                yield con
+                con.commit()
+            finally:
+                con.close()
+
+    def init(self) -> None:
+        with self.connect() as con:
+            con.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS jobs (
+                  id TEXT PRIMARY KEY,
+                  title TEXT NOT NULL,
+                  source_path TEXT NOT NULL,
+                  brief TEXT NOT NULL DEFAULT '',
+                  status TEXT NOT NULL,
+                  current_stage TEXT,
+                  progress REAL NOT NULL DEFAULT 0,
+                  mode TEXT NOT NULL DEFAULT 'standard',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  started_at TEXT,
+                  finished_at TEXT,
+                  workspace TEXT NOT NULL,
+                  error TEXT,
+                  engine_state TEXT,
+                  model_name TEXT,
+                  token_input INTEGER NOT NULL DEFAULT 0,
+                  token_output INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS stages (
+                  job_id TEXT NOT NULL,
+                  stage_id TEXT NOT NULL,
+                  name TEXT NOT NULL,
+                  position INTEGER NOT NULL,
+                  status TEXT NOT NULL DEFAULT 'pending',
+                  progress REAL NOT NULL DEFAULT 0,
+                  message TEXT NOT NULL DEFAULT '',
+                  started_at TEXT,
+                  finished_at TEXT,
+                  result_json TEXT,
+                  error TEXT,
+                  PRIMARY KEY (job_id, stage_id),
+                  FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS events (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  job_id TEXT NOT NULL,
+                  stage_id TEXT,
+                  level TEXT NOT NULL,
+                  kind TEXT NOT NULL,
+                  message TEXT NOT NULL,
+                  payload_json TEXT,
+                  created_at TEXT NOT NULL,
+                  FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS artifacts (
+                  id TEXT PRIMARY KEY,
+                  job_id TEXT NOT NULL,
+                  stage_id TEXT,
+                  kind TEXT NOT NULL,
+                  title TEXT NOT NULL,
+                  path TEXT NOT NULL,
+                  mime_type TEXT,
+                  size INTEGER NOT NULL DEFAULT 0,
+                  created_at TEXT NOT NULL,
+                  UNIQUE(job_id, path),
+                  FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS settings (
+                  key TEXT PRIMARY KEY,
+                  value_json TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                """
+            )
+
+    def create_job(self, *, title: str, source_path: str, brief: str, mode: str,
+                   workspace: str) -> str:
+        job_id = f"job_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+        now = utc_now()
+        with self.connect() as con:
+            con.execute(
+                "INSERT INTO jobs(id,title,source_path,brief,status,current_stage,progress,mode,created_at,updated_at,workspace) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (job_id, title, source_path, brief, "queued", "ingest", 0, mode, now, now, workspace),
+            )
+            con.executemany(
+                "INSERT INTO stages(job_id,stage_id,name,position) VALUES(?,?,?,?)",
+                [(job_id, stage_id, name, position) for stage_id, name, position in STAGE_DEFINITIONS],
+            )
+        self.add_event(job_id, None, "info", "job_created", "任务已进入队列", {"mode": mode})
+        return job_id
+
+    def list_jobs(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self.connect() as con:
+            rows = con.execute("SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_job(self, job_id: str) -> dict[str, Any] | None:
+        with self.connect() as con:
+            row = con.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if not row:
+                return None
+            stages = con.execute("SELECT * FROM stages WHERE job_id=? ORDER BY position", (job_id,)).fetchall()
+            events = con.execute("SELECT * FROM events WHERE job_id=? ORDER BY id DESC LIMIT 200", (job_id,)).fetchall()
+            artifacts = con.execute("SELECT * FROM artifacts WHERE job_id=? ORDER BY created_at DESC", (job_id,)).fetchall()
+        job = dict(row)
+        job["stages"] = [self._decode_row(x, "result_json") for x in stages]
+        job["events"] = [self._decode_row(x, "payload_json") for x in events]
+        job["artifacts"] = [dict(x) for x in artifacts]
+        return job
+
+    @staticmethod
+    def _decode_row(row: sqlite3.Row, field: str) -> dict[str, Any]:
+        item = dict(row)
+        raw = item.pop(field, None)
+        item[field.removesuffix("_json")] = json.loads(raw) if raw else None
+        return item
+
+    def update_job(self, job_id: str, **fields: Any) -> None:
+        if not fields:
+            return
+        fields["updated_at"] = utc_now()
+        values = list(fields.values()) + [job_id]
+        clause = ",".join(f"{key}=?" for key in fields)
+        with self.connect() as con:
+            con.execute(f"UPDATE jobs SET {clause} WHERE id=?", values)
+
+    def update_stage(self, job_id: str, stage_id: str, **fields: Any) -> None:
+        if not fields:
+            return
+        if "result" in fields:
+            fields["result_json"] = _json(fields.pop("result"))
+        values = list(fields.values()) + [job_id, stage_id]
+        clause = ",".join(f"{key}=?" for key in fields)
+        with self.connect() as con:
+            con.execute(f"UPDATE stages SET {clause} WHERE job_id=? AND stage_id=?", values)
+
+    def stage_start(self, job_id: str, stage_id: str, message: str) -> None:
+        now = utc_now()
+        self.update_stage(job_id, stage_id, status="running", progress=0.03, message=message,
+                          started_at=now, finished_at=None, error=None)
+        self.update_job(job_id, status="running", current_stage=stage_id, started_at=now)
+        self.add_event(job_id, stage_id, "info", "stage_started", message)
+
+    def stage_done(self, job_id: str, stage_id: str, message: str,
+                   result: dict[str, Any] | None = None) -> None:
+        position = next((x[2] for x in STAGE_DEFINITIONS if x[0] == stage_id), 0)
+        self.update_stage(job_id, stage_id, status="succeeded", progress=1, message=message,
+                          finished_at=utc_now(), result=result)
+        self.update_job(job_id, progress=position)
+        self.add_event(job_id, stage_id, "success", "stage_completed", message, result)
+
+    def stage_wait(self, job_id: str, stage_id: str, message: str,
+                   result: dict[str, Any] | None = None) -> None:
+        self.update_stage(job_id, stage_id, status="waiting_input", progress=0.65,
+                          message=message, result=result)
+        self.update_job(job_id, status="waiting_input", current_stage=stage_id)
+        self.add_event(job_id, stage_id, "warning", "input_required", message, result)
+
+    def stage_fail(self, job_id: str, stage_id: str, error: str,
+                   result: dict[str, Any] | None = None) -> None:
+        self.update_stage(job_id, stage_id, status="failed", message="执行失败", error=error,
+                          finished_at=utc_now(), result=result)
+        self.update_job(job_id, status="failed", current_stage=stage_id, error=error,
+                        finished_at=utc_now())
+        self.add_event(job_id, stage_id, "error", "stage_failed", error, result)
+
+    def add_event(self, job_id: str, stage_id: str | None, level: str, kind: str,
+                  message: str, payload: Any = None) -> None:
+        with self.connect() as con:
+            con.execute(
+                "INSERT INTO events(job_id,stage_id,level,kind,message,payload_json,created_at) VALUES(?,?,?,?,?,?,?)",
+                (job_id, stage_id, level, kind, message, _json(payload) if payload is not None else None, utc_now()),
+            )
+
+    def add_artifact(self, job_id: str, stage_id: str | None, kind: str, title: str,
+                     path: Path, mime_type: str | None = None) -> str:
+        path = Path(path).resolve()
+        artifact_id = uuid.uuid5(uuid.NAMESPACE_URL, f"{job_id}:{path}").hex
+        size = path.stat().st_size if path.exists() else 0
+        with self.connect() as con:
+            con.execute(
+                "INSERT INTO artifacts(id,job_id,stage_id,kind,title,path,mime_type,size,created_at) VALUES(?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(job_id,path) DO UPDATE SET stage_id=excluded.stage_id,kind=excluded.kind,title=excluded.title,mime_type=excluded.mime_type,size=excluded.size",
+                (artifact_id, job_id, stage_id, kind, title, str(path), mime_type, size, utc_now()),
+            )
+        return artifact_id
+
+    def get_artifact(self, artifact_id: str) -> dict[str, Any] | None:
+        with self.connect() as con:
+            row = con.execute("SELECT * FROM artifacts WHERE id=?", (artifact_id,)).fetchone()
+        return dict(row) if row else None
+
+    def set_setting(self, key: str, value: Any) -> None:
+        with self.connect() as con:
+            con.execute(
+                "INSERT INTO settings(key,value_json,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at",
+                (key, _json(value), utc_now()),
+            )
+
+    def get_setting(self, key: str, default: Any = None) -> Any:
+        with self.connect() as con:
+            row = con.execute("SELECT value_json FROM settings WHERE key=?", (key,)).fetchone()
+        return json.loads(row[0]) if row else default
+
+    def dashboard(self) -> dict[str, Any]:
+        jobs = self.list_jobs()
+        counts: dict[str, int] = {}
+        for job in jobs:
+            counts[job["status"]] = counts.get(job["status"], 0) + 1
+        active = sum(counts.get(x, 0) for x in ("queued", "running", "waiting_input"))
+        return {"jobs": jobs, "counts": counts, "active": active, "total": len(jobs)}
+

@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>LiveCut Agent</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar" aria-label="主导航">
+      <a class="brand" href="#/dashboard" aria-label="LiveCut Agent 首页">
+        <span class="brand-mark"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6.5 12 2l8 4.5v11L12 22l-8-4.5z"/><path d="m9 8 7 4-7 4z"/></svg></span>
+        <span><b>LiveCut</b><small>Agent studio</small></span>
+      </a>
+      <nav class="nav-list">
+        <a href="#/dashboard" data-nav="dashboard"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></svg><span>任务总览</span></a>
+        <a href="#/queue" data-nav="queue"><svg viewBox="0 0 24 24"><path d="M5 7h14M5 12h14M5 17h9"/><circle cx="4" cy="7" r=".5"/><circle cx="4" cy="12" r=".5"/><circle cx="4" cy="17" r=".5"/></svg><span>剪辑队列</span><em id="queueBadge">0</em></a>
+        <a href="#/skill" data-nav="skill"><svg viewBox="0 0 24 24"><path d="M12 3 4 7v10l8 4 8-4V7z"/><path d="m8 12 2.2 2.2L16.5 8"/></svg><span>Skill 管理</span></a>
+        <a href="#/mcp" data-nav="mcp"><svg viewBox="0 0 24 24"><path d="M8 8a4 4 0 1 0 0 8h2M16 8a4 4 0 1 1 0 8h-2M8 12h8"/></svg><span>MCP 接入</span></a>
+        <a href="#/settings" data-nav="settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6 1.7 1.7 0 0 0 10 3V2.8h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1z"/></svg><span>系统设置</span></a>
+      </nav>
+      <div class="system-card"><span class="pulse"></span><div><b>本地服务运行中</b><small id="systemVersion">正在连接…</small></div></div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <button class="icon-button mobile-menu" id="menuButton" aria-label="打开导航"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+        <div class="breadcrumb"><span>直播切片工作台</span><strong id="pageCrumb">任务总览</strong></div>
+        <div class="top-actions"><span class="clock" id="clock"></span><button class="button primary" id="newJobButton"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>新建剪辑</button></div>
+      </header>
+      <section id="app" class="content" aria-live="polite"></section>
+    </main>
+  </div>
+
+  <dialog id="newJobDialog" class="modal">
+    <form method="dialog" id="newJobForm">
+      <div class="modal-head"><div><span class="eyebrow">NEW PRODUCTION</span><h2>创建剪辑任务</h2></div><button class="icon-button" value="cancel" aria-label="关闭"><svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+      <label>素材绝对路径<input name="source_path" required placeholder="/Volumes/.../直播素材.mp4" autocomplete="off"><small>文件不会被复制，Agent 直接读取本机路径。</small></label>
+      <div class="form-grid"><label>任务名称<input name="title" placeholder="默认使用文件名"></label><label>执行模式<select name="mode"><option value="standard">标准 · 多方案与审片</option><option value="fast">快速 · 单方案</option><option value="refined">精修 · 深度审片</option></select></label></div>
+      <label>剪辑要求<textarea name="brief" rows="4" placeholder="例如：突出主播审美观点，保留自然聊天感，目标 60 秒左右"></textarea></label>
+      <p class="form-error" id="newJobError" role="alert"></p>
+      <div class="modal-actions"><button class="button ghost" value="cancel">取消</button><button class="button primary" value="default" id="createJobSubmit">加入队列</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="previewDialog" class="preview-modal"><button class="icon-button preview-close" aria-label="关闭预览"><svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button><div id="previewBody"></div></dialog>
+  <div id="toast" class="toast" role="status"></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>
+
