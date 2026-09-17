@@ -17,6 +17,10 @@ from .ai import AntigravityCli, CliProvider, CodexCli, OpenCodeCli, WorkBuddyCli
 from .db import Store, utc_now
 
 AI_PROVIDER_IDS = frozenset({"workbuddy", "antigravity", "codex", "opencode"})
+MIN_PICK_SECONDS = 1.2
+MAX_PICK_SECONDS = 5.0
+MAX_CONTINUOUS_SOURCE_SECONDS = 5.0
+CONTIGUOUS_GAP_SECONDS = 0.75
 
 
 class JobRunner:
@@ -49,6 +53,36 @@ class JobRunner:
         self.store.update_job(job_id, status="queued", error=None, finished_at=None)
         self.store.add_event(job_id, None, "info", "queued", "任务已加入执行队列")
         self.pending.put(job_id)
+
+    def retry(self, job_id: str) -> None:
+        job = self.store.get_job(job_id)
+        if not job:
+            raise KeyError("任务不存在")
+        workspace = Path(job["workspace"])
+        engine_work = workspace / "engine"
+        picks_path = engine_work / "picks.json"
+        candidates = self._eligible_candidates(
+            self._read_json(engine_work / "candidate_digest.json", []))
+        plan = self._read_json(picks_path, {})
+        limits = self._editing_constraints(candidates)
+        issues = self._plan_preflight_issues(plan, limits) if plan else []
+        if job.get("current_stage") == "validation" and issues and picks_path.is_file():
+            rejected = workspace / f"rejected-picks-{int(time.time())}.json"
+            shutil.copy2(picks_path, rejected)
+            picks_path.unlink()
+            (workspace / "validation-repair.json").unlink(missing_ok=True)
+            self.store.add_artifact(job_id, "edit_plan", "decision", "未通过预检的旧编排",
+                                    rejected, "application/json")
+            self.store.update_stage(job_id, "edit_plan", status="pending", progress=0,
+                                    message="旧方案未通过编排预检，等待重新编排",
+                                    finished_at=None, error=None)
+            self.store.update_stage(job_id, "validation", status="pending", progress=0,
+                                    message="等待新编排方案", finished_at=None, error=None)
+            self.store.update_job(job_id, current_stage="edit_plan", progress=20, error=None)
+            self.store.add_event(job_id, "edit_plan", "warning", "plan_returned",
+                                 "旧方案已退回 AI 编排节点，不再重复进入渲染校验",
+                                 {"issues": issues, "backup": str(rejected)})
+        self.enqueue(job_id)
 
     def cancel(self, job_id: str) -> bool:
         process = self._active.get(job_id)
@@ -132,6 +166,12 @@ class JobRunner:
                 raise ValueError(f"缺少字段: {', '.join(sorted(missing))}")
             self._validate_edit_plan(payload)
             target = workspace / "engine" / "picks.json"
+            candidates = self._eligible_candidates(
+                self._read_json(workspace / "engine" / "candidate_digest.json", []))
+            self._validate_candidate_picks(payload, candidates)
+            issues = self._plan_preflight_issues(payload, self._editing_constraints(candidates))
+            if issues:
+                raise ValueError("编排预检未通过：" + self._format_plan_issues(issues))
             title = "AI 音画编排"
         elif stage == "rough_cut":
             if payload.get("verdict") != "approve":
@@ -208,7 +248,9 @@ class JobRunner:
             "artifacts": job.get("artifacts", []),
         }
         if job["current_stage"] == "edit_plan":
-            packet["candidate_digest"] = self._read_json(engine_work / "candidate_digest.json", [])
+            packet["candidate_digest"] = self._eligible_candidates(
+                self._read_json(engine_work / "candidate_digest.json", []))
+            packet["editing_constraints"] = self._editing_constraints(packet["candidate_digest"])
             packet["instruction"] = "选择一个最强成片方案；默认只做 1 个钩子，避免重复方案消耗渲染时间"
         elif job["current_stage"] == "rough_cut":
             packet["instruction"] = "观看低清粗剪；可以发布则提交 verdict=approve，系统再执行高清导出与完整 QC"
@@ -299,7 +341,8 @@ class JobRunner:
         provider_id = str(job.get("model_provider") or "manual")
         provider = self._provider(provider_id)
         model = str(job.get("model_name") or "auto")
-        candidates = self._read_json(engine_work / "candidate_digest.json", [])
+        candidates = self._eligible_candidates(
+            self._read_json(engine_work / "candidate_digest.json", []))
         self.store.stage_start(job_id, "edit_plan",
                                f"正在调用 {provider.display_name} · {model} 完成音画编排")
         prompt = self._plan_prompt(job, candidates)
@@ -311,8 +354,42 @@ class JobRunner:
             plan = result["plan"]
             self._validate_edit_plan(plan)
             self._validate_candidate_picks(plan, candidates)
+            limits = self._editing_constraints(candidates)
+            issues = self._plan_preflight_issues(plan, limits)
+            attempts = [{"raw": result["raw"], "issues": issues,
+                         "seconds": result.get("seconds"), "usage": result.get("usage") or {}}]
+            if issues:
+                self.store.update_stage(
+                    job_id, "edit_plan", status="running", progress=0.55,
+                    message=f"首版方案未通过编排预检，正在要求 {provider.display_name} 立即重编")
+                self.store.add_event(
+                    job_id, "edit_plan", "warning", "ai_plan_refinement_started",
+                    f"首版方案有 {len(issues)} 个结构问题，未进入切片引擎",
+                    {"issues": issues, "provider": provider_id, "model": model})
+                refine_prompt = prompt + "\n\n你上一版方案未通过编排预检。请根据下面的错误返回完整替代方案，不能只返回补丁。\n" + \
+                    "上一版：" + json.dumps(plan, ensure_ascii=False, separators=(",", ":")) + \
+                    "\n预检错误：" + json.dumps(issues, ensure_ascii=False, separators=(",", ":"))
+                refined = self._with_heartbeat(job_id, lambda: provider.generate_plan(
+                    model=model, prompt=refine_prompt, cwd=self.project_root,
+                    on_process=lambda process: self._active.__setitem__(job_id, process),
+                ))
+                plan = refined["plan"]
+                self._validate_edit_plan(plan)
+                self._validate_candidate_picks(plan, candidates)
+                refined_issues = self._plan_preflight_issues(plan, limits)
+                attempts.append({"raw": refined["raw"], "issues": refined_issues,
+                                 "seconds": refined.get("seconds"),
+                                 "usage": refined.get("usage") or {}})
+                if refined_issues:
+                    raise ValueError("AI 重编后仍未通过编排预检：" +
+                                     self._format_plan_issues(refined_issues))
+                result = refined
+                self.store.add_event(job_id, "edit_plan", "success",
+                                     "ai_plan_refinement_completed",
+                                     f"重编方案已通过预检，共 {len(plan['picks'])} 个片段")
             response_path = Path(job["workspace"]) / f"{provider_id}-plan-response.json"
-            response_path.write_text(json.dumps(result["raw"], ensure_ascii=False, indent=2), encoding="utf-8")
+            response_path.write_text(json.dumps({"attempts": attempts}, ensure_ascii=False, indent=2),
+                                     encoding="utf-8")
             self.store.add_artifact(job_id, "edit_plan", "ai_response",
                                     f"{provider.display_name} 原始响应",
                                     response_path, "application/json")
@@ -320,16 +397,20 @@ class JobRunner:
             target.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
             self.store.add_artifact(job_id, "edit_plan", "decision", "AI 音画编排", target,
                                     "application/json")
-            usage = result.get("usage") or {}
+            usage = {
+                "input_tokens": sum(int(item["usage"].get("input_tokens", 0)) for item in attempts),
+                "output_tokens": sum(int(item["usage"].get("output_tokens", 0)) for item in attempts),
+            }
+            total_seconds = round(sum(float(item.get("seconds") or 0) for item in attempts), 2)
             self.store.update_job(
                 job_id,
                 token_input=int(job.get("token_input") or 0) + int(usage.get("input_tokens", 0)),
                 token_output=int(job.get("token_output") or 0) + int(usage.get("output_tokens", 0)),
             )
             self.store.stage_done(job_id, "edit_plan",
-                                  f"{provider.display_name} · {model} 已完成编排（{result['seconds']} 秒）",
+                                  f"{provider.display_name} · {model} 已完成编排并通过预检（{total_seconds} 秒）",
                                   {"provider": provider_id, "model": model,
-                                   "seconds": result["seconds"], "usage": usage,
+                                   "seconds": total_seconds, "usage": usage,
                                    "picks": len(plan["picks"])})
             self.store.add_event(job_id, "edit_plan", "success", "ai_plan_completed",
                                  f"AI 已选择 {len(plan['picks'])} 个片段",
@@ -351,13 +432,78 @@ class JobRunner:
     def _editing_constraints(candidates: list[dict[str, Any]]) -> dict[str, int]:
         available = sum(max(0.0, float(item.get("e", 0)) - float(item.get("s", 0)))
                         for item in candidates)
-        maximum = max(20, min(120, math.floor(available)))
-        minimum = min(70, max(15, math.floor(available * 0.65)))
+        maximum = max(1, min(120, math.floor(available)))
+        minimum = min(70, max(1, math.floor(available * 0.65)))
         minimum = min(minimum, maximum)
-        min_segments = min(18, max(6, math.ceil(minimum / 3.5)))
+        min_segments = min(len(candidates), 18, max(2, math.ceil(minimum / 3.5)))
         max_segments = min(32, max(min_segments, len(candidates)))
         return {"min_total": minimum, "max_total": maximum,
                 "min_segments": min_segments, "max_segments": max_segments}
+
+    @staticmethod
+    def _eligible_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [item for item in candidates
+                if MIN_PICK_SECONDS <= float(item.get("e", 0)) - float(item.get("s", 0))
+                <= MAX_PICK_SECONDS]
+
+    @staticmethod
+    def _plan_preflight_issues(plan: dict[str, Any], limits: dict[str, int]) -> list[dict[str, Any]]:
+        picks = plan.get("picks") if isinstance(plan, dict) else None
+        if not isinstance(picks, list) or not picks:
+            return [{"code": "missing_picks", "detail": "方案没有可执行片段"}]
+        issues: list[dict[str, Any]] = []
+        body = [item for item in picks if item.get("module") == "body"]
+        hooks = [item for item in picks if str(item.get("module", "")).startswith("hook_")]
+        combinations = [[hook, *body] for hook in hooks] or [body]
+        for index, item in enumerate(picks):
+            duration = float(item.get("end", 0)) - float(item.get("start", 0))
+            if duration > MAX_PICK_SECONDS + 1e-6:
+                issues.append({"code": "segment_too_long", "segment": index,
+                               "detail": f"第 {index + 1} 段 {duration:.2f}s，必须不超过 {MAX_PICK_SECONDS:.1f}s"})
+            if duration < MIN_PICK_SECONDS - 1e-6:
+                issues.append({"code": "segment_too_short", "segment": index,
+                               "detail": f"第 {index + 1} 段 {duration:.2f}s，低于 {MIN_PICK_SECONDS:.1f}s"})
+        for combination_index, rows in enumerate(combinations, 1):
+            total = sum(float(item["end"]) - float(item["start"]) for item in rows)
+            if total < limits["min_total"] or total > limits["max_total"]:
+                issues.append({"code": "duration_range", "combination": combination_index,
+                               "detail": f"总时长 {total:.2f}s，应为 {limits['min_total']}-{limits['max_total']}s"})
+            if len(rows) < limits["min_segments"] or len(rows) > limits["max_segments"]:
+                issues.append({"code": "segment_count", "combination": combination_index,
+                               "detail": f"共 {len(rows)} 段，应为 {limits['min_segments']}-{limits['max_segments']} 段"})
+            run_start = 0
+            for index in range(1, len(rows) + 1):
+                contiguous = False
+                if index < len(rows):
+                    previous, current = rows[index - 1], rows[index]
+                    gap = float(current["start"]) - float(previous["end"])
+                    contiguous = (int(previous.get("src", 1)) == int(current.get("src", 1))
+                                  and -0.05 <= gap <= CONTIGUOUS_GAP_SECONDS)
+                if contiguous:
+                    continue
+                seconds = sum(float(rows[pos]["end"]) - float(rows[pos]["start"])
+                              for pos in range(run_start, index))
+                if seconds > MAX_CONTINUOUS_SOURCE_SECONDS + 1e-6:
+                    issues.append({"code": "continuous_source_run",
+                                   "combination": combination_index,
+                                   "segments": [run_start, index - 1],
+                                   "detail": f"连续原片段 {run_start + 1}-{index} 合计 {seconds:.2f}s，必须插入异时切点"})
+                run_start = index
+            roles = [str(item.get("role", "")) for item in rows]
+            if not any(role in {"proof", "demo"} for role in roles):
+                issues.append({"code": "missing_proof", "combination": combination_index,
+                               "detail": "缺少 proof 或 demo 效果佐证"})
+            if not rows or rows[-1].get("role") != "close":
+                issues.append({"code": "missing_close", "combination": combination_index,
+                               "detail": "最后一段必须是 close"})
+            if not any(role in {"fit", "pain", "scene", "styling"} for role in roles):
+                issues.append({"code": "missing_customer_relevance", "combination": combination_index,
+                               "detail": "缺少 fit、pain、scene 或 styling 用户相关内容"})
+        return issues
+
+    @staticmethod
+    def _format_plan_issues(issues: list[dict[str, Any]]) -> str:
+        return "；".join(str(item.get("detail") or item.get("code")) for item in issues[:8])
 
     @staticmethod
     def _plan_prompt(job: dict[str, Any], candidates: list[dict[str, Any]]) -> str:
@@ -380,7 +526,7 @@ class JobRunner:
 5. role 只能使用 hook/result/pain/proof/fit/material/craft/color/styling/scene/demo/close/bridge。
 6. 输出字段映射：start=s，end=e，text=t，src 固定为 1。
 7. 必须包含 proof 或 demo；必须包含 close 且 close 放在最后；必须包含 fit/pain/scene/styling 至少一种用户相关内容。
-8. 不要让按源时间连续衔接的片段形成超过 5.5 秒的连续段；用其他时间点内容穿插，形成真实剪辑点。
+8. 每个片段必须为 {MIN_PICK_SECONDS:.1f}-{MAX_PICK_SECONDS:.1f} 秒。即使每段都合格，也不能让按源时间连续衔接的多个片段形成超过 {MAX_CONTINUOUS_SOURCE_SECONDS:.1f} 秒的连续原片；必须用其他时间点内容穿插，形成真实剪辑点。
 9. 在满足上述硬约束后再剔除弱信息，不能因为追求短而破坏时长、段数和结构门槛。
 
 候选片段：

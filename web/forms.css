@@ -78,6 +78,7 @@
 .decision-head p { margin: 0; color: var(--muted); font-size: 12px; }
 .ai-orchestrator { margin: 16px; padding: 16px; display: grid; grid-template-columns: minmax(260px,1fr) minmax(190px,.42fr) auto; align-items: end; gap: 14px; border: 1px solid rgba(168,255,53,.24); border-radius: 11px; background: rgba(168,255,53,.055); }
 .ai-orchestrator b { font-size: 13px; }.ai-orchestrator p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+.constraint-line { display: block; margin-top: 7px; color: var(--amber); font-size: 10px; }
 .ai-orchestrator label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; }
 .external-agent { margin: 0 16px 16px; border: 1px solid var(--line-soft); border-radius: 10px; background: #0d131a; }
 .external-agent>summary { min-height: 46px; padding: 0 14px; display: flex; align-items: center; cursor: pointer; color: var(--muted); font-size: 12px; font-weight: 650; }

@@ -83,6 +83,8 @@ class RunnerTest(unittest.TestCase):
         candidates = [
             {"i": 1, "s": 1.0, "e": 3.0, "c": "hook", "t": "开头"},
             {"i": 2, "s": 4.0, "e": 8.0, "c": "proof", "t": "正文"},
+            {"i": 3, "s": 10.0, "e": 12.0, "c": "styling", "t": "搭配"},
+            {"i": 4, "s": 14.0, "e": 16.0, "c": "close", "t": "收尾"},
         ]
         (engine / "candidate_digest.json").write_text(json.dumps(candidates), encoding="utf-8")
         job_id = self.store.create_job(title="白山茶", source_path="/tmp/source.mp4",
@@ -94,6 +96,8 @@ class RunnerTest(unittest.TestCase):
             "picks": [
                 {"src": 1, "start": 1.0, "end": 3.0, "text": "开头", "role": "hook", "module": "hook_A"},
                 {"src": 1, "start": 4.0, "end": 8.0, "text": "正文", "role": "proof", "module": "body"},
+                {"src": 1, "start": 10.0, "end": 12.0, "text": "搭配", "role": "styling", "module": "body"},
+                {"src": 1, "start": 14.0, "end": 16.0, "text": "收尾", "role": "close", "module": "body"},
             ],
         }
         provider = Mock()
@@ -110,6 +114,45 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(job["status"], "queued")
         self.assertEqual(job["token_input"], 100)
         self.assertEqual(json.loads((engine / "picks.json").read_text())["main_product"], "白山茶")
+
+    def test_invalid_first_ai_plan_is_refined_before_engine(self):
+        workspace = self.root / "job"
+        engine = workspace / "engine"
+        engine.mkdir(parents=True)
+        candidates = [
+            {"i": 1, "s": 1.0, "e": 3.0, "c": "hook", "t": "开头"},
+            {"i": 2, "s": 4.0, "e": 8.0, "c": "proof", "t": "证明"},
+            {"i": 3, "s": 10.0, "e": 12.0, "c": "styling", "t": "搭配"},
+            {"i": 4, "s": 14.0, "e": 16.0, "c": "close", "t": "收尾"},
+        ]
+        (engine / "candidate_digest.json").write_text(json.dumps(candidates), encoding="utf-8")
+        job_id = self.store.create_job(title="前置预检", source_path="/tmp/source.mp4",
+                                       brief="", mode="fast", workspace=str(workspace),
+                                       model_provider="opencode", model_name="test")
+        invalid = {"main_product": "测试", "picks": [
+            {"src": 1, "start": 1.0, "end": 3.0, "text": "开头", "role": "hook", "module": "hook_A"},
+            {"src": 1, "start": 4.0, "end": 8.0, "text": "证明", "role": "proof", "module": "body"},
+        ]}
+        valid = {"main_product": "测试", "picks": [
+            {"src": 1, "start": 1.0, "end": 3.0, "text": "开头", "role": "hook", "module": "hook_A"},
+            {"src": 1, "start": 4.0, "end": 8.0, "text": "证明", "role": "proof", "module": "body"},
+            {"src": 1, "start": 10.0, "end": 12.0, "text": "搭配", "role": "styling", "module": "body"},
+            {"src": 1, "start": 14.0, "end": 16.0, "text": "收尾", "role": "close", "module": "body"},
+        ]}
+        provider = Mock(display_name="OpenCode CLI")
+        provider.generate_plan.side_effect = [
+            {"plan": invalid, "raw": {"result": invalid}, "seconds": 1,
+             "usage": {"input_tokens": 10, "output_tokens": 5}},
+            {"plan": valid, "raw": {"result": valid}, "seconds": 2,
+             "usage": {"input_tokens": 20, "output_tokens": 8}},
+        ]
+        with patch.object(self.runner, "_provider", return_value=provider), \
+                patch.object(self.runner, "enqueue") as enqueue:
+            self.runner._run_ai_plan(self.store.get_job(job_id), engine)
+        self.assertEqual(provider.generate_plan.call_count, 2)
+        self.assertEqual(json.loads((engine / "picks.json").read_text())["picks"], valid["picks"])
+        self.assertEqual(self.store.get_job(job_id)["token_input"], 30)
+        enqueue.assert_called_once_with(job_id)
 
     def test_ai_provider_selection_accepts_codex_antigravity_and_opencode(self):
         for provider_id, model in (("codex", "gpt-5.6-sol"),
@@ -156,6 +199,54 @@ class RunnerTest(unittest.TestCase):
         prompt = self.runner._plan_prompt({"title": "测试", "mode": "fast", "brief": ""}, candidates)
         self.assertIn("31-48 秒", prompt)
         self.assertIn("proof 或 demo", prompt)
+
+    def test_plan_preflight_catches_long_continuous_run_before_engine(self):
+        plan = {"main_product": "白山茶", "picks": [
+            {"src": 1, "start": 7.16, "end": 11.22, "text": "开头", "role": "hook", "module": "hook_A"},
+            {"src": 1, "start": 11.5, "end": 15.28, "text": "面料", "role": "proof", "module": "body"},
+            {"src": 1, "start": 15.6, "end": 19.26, "text": "展示", "role": "demo", "module": "body"},
+            {"src": 1, "start": 35.76, "end": 37.06, "text": "搭配", "role": "styling", "module": "body"},
+            {"src": 1, "start": 41.7, "end": 43.32, "text": "收尾", "role": "close", "module": "body"},
+        ]}
+        issues = self.runner._plan_preflight_issues(
+            plan, {"min_total": 10, "max_total": 30, "min_segments": 4, "max_segments": 12})
+        continuous = [item for item in issues if item["code"] == "continuous_source_run"]
+        self.assertEqual(len(continuous), 1)
+        self.assertIn("11.50s", continuous[0]["detail"])
+
+    def test_plan_preflight_enforces_five_second_pick_limit(self):
+        plan = {"main_product": "测试", "picks": [
+            {"src": 1, "start": 0, "end": 5.2, "text": "过长", "role": "hook", "module": "hook_A"},
+            {"src": 1, "start": 8, "end": 10, "text": "证明", "role": "proof", "module": "body"},
+            {"src": 1, "start": 12, "end": 14, "text": "搭配", "role": "styling", "module": "body"},
+            {"src": 1, "start": 16, "end": 18, "text": "收尾", "role": "close", "module": "body"},
+        ]}
+        issues = self.runner._plan_preflight_issues(
+            plan, {"min_total": 1, "max_total": 30, "min_segments": 2, "max_segments": 12})
+        self.assertIn("segment_too_long", {item["code"] for item in issues})
+
+    def test_retry_returns_invalid_validation_plan_to_edit_stage(self):
+        workspace = self.root / "job"
+        engine = workspace / "engine"
+        engine.mkdir(parents=True)
+        candidates = [
+            {"i": 1, "s": 0, "e": 4, "c": "hook", "t": "开头"},
+            {"i": 2, "s": 4.2, "e": 8.2, "c": "material", "t": "面料"},
+        ]
+        (engine / "candidate_digest.json").write_text(json.dumps(candidates), encoding="utf-8")
+        (engine / "picks.json").write_text(json.dumps({"main_product": "测试", "picks": [
+            {"src": 1, "start": 0, "end": 4, "text": "开头", "role": "hook", "module": "hook_A"},
+            {"src": 1, "start": 4.2, "end": 8.2, "text": "面料", "role": "material", "module": "body"},
+        ]}), encoding="utf-8")
+        job_id = self.store.create_job(title="退回编排", source_path="/tmp/source.mp4",
+                                       brief="", mode="fast", workspace=str(workspace),
+                                       model_provider="opencode", model_name="jysd/glm-5.3-flash")
+        self.store.stage_fail(job_id, "validation", "失败")
+        with patch.object(self.runner, "enqueue") as enqueue:
+            self.runner.retry(job_id)
+        self.assertFalse((engine / "picks.json").exists())
+        self.assertEqual(self.store.get_job(job_id)["current_stage"], "edit_plan")
+        enqueue.assert_called_once_with(job_id)
 
     def test_validation_failure_message_lists_actionable_issues(self):
         workspace = self.root / "job"

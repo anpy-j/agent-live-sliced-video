@@ -108,7 +108,7 @@ class Application:
             job_id = str(args.get("job_id", ""))
             if not self.store.get_job(job_id):
                 raise KeyError("任务不存在")
-            self.runner.enqueue(job_id)
+            self.runner.retry(job_id)
             return {"job_id": job_id, "queued": True}
         if name == "cancel_video_job":
             job_id = str(args.get("job_id", ""))
@@ -241,7 +241,7 @@ class Handler(BaseHTTPRequestHandler):
                     if action == "cancel":
                         return self.json_response({"cancelled": self.app.runner.cancel(job_id)})
                     if action == "retry":
-                        self.app.runner.enqueue(job_id)
+                        self.app.runner.retry(job_id)
                         return self.json_response({"queued": True})
                     if action == "submit":
                         return self.json_response(self.app.runner.submit(job_id, payload))
