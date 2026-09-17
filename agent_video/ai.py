@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -73,12 +74,35 @@ PLAN_SCHEMA: dict[str, Any] = {
                         "color", "styling", "scene", "demo", "close", "bridge",
                     ]},
                     "module": {"type": "string", "enum": ["hook_A", "body"]},
+                    "product": {"type": "string", "minLength": 1},
+                    "color": {"type": "string"},
                 },
-                "required": ["src", "start", "end", "text", "role", "module"],
+                "required": ["src", "start", "end", "text", "role", "module", "product", "color"],
             },
         },
     },
     "required": ["main_product", "picks"],
+}
+
+VISUAL_PLAN_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "replacements": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "block_id": {"type": "string", "minLength": 1},
+                    "candidate_id": {"type": "string", "minLength": 1},
+                    "reason": {"type": "string"},
+                },
+                "required": ["block_id", "candidate_id", "reason"],
+            },
+        },
+    },
+    "required": ["replacements"],
 }
 
 
@@ -108,7 +132,21 @@ class CliProvider:
             "available": self.executable.is_file() and os.access(self.executable, os.X_OK),
             "path": str(self.executable),
             "models": [{"id": model_id, "name": name} for model_id, name in self.models()],
+            "vision_models": [{"id": model_id, "name": name}
+                              for model_id, name in self.vision_models()],
         }
+
+    def vision_models(self) -> list[tuple[str, str]]:
+        return []
+
+    def validate_vision_model(self, model: str) -> None:
+        if model not in {item[0] for item in self.vision_models()}:
+            raise ValueError(f"{self.display_name} 的模型 {model} 不支持当前多模态混剪调用")
+
+    def generate_visual_plan(self, *, model: str, prompt: str, images: list[Path], cwd: Path,
+                             on_process: Callable[[subprocess.Popen[str]], None] | None = None,
+                             timeout: int = 360) -> dict[str, Any]:
+        raise ValueError(f"{self.display_name} 暂不支持多模态混剪")
 
     def validate_model(self, model: str) -> None:
         if model not in {item[0] for item in self.models()}:
@@ -126,6 +164,7 @@ class CliProvider:
             command, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace",
             env={**os.environ, "NO_COLOR": "1", "TERM": "xterm", **(env_overrides or {})},
+            start_new_session=sys.platform != "win32",
         )
         if on_process:
             on_process(process)
@@ -183,12 +222,81 @@ class CliProvider:
                     return found
         elif isinstance(value, str):
             text = value.strip()
-            if text.startswith("```"):
-                text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE)
+            clean = text
+            if clean.startswith("```"):
+                clean = re.sub(r"^```(?:json)?\s*|\s*```$", "", clean, flags=re.IGNORECASE).strip()
             try:
-                return cls._find_plan(json.loads(text))
+                found = cls._find_plan(json.loads(clean))
+                if found:
+                    return found
             except (json.JSONDecodeError, TypeError):
-                return None
+                pass
+            for match in re.finditer(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text, flags=re.IGNORECASE):
+                try:
+                    found = cls._find_plan(json.loads(match.group(1)))
+                    if found:
+                        return found
+                except (json.JSONDecodeError, TypeError):
+                    continue
+            match = re.search(r"(\{[\s\S]*\"main_product\"[\s\S]*\"picks\"[\s\S]*\})", text)
+            if match:
+                try:
+                    found = cls._find_plan(json.loads(match.group(1)))
+                    if found:
+                        return found
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            return None
+        return None
+
+    @classmethod
+    def _find_visual_plan(cls, value: Any) -> dict[str, Any] | None:
+        if isinstance(value, dict):
+            if isinstance(value.get("replacements"), list):
+                return {"replacements": value["replacements"]}
+            for key in ("structured_output", "result", "output", "output_text", "content",
+                        "data", "message"):
+                if key in value:
+                    found = cls._find_visual_plan(value[key])
+                    if found:
+                        return found
+            for nested in value.values():
+                found = cls._find_visual_plan(nested)
+                if found:
+                    return found
+        elif isinstance(value, list):
+            for nested in value:
+                found = cls._find_visual_plan(nested)
+                if found:
+                    return found
+        elif isinstance(value, str):
+            text = value.strip()
+            clean = text
+            if clean.startswith("```"):
+                clean = re.sub(r"^```(?:json)?\s*|\s*```$", "", clean,
+                              flags=re.IGNORECASE).strip()
+            try:
+                found = cls._find_visual_plan(json.loads(clean))
+                if found:
+                    return found
+            except (json.JSONDecodeError, TypeError):
+                pass
+            for match in re.finditer(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text, flags=re.IGNORECASE):
+                try:
+                    found = cls._find_visual_plan(json.loads(match.group(1)))
+                    if found:
+                        return found
+                except (json.JSONDecodeError, TypeError):
+                    continue
+            match = re.search(r"(\{[\s\S]*\"replacements\"[\s\S]*\})", text)
+            if match:
+                try:
+                    found = cls._find_visual_plan(json.loads(match.group(1)))
+                    if found:
+                        return found
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            return None
         return None
 
     @classmethod
@@ -222,6 +330,39 @@ class WorkBuddyCli(CliProvider):
     display_name = "WorkBuddy CLI"
     model_choices = WORKBUDDY_MODELS
 
+    def vision_models(self) -> list[tuple[str, str]]:
+        return [(model_id, name) for model_id, name in self.models()
+                if model_id == "glm-5v-turbo"]
+
+    def generate_visual_plan(self, *, model: str, prompt: str, images: list[Path], cwd: Path,
+                             on_process: Callable[[subprocess.Popen[str]], None] | None = None,
+                             timeout: int = 360) -> dict[str, Any]:
+        self._ensure_available()
+        self.validate_vision_model(model)
+        image_paths = "\n".join(f"- {path.resolve()}" for path in images)
+        command = [
+            str(self.executable), "-p", "--output-format", "json",
+            "--json-schema", json.dumps(VISUAL_PLAN_SCHEMA, ensure_ascii=False,
+                                         separators=(",", ":")),
+            "--model", model, "--max-turns", "4", "--tools", "Read,StructuredOutput",
+            "--add-dir", str(Path(cwd).resolve()),
+            "--permission-mode", "dontAsk", "--no-session-persistence",
+            f"{prompt}\n\n请使用 Read 查看以下图片：\n{image_paths}",
+        ]
+        started = time.monotonic()
+        stdout, stderr, seconds = self._complete(
+            command, cwd=cwd, on_process=on_process, timeout=timeout, started=started)
+        envelope = self._parse_json(stdout)
+        plan = self._find_visual_plan(envelope)
+        if not plan:
+            raise ProviderResponseError(
+                "WorkBuddy 已返回结果，但没有找到 replacements",
+                {"stdout": stdout[-100000:], "stderr": stderr[-20000:],
+                 "envelope": envelope, "seconds": seconds, "model": model},
+            )
+        return {"plan": plan, "raw": envelope, "stderr": stderr.strip(), "seconds": seconds,
+                "usage": self._find_usage(envelope)}
+
     def generate_plan(self, *, model: str, prompt: str, cwd: Path,
                       on_process: Callable[[subprocess.Popen[str]], None] | None = None,
                       timeout: int = 360) -> dict[str, Any]:
@@ -230,7 +371,7 @@ class WorkBuddyCli(CliProvider):
         command = [
             str(self.executable), "-p", "--output-format", "json",
             "--json-schema", json.dumps(PLAN_SCHEMA, ensure_ascii=False, separators=(",", ":")),
-            "--model", model, "--max-turns", "1", "--tools", "",
+            "--model", model, "--max-turns", "1", "--tools", "StructuredOutput",
             "--permission-mode", "dontAsk", "--no-session-persistence", prompt,
         ]
         started = time.monotonic()
@@ -239,7 +380,11 @@ class WorkBuddyCli(CliProvider):
         envelope = self._parse_json(stdout)
         plan = self._find_plan(envelope)
         if not plan:
-            raise RuntimeError("WorkBuddy 已返回结果，但没有找到 main_product 和 picks")
+            raise ProviderResponseError(
+                "WorkBuddy 已返回结果，但没有找到 main_product 和 picks",
+                {"stdout": stdout[-100000:], "stderr": stderr[-20000:],
+                 "envelope": envelope, "seconds": seconds, "model": model},
+            )
         return {"plan": plan, "raw": envelope, "stderr": stderr.strip(), "seconds": seconds,
                 "usage": self._find_usage(envelope)}
 
@@ -303,6 +448,49 @@ class CodexCli(CliProvider):
     display_name = "Codex CLI"
     model_choices = CODEX_MODELS
 
+    def vision_models(self) -> list[tuple[str, str]]:
+        return self.models()
+
+    def generate_visual_plan(self, *, model: str, prompt: str, images: list[Path], cwd: Path,
+                             on_process: Callable[[subprocess.Popen[str]], None] | None = None,
+                             timeout: int = 360) -> dict[str, Any]:
+        self._ensure_available()
+        self.validate_vision_model(model)
+        started = time.monotonic()
+        with tempfile.TemporaryDirectory(prefix="livecut-codex-vision-") as temp_dir:
+            temp = Path(temp_dir)
+            schema_path = temp / "visual-schema.json"
+            output_path = temp / "visual-plan.json"
+            schema_path.write_text(json.dumps(VISUAL_PLAN_SCHEMA, ensure_ascii=False),
+                                   encoding="utf-8")
+            command = [
+                str(self.executable), "exec", "--json", "--color", "never",
+                "--sandbox", "read-only", "--ephemeral", "--skip-git-repo-check",
+                "--ignore-user-config", "--output-schema", str(schema_path),
+                "--output-last-message", str(output_path), "-C", str(temp),
+            ]
+            for image_path in images:
+                command.extend(["--image", str(image_path.resolve())])
+            if model != "auto":
+                command.extend(["--model", model])
+            command.append(prompt)
+            stdout, stderr, seconds = self._complete(
+                command, cwd=temp, on_process=on_process, timeout=timeout, started=started)
+            if not output_path.is_file():
+                raise RuntimeError("Codex 已结束，但没有生成多模态混剪结果")
+            plan = self._parse_json(output_path.read_text(encoding="utf-8"))
+            events = []
+            for line in stdout.splitlines():
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        normalized = self._find_visual_plan(plan)
+        if not normalized:
+            raise RuntimeError("Codex 已返回结果，但没有找到 replacements")
+        return {"plan": normalized, "raw": {"result": plan, "events": events},
+                "stderr": stderr.strip(), "seconds": seconds, "usage": self._find_usage(events)}
+
     def generate_plan(self, *, model: str, prompt: str, cwd: Path,
                       on_process: Callable[[subprocess.Popen[str]], None] | None = None,
                       timeout: int = 360) -> dict[str, Any]:
@@ -339,7 +527,6 @@ class CodexCli(CliProvider):
             raise RuntimeError("Codex 已返回结果，但没有找到 main_product 和 picks")
         return {"plan": normalized, "raw": {"result": plan, "events": events},
                 "stderr": stderr.strip(), "seconds": seconds, "usage": self._find_usage(events)}
-
 
 class OpenCodeCli(CliProvider):
     provider_id = "opencode"
@@ -422,7 +609,7 @@ class OpenCodeCli(CliProvider):
 最高优先级输出契约：
 1. 第一个字符必须是 {{，最后一个字符必须是 }}。
 2. 顶层必须同时包含非空字符串 main_product 和非空数组 picks，字段名不得翻译、改名或省略。
-3. picks 的每一项必须包含 src、start、end、text、role、module 六个字段。
+3. picks 的每一项必须包含 src、start、end、text、role、module、product、color 八个字段。
 4. 不得输出分析、解释、道歉、Markdown、代码围栏或 JSON 之外的任何字符。
 5. 即使候选不完美，也必须选择最接近约束的最佳完整方案并返回上述对象；不得只描述方案或拒绝作答。
 

@@ -26,10 +26,34 @@ class WorkBuddyCliTest(unittest.TestCase):
         envelope = {"result": '{"main_product":"针织衫","picks":[]}'}
         self.assertEqual(WorkBuddyCli._find_plan(envelope)["main_product"], "针织衫")
 
+    def test_extracts_plan_from_text_with_markdown_block(self):
+        envelope = {"result": '这是编排结果：\n\n```json\n{"main_product":"风衣","picks":[]}\n```\n请查收。'}
+        self.assertEqual(WorkBuddyCli._find_plan(envelope)["main_product"], "风衣")
+
+    def test_workbuddy_command_includes_structured_output_tool(self):
+        provider = WorkBuddyCli(Path("/tmp/workbuddy"))
+        with patch.object(provider, "_ensure_available"), \
+                patch.object(provider, "validate_model"), \
+                patch.object(provider, "_complete", return_value=('{"result": {"structured_output": {"main_product": "T恤", "picks": []}}}', "", 1)) as complete:
+            provider.generate_plan(model="auto", prompt="test", cwd=Path("/tmp"))
+        cmd = complete.call_args.args[0]
+        tools_idx = cmd.index("--tools")
+        self.assertEqual(cmd[tools_idx + 1], "StructuredOutput")
+
     def test_all_providers_share_structured_plan_parser(self):
         envelope = {"output_text": '{"main_product":"风衣","picks":[]}'}
         self.assertEqual(AntigravityCli._find_plan(envelope)["main_product"], "风衣")
         self.assertEqual(CodexCli._find_plan(envelope)["main_product"], "风衣")
+
+    def test_visual_plan_parser_and_capability_lists(self):
+        plan = {"replacements": [
+            {"block_id": "body:1", "candidate_id": "C003", "reason": "同款全身"}]}
+        self.assertEqual(WorkBuddyCli._find_visual_plan({"result": json.dumps(plan)}), plan)
+        self.assertEqual(WorkBuddyCli(Path("/tmp/workbuddy")).vision_models(),
+                         [("glm-5v-turbo", "GLM 5V Turbo")])
+        self.assertIn(("gpt-5.6-sol", "GPT-5.6 Sol"),
+                      CodexCli(Path("/tmp/codex")).vision_models())
+        self.assertEqual(AntigravityCli(Path("/tmp/agy")).vision_models(), [])
 
     def test_antigravity_models_are_discovered_from_cli(self):
         provider = AntigravityCli(Path("/tmp/agy"))
