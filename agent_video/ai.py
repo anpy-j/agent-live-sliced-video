@@ -82,6 +82,14 @@ PLAN_SCHEMA: dict[str, Any] = {
 }
 
 
+class ProviderResponseError(RuntimeError):
+    """Provider completed, but its response could not become a LiveCut plan."""
+
+    def __init__(self, message: str, raw: dict[str, Any]):
+        super().__init__(message)
+        self.raw = raw
+
+
 class CliProvider:
     provider_id = ""
     display_name = ""
@@ -125,11 +133,19 @@ class CliProvider:
             stdout, stderr = process.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             process.kill()
-            process.communicate()
-            raise RuntimeError(f"{self.display_name} 编排超过 {timeout // 60} 分钟，已停止") from None
+            stdout, stderr = process.communicate()
+            raise ProviderResponseError(
+                f"{self.display_name} 编排超过 {timeout // 60} 分钟，已停止",
+                {"stdout": (stdout or "")[-100000:], "stderr": (stderr or "")[-20000:],
+                 "timeout_seconds": timeout, "returncode": process.returncode},
+            ) from None
         if process.returncode:
             tail = (stderr or stdout).strip()[-1600:]
-            raise RuntimeError(f"{self.display_name} 编排失败：{tail or f'退出码 {process.returncode}'}")
+            raise ProviderResponseError(
+                f"{self.display_name} 编排失败：{tail or f'退出码 {process.returncode}'}",
+                {"stdout": (stdout or "")[-100000:], "stderr": (stderr or "")[-20000:],
+                 "returncode": process.returncode},
+            )
         return stdout, stderr, round(time.monotonic() - started, 2)
 
     @classmethod
@@ -401,7 +417,21 @@ class OpenCodeCli(CliProvider):
         self._ensure_available()
         self.validate_model(model)
         schema = json.dumps(PLAN_SCHEMA, ensure_ascii=False, separators=(",", ":"))
-        constrained_prompt = f"{prompt}\n\n只输出 JSON，不要 Markdown。输出必须符合此 JSON Schema：{schema}"
+        constrained_prompt = f"""你现在是一个只返回 JSON 的编排接口，不是聊天助手。
+
+最高优先级输出契约：
+1. 第一个字符必须是 {{，最后一个字符必须是 }}。
+2. 顶层必须同时包含非空字符串 main_product 和非空数组 picks，字段名不得翻译、改名或省略。
+3. picks 的每一项必须包含 src、start、end、text、role、module 六个字段。
+4. 不得输出分析、解释、道歉、Markdown、代码围栏或 JSON 之外的任何字符。
+5. 即使候选不完美，也必须选择最接近约束的最佳完整方案并返回上述对象；不得只描述方案或拒绝作答。
+
+{prompt}
+
+最终响应只允许是一个符合以下 Schema 的 JSON 对象：
+{schema}
+
+再次确认：必须返回 main_product 和 picks；只输出 JSON 对象。"""
         started = time.monotonic()
         with tempfile.TemporaryDirectory(prefix="livecut-opencode-") as temp_dir:
             temp = Path(temp_dir)
@@ -418,6 +448,10 @@ class OpenCodeCli(CliProvider):
             )
         events, plan = self._parse_events(stdout)
         if not plan:
-            raise RuntimeError("OpenCode 已返回结果，但没有找到 main_product 和 picks")
+            raise ProviderResponseError(
+                "OpenCode 已返回结果，但没有找到 main_product 和 picks",
+                {"stdout": stdout[-100000:], "stderr": stderr[-20000:],
+                 "events": events[-100:], "seconds": seconds, "model": model},
+            )
         return {"plan": plan, "raw": {"events": events}, "stderr": stderr.strip(),
                 "seconds": seconds, "usage": self._find_usage(events)}

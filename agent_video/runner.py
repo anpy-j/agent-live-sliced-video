@@ -420,8 +420,18 @@ class JobRunner:
             current = self.store.get_job(job_id)
             if current and current.get("status") == "cancelled":
                 return
+            diagnostic = getattr(exc, "raw", None)
+            diagnostic_artifact = None
+            if isinstance(diagnostic, dict):
+                diagnostic_path = Path(job["workspace"]) / f"{provider_id}-plan-failure.json"
+                diagnostic_path.write_text(
+                    json.dumps(diagnostic, ensure_ascii=False, indent=2), encoding="utf-8")
+                diagnostic_artifact = self.store.add_artifact(
+                    job_id, "edit_plan", "ai_response",
+                    f"{provider.display_name} 失败原始响应", diagnostic_path, "application/json")
             self.store.add_event(job_id, "edit_plan", "warning", "ai_plan_failed", str(exc),
-                                 {"provider": provider_id, "model": model})
+                                 {"provider": provider_id, "model": model,
+                                  "diagnostic_artifact": diagnostic_artifact})
             self.store.stage_wait(job_id, "edit_plan",
                                   f"{provider.display_name} · {model} 编排失败，可换模型重试或手动决定",
                                   {"provider": provider_id, "model": model, "error": str(exc)})
@@ -511,7 +521,14 @@ class JobRunner:
         preference = job.get("brief") or "无额外偏好"
         limits = JobRunner._editing_constraints(candidates)
         target_picks = min(limits["max_segments"], limits["min_segments"] + 2)
-        return f"""你是女装直播短视频的创意导演。请只从候选片段中选择一个最强成片方案，并返回符合 JSON Schema 的对象。
+        return f"""任务目标：从候选片段中完成一份可直接执行的女装直播短视频编排。
+
+输出是接口数据，不是策划文案：
+- 必须返回一个 JSON 对象，顶层只包含 main_product 和 picks。
+- main_product 必须是非空商品名；优先根据任务名称“{job['title']}”填写，禁止省略。
+- picks 必须是非空数组，按最终成片播放顺序排列，不能只返回分析或片段编号。
+- 每个 pick 必须完整包含 src/start/end/text/role/module；数值和 text 必须从候选逐字复制。
+- 响应中不要出现解释、Markdown 或代码围栏。即使素材不完美，也必须返回最接近全部约束的最佳方案。
 
 任务：{job['title']}
 模式：{job['mode']}

@@ -3,7 +3,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from agent_video.ai import AntigravityCli, CodexCli, OpenCodeCli, WorkBuddyCli
+from agent_video.ai import (AntigravityCli, CodexCli, OpenCodeCli,
+                            ProviderResponseError, WorkBuddyCli)
 
 
 class WorkBuddyCliTest(unittest.TestCase):
@@ -67,6 +68,35 @@ class WorkBuddyCliTest(unittest.TestCase):
     def test_opencode_usage_reads_jsonl_token_shape(self):
         usage = OpenCodeCli._find_usage({"part": {"tokens": {"input": 321, "output": 87}}})
         self.assertEqual(usage, {"input_tokens": 321, "output_tokens": 87})
+
+    def test_opencode_prompt_puts_required_output_contract_first_and_last(self):
+        provider = OpenCodeCli(Path("/tmp/opencode"))
+        valid = json.dumps({"type": "text", "part": {"text": json.dumps({
+            "main_product": "白山茶", "picks": [{
+                "src": 1, "start": 1, "end": 3, "text": "开头",
+                "role": "hook", "module": "hook_A",
+            }],
+        }, ensure_ascii=False)}}, ensure_ascii=False)
+        with patch.object(provider, "_ensure_available"), \
+                patch.object(provider, "validate_model"), \
+                patch.object(provider, "_complete", return_value=(valid, "", 1)) as complete:
+            provider.generate_plan(model="jysd/test", prompt="业务规则", cwd=Path("/tmp"))
+        sent_prompt = complete.call_args.args[0][-1]
+        self.assertTrue(sent_prompt.startswith("你现在是一个只返回 JSON 的编排接口"))
+        self.assertIn("顶层必须同时包含非空字符串 main_product 和非空数组 picks", sent_prompt)
+        self.assertTrue(sent_prompt.endswith("必须返回 main_product 和 picks；只输出 JSON 对象。"))
+
+    def test_opencode_invalid_response_keeps_raw_diagnostic(self):
+        provider = OpenCodeCli(Path("/tmp/opencode"))
+        stdout = json.dumps({"type": "text", "part": {"text": "我建议先分析素材"}},
+                            ensure_ascii=False)
+        with patch.object(provider, "_ensure_available"), \
+                patch.object(provider, "validate_model"), \
+                patch.object(provider, "_complete", return_value=(stdout, "warning", 2)):
+            with self.assertRaises(ProviderResponseError) as raised:
+                provider.generate_plan(model="jysd/test", prompt="业务规则", cwd=Path("/tmp"))
+        self.assertEqual(raised.exception.raw["stdout"], stdout)
+        self.assertEqual(raised.exception.raw["stderr"], "warning")
 
 
 if __name__ == "__main__":

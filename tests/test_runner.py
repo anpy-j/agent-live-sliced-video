@@ -199,6 +199,8 @@ class RunnerTest(unittest.TestCase):
         prompt = self.runner._plan_prompt({"title": "测试", "mode": "fast", "brief": ""}, candidates)
         self.assertIn("31-48 秒", prompt)
         self.assertIn("proof 或 demo", prompt)
+        self.assertIn("顶层只包含 main_product 和 picks", prompt)
+        self.assertIn("禁止省略", prompt)
 
     def test_plan_preflight_catches_long_continuous_run_before_engine(self):
         plan = {"main_product": "白山茶", "picks": [
