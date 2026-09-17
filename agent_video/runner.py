@@ -20,6 +20,7 @@ AI_PROVIDER_IDS = frozenset({"workbuddy", "antigravity", "codex", "opencode"})
 MIN_PICK_SECONDS = 1.2
 MAX_PICK_SECONDS = 5.0
 MAX_CONTINUOUS_SOURCE_SECONDS = 5.0
+MAX_ROLE_CLUSTER_SECONDS = 8.0
 CONTIGUOUS_GAP_SECONDS = 0.75
 
 
@@ -69,20 +70,54 @@ class JobRunner:
         if job.get("current_stage") == "validation" and issues and picks_path.is_file():
             rejected = workspace / f"rejected-picks-{int(time.time())}.json"
             shutil.copy2(picks_path, rejected)
-            picks_path.unlink()
             (workspace / "validation-repair.json").unlink(missing_ok=True)
             self.store.add_artifact(job_id, "edit_plan", "decision", "未通过预检的旧编排",
                                     rejected, "application/json")
-            self.store.update_stage(job_id, "edit_plan", status="pending", progress=0,
-                                    message="旧方案未通过编排预检，等待重新编排",
-                                    finished_at=None, error=None)
+            restored = self._last_preflight_plan(job, candidates, limits)
+            if restored:
+                picks_path.write_text(json.dumps(restored, ensure_ascii=False, indent=2),
+                                      encoding="utf-8")
+                self.store.update_stage(job_id, "edit_plan", status="succeeded", progress=1,
+                                        message="已恢复最近一次通过预检的 AI 编排", error=None)
+                self.store.add_event(job_id, "edit_plan", "success", "plan_restored",
+                                     "已恢复此前通过预检的 AI 编排，无需再次调用模型",
+                                     {"picks": len(restored["picks"]), "backup": str(rejected)})
+            else:
+                picks_path.unlink()
+                self.store.update_stage(job_id, "edit_plan", status="pending", progress=0,
+                                        message="旧方案未通过编排预检，等待重新编排",
+                                        finished_at=None, error=None)
+                self.store.add_event(job_id, "edit_plan", "warning", "plan_returned",
+                                     "旧方案已退回 AI 编排节点，不再重复进入渲染校验",
+                                     {"issues": issues, "backup": str(rejected)})
             self.store.update_stage(job_id, "validation", status="pending", progress=0,
-                                    message="等待新编排方案", finished_at=None, error=None)
-            self.store.update_job(job_id, current_stage="edit_plan", progress=20, error=None)
-            self.store.add_event(job_id, "edit_plan", "warning", "plan_returned",
-                                 "旧方案已退回 AI 编排节点，不再重复进入渲染校验",
-                                 {"issues": issues, "backup": str(rejected)})
+                                    message="等待重新校验", finished_at=None, error=None)
+            self.store.update_job(job_id, current_stage="validation" if restored else "edit_plan",
+                                  progress=45 if restored else 20, error=None)
         self.enqueue(job_id)
+
+    def _last_preflight_plan(self, job: dict[str, Any], candidates: list[dict[str, Any]],
+                             limits: dict[str, int]) -> dict[str, Any] | None:
+        provider_id = str(job.get("model_provider") or "")
+        response = self._read_json(
+            Path(job["workspace"]) / f"{provider_id}-plan-response.json", {})
+        attempts = response.get("attempts") if isinstance(response, dict) else None
+        if not isinstance(attempts, list):
+            return None
+        for attempt in reversed(attempts):
+            if not isinstance(attempt, dict):
+                continue
+            plan = CliProvider._find_plan(attempt.get("raw"))
+            if not plan:
+                continue
+            try:
+                self._validate_edit_plan(plan)
+                self._validate_candidate_picks(plan, candidates)
+            except (TypeError, ValueError):
+                continue
+            if not self._plan_preflight_issues(plan, limits):
+                return plan
+        return None
 
     def cancel(self, job_id: str) -> bool:
         process = self._active.get(job_id)
@@ -500,6 +535,21 @@ class JobRunner:
                                    "detail": f"连续原片段 {run_start + 1}-{index} 合计 {seconds:.2f}s，必须插入异时切点"})
                 run_start = index
             roles = [str(item.get("role", "")) for item in rows]
+            role_start = 0
+            for index in range(1, len(rows) + 1):
+                same_role = (index < len(rows)
+                             and roles[index] == roles[index - 1])
+                if same_role:
+                    continue
+                seconds = sum(float(rows[pos]["end"]) - float(rows[pos]["start"])
+                              for pos in range(role_start, index))
+                if index - role_start > 2 and seconds > MAX_ROLE_CLUSTER_SECONDS + 1e-6:
+                    role = roles[role_start] or "unknown"
+                    issues.append({"code": "role_cluster",
+                                   "combination": combination_index,
+                                   "segments": [role_start, index - 1],
+                                   "detail": f"{role} 连续 {index - role_start} 段 / {seconds:.2f}s，超过 {MAX_ROLE_CLUSTER_SECONDS:.0f}s"})
+                role_start = index
             if not any(role in {"proof", "demo"} for role in roles):
                 issues.append({"code": "missing_proof", "combination": combination_index,
                                "detail": "缺少 proof 或 demo 效果佐证"})
@@ -544,7 +594,8 @@ class JobRunner:
 6. 输出字段映射：start=s，end=e，text=t，src 固定为 1。
 7. 必须包含 proof 或 demo；必须包含 close 且 close 放在最后；必须包含 fit/pain/scene/styling 至少一种用户相关内容。
 8. 每个片段必须为 {MIN_PICK_SECONDS:.1f}-{MAX_PICK_SECONDS:.1f} 秒。即使每段都合格，也不能让按源时间连续衔接的多个片段形成超过 {MAX_CONTINUOUS_SOURCE_SECONDS:.1f} 秒的连续原片；必须用其他时间点内容穿插，形成真实剪辑点。
-9. 在满足上述硬约束后再剔除弱信息，不能因为追求短而破坏时长、段数和结构门槛。
+9. 相同 role 连续 3 段及以上时，累计不得超过 {MAX_ROLE_CLUSTER_SECONDS:.0f} 秒；超限前必须穿插其他 role。
+10. 在满足上述硬约束后再剔除弱信息，不能因为追求短而破坏时长、段数和结构门槛。
 
 候选片段：
 {payload}"""
@@ -563,7 +614,8 @@ class JobRunner:
         job_id = job["id"]
         self._ensure_done(job_id, "edit_plan", "Agent 已完成音画编排")
         self.store.stage_start(job_id, "validation", "正在对齐时间线并执行结构、边界与画面规则校验")
-        candidates = self._read_json(engine_work / "candidate_digest.json", [])
+        candidates = self._eligible_candidates(
+            self._read_json(engine_work / "candidate_digest.json", []))
         limits = self._editing_constraints(candidates)
         limit_options = ["--min-total", str(limits["min_total"]),
                          "--max-total", str(limits["max_total"]),
@@ -580,8 +632,6 @@ class JobRunner:
             self.store.add_event(job_id, "validation", "warning", "validation_checked",
                                  f"规则校验完成，发现 {len(issues)} 个需要修正的问题",
                                  {"issues": issues, "state": summary.get("state")})
-            if self._try_validation_repair(job, engine_work, summary, candidates):
-                return
             self._fail_engine(job_id, "validation", code, summary)
             return
         self.store.stage_done(job_id, "validation", "时间线、边界与画面规则校验通过",
@@ -606,79 +656,6 @@ class JobRunner:
         proxy_marker.write_text(json.dumps(marker_data, ensure_ascii=False, indent=2), encoding="utf-8")
         self.store.add_artifact(job_id, "rough_cut", "report", "粗剪摘要", proxy_marker, "application/json")
         self.store.stage_wait(job_id, "rough_cut", "低清粗剪已生成，请观看实际视频后确认", marker_data)
-
-    def _try_validation_repair(self, job: dict[str, Any], engine_work: Path,
-                               summary: dict[str, Any], candidates: list[dict[str, Any]]) -> bool:
-        issues = summary.get("issues") or []
-        provider_id = str(job.get("model_provider") or "manual")
-        marker = Path(job["workspace"]) / "validation-repair.json"
-        previous = self._read_json(marker, {})
-        attempts = int(previous.get("attempts", 0))
-        resumes = int(previous.get("resumes", 0))
-        interrupted = (attempts == 1 and previous.get("status") in {None, "running"}
-                       and resumes < 1)
-        if not issues or provider_id not in AI_PROVIDER_IDS or (attempts >= 1 and not interrupted):
-            return False
-        provider = self._provider(provider_id)
-        model = str(job.get("model_name") or "auto")
-        old_plan = self._read_json(engine_work / "picks.json", {})
-        repair_prompt = self._plan_prompt(job, candidates) + "\n\n上一版未通过校验。必须返回完整替代方案，不是补丁。\n" + \
-            "上一版：" + json.dumps(old_plan, ensure_ascii=False, separators=(",", ":")) + \
-            "\n校验错误：" + json.dumps(issues, ensure_ascii=False, separators=(",", ":"))
-        marker.write_text(json.dumps({"attempts": 1, "resumes": resumes + int(interrupted),
-                                     "status": "running", "issues": issues,
-                                     "started_at": previous.get("started_at") or utc_now(),
-                                     "resumed_at": utc_now() if interrupted else None},
-                                     ensure_ascii=False, indent=2), encoding="utf-8")
-        self.store.update_stage(job["id"], "validation", status="running", progress=0.5,
-                                message=f"校验未通过，正在由 {provider.display_name} 自动修正编排")
-        self.store.add_event(job["id"], "validation", "warning", "auto_repair_started",
-                             "上次修复被中断，正在恢复自动修复" if interrupted else
-                             "校验发现结构问题，正在自动修正编排",
-                             {"issues": issues, "resumed": interrupted, "model": model})
-        try:
-            result = self._with_heartbeat(job["id"], lambda: provider.generate_plan(
-                model=model, prompt=repair_prompt, cwd=self.project_root,
-                on_process=lambda process: self._active.__setitem__(job["id"], process),
-            ))
-            plan = result["plan"]
-            self._validate_edit_plan(plan)
-            self._validate_candidate_picks(plan, candidates)
-            (engine_work / "picks.json").write_text(
-                json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
-            response = Path(job["workspace"]) / f"{provider_id}-validation-repair-response.json"
-            response.write_text(json.dumps(result["raw"], ensure_ascii=False, indent=2), encoding="utf-8")
-            self.store.add_artifact(job["id"], "validation", "ai_response",
-                                    f"{provider.display_name} 自动修复响应", response,
-                                    "application/json")
-            usage = result.get("usage") or {}
-            marker.write_text(json.dumps({"attempts": 1, "resumes": resumes + int(interrupted),
-                                         "status": "completed", "issues": issues,
-                                         "completed_at": utc_now(), "seconds": result.get("seconds")},
-                                         ensure_ascii=False, indent=2), encoding="utf-8")
-            self.store.update_job(
-                job["id"], error=None,
-                token_input=int(job.get("token_input") or 0) + int(usage.get("input_tokens", 0)),
-                token_output=int(job.get("token_output") or 0) + int(usage.get("output_tokens", 0)),
-            )
-            self.store.update_stage(job["id"], "validation", status="pending", progress=0,
-                                    message="自动修复方案已生成，等待重新校验", error=None)
-            self.store.add_event(job["id"], "validation", "success", "auto_repair_completed",
-                                 f"自动修复已重选 {len(plan['picks'])} 个片段，准备重新校验",
-                                 {"provider": provider_id, "model": model, "usage": usage})
-            self.enqueue(job["id"])
-            return True
-        except Exception as exc:
-            summary["auto_repair_error"] = str(exc)
-            marker.write_text(json.dumps({"attempts": 1, "resumes": resumes + int(interrupted),
-                                         "status": "failed", "issues": issues,
-                                         "failed_at": utc_now(), "error": str(exc)},
-                                         ensure_ascii=False, indent=2), encoding="utf-8")
-            self.store.add_event(job["id"], "validation", "error", "auto_repair_failed",
-                                 f"自动修复未完成：{exc}", {"model": model})
-            return False
-        finally:
-            self._active.pop(job["id"], None)
 
     def _deliver(self, job: dict[str, Any], source: Path, workspace: Path,
                  engine_work: Path) -> None:
@@ -943,6 +920,8 @@ class JobRunner:
         state = summary.get("state")
         issue_names = {
             "continuous_source_run": "连续原片画面过长",
+            "role_cluster": "同类内容连续聚集",
+            "out_of_bounds": "片段边界超出素材",
             "duration_range": "成片时长不在目标范围",
             "too_few_segments": "入选片段数量不足",
             "too_many_segments": "入选片段数量过多",
