@@ -12,10 +12,10 @@ from typing import Any, Iterator
 
 STAGE_DEFINITIONS = [
     ("material_index", "素材索引", 20),
-    ("edit_plan", "AI 音画编排", 40),
-    ("validation", "校验与自动修复", 60),
-    ("rough_cut", "低清粗剪与审片", 80),
-    ("delivery", "高清导出与 QC", 100),
+    ("edit_plan", "AI 文本编排", 40),
+    ("validation", "文本校验与原声锁定", 65),
+    ("visual_mix", "多模态画面混剪", 80),
+    ("delivery", "一次高清渲染", 100),
 ]
 
 
@@ -69,6 +69,14 @@ class Store:
                   engine_state TEXT,
                   model_provider TEXT NOT NULL DEFAULT 'manual',
                   model_name TEXT,
+                  visual_model_provider TEXT NOT NULL DEFAULT 'manual',
+                  visual_model_name TEXT,
+                  products_json TEXT NOT NULL DEFAULT '[]',
+                  materials_json TEXT NOT NULL DEFAULT '[]',
+                  colors_json TEXT NOT NULL DEFAULT '[]',
+                  subtitle_path TEXT,
+                  delivery_mode TEXT NOT NULL DEFAULT 'merged',
+                  creative_strategy TEXT NOT NULL DEFAULT 'auto',
                   token_input INTEGER NOT NULL DEFAULT 0,
                   token_output INTEGER NOT NULL DEFAULT 0
                 );
@@ -121,29 +129,81 @@ class Store:
             columns = {row[1] for row in con.execute("PRAGMA table_info(jobs)").fetchall()}
             if "model_provider" not in columns:
                 con.execute("ALTER TABLE jobs ADD COLUMN model_provider TEXT NOT NULL DEFAULT 'manual'")
+            if "visual_model_provider" not in columns:
+                con.execute("ALTER TABLE jobs ADD COLUMN visual_model_provider TEXT NOT NULL DEFAULT 'manual'")
+            if "visual_model_name" not in columns:
+                con.execute("ALTER TABLE jobs ADD COLUMN visual_model_name TEXT")
+            if "products_json" not in columns:
+                con.execute("ALTER TABLE jobs ADD COLUMN products_json TEXT NOT NULL DEFAULT '[]'")
+            if "materials_json" not in columns:
+                con.execute("ALTER TABLE jobs ADD COLUMN materials_json TEXT NOT NULL DEFAULT '[]'")
+            if "colors_json" not in columns:
+                con.execute("ALTER TABLE jobs ADD COLUMN colors_json TEXT NOT NULL DEFAULT '[]'")
+            if "subtitle_path" not in columns:
+                con.execute("ALTER TABLE jobs ADD COLUMN subtitle_path TEXT")
+            if "delivery_mode" not in columns:
+                con.execute("ALTER TABLE jobs ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'merged'")
+            if "creative_strategy" not in columns:
+                con.execute("ALTER TABLE jobs ADD COLUMN creative_strategy TEXT NOT NULL DEFAULT 'auto'")
+            con.execute("UPDATE jobs SET current_stage='validation' "
+                        "WHERE current_stage IN ('rough_cut','pre_render_review')")
+            con.execute("UPDATE events SET stage_id='validation' "
+                        "WHERE stage_id IN ('rough_cut','pre_render_review')")
+            con.execute("UPDATE artifacts SET stage_id='validation' "
+                        "WHERE stage_id IN ('rough_cut','pre_render_review')")
+            con.execute("DELETE FROM stages WHERE stage_id IN ('rough_cut','pre_render_review')")
+            con.execute("UPDATE stages SET name='文本校验与原声锁定', position=65 "
+                        "WHERE stage_id='validation'")
+            con.execute("UPDATE stages SET name='AI 文本编排', position=40 "
+                        "WHERE stage_id='edit_plan'")
+            con.execute("UPDATE stages SET name='一次高清渲染' "
+                        "WHERE stage_id='delivery'")
+            con.execute("INSERT OR IGNORE INTO stages(job_id,stage_id,name,position) "
+                        "SELECT id,'visual_mix','多模态画面混剪',80 FROM jobs")
+            con.execute("UPDATE stages SET status='succeeded',progress=1,"
+                        "message='旧任务在升级前已完成' WHERE stage_id='visual_mix' "
+                        "AND job_id IN (SELECT id FROM jobs WHERE status='completed')")
 
     def create_job(self, *, title: str, source_path: str, brief: str, mode: str,
                    workspace: str, model_provider: str = "manual",
-                   model_name: str | None = None) -> str:
+                   model_name: str | None = None, visual_model_provider: str = "manual",
+                   visual_model_name: str | None = None, products: list[str] | None = None,
+                   materials: list[str] | None = None, colors: list[str] | None = None,
+                   subtitle_path: str | None = None,
+                   delivery_mode: str = "merged", creative_strategy: str = "auto") -> str:
         job_id = f"job_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
         now = utc_now()
         with self.connect() as con:
             con.execute(
-                "INSERT INTO jobs(id,title,source_path,brief,status,current_stage,progress,mode,created_at,updated_at,workspace,model_provider,model_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO jobs(id,title,source_path,brief,status,current_stage,progress,mode,created_at,updated_at,workspace,model_provider,model_name,visual_model_provider,visual_model_name,products_json,materials_json,colors_json,subtitle_path,delivery_mode,creative_strategy) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (job_id, title, source_path, brief, "queued", "material_index", 0, mode, now, now,
-                 workspace, model_provider, model_name),
+                 workspace, model_provider, model_name, visual_model_provider, visual_model_name,
+                 _json(products or []), _json(materials or []), _json(colors or []),
+                 subtitle_path, delivery_mode, creative_strategy),
             )
             con.executemany(
                 "INSERT INTO stages(job_id,stage_id,name,position) VALUES(?,?,?,?)",
                 [(job_id, stage_id, name, position) for stage_id, name, position in STAGE_DEFINITIONS],
             )
         self.add_event(job_id, None, "info", "job_created", "任务已进入队列",
-                       {"mode": mode, "model_provider": model_provider, "model_name": model_name})
+                       {"mode": mode, "model_provider": model_provider, "model_name": model_name,
+                        "visual_model_provider": visual_model_provider,
+                        "visual_model_name": visual_model_name, "products": products or [],
+                        "materials": materials or [], "colors": colors or [],
+                        "subtitle_path": subtitle_path, "delivery_mode": delivery_mode,
+                        "creative_strategy": creative_strategy})
         return job_id
 
     def list_jobs(self, limit: int = 100) -> list[dict[str, Any]]:
         with self.connect() as con:
             rows = con.execute("SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_recoverable_jobs(self) -> list[dict[str, Any]]:
+        with self.connect() as con:
+            rows = con.execute(
+                "SELECT * FROM jobs WHERE status IN ('queued','running','waiting_input') ORDER BY created_at"
+            ).fetchall()
         return [dict(row) for row in rows]
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
@@ -155,6 +215,9 @@ class Store:
             events = con.execute("SELECT * FROM events WHERE job_id=? ORDER BY id DESC LIMIT 200", (job_id,)).fetchall()
             artifacts = con.execute("SELECT * FROM artifacts WHERE job_id=? ORDER BY created_at DESC", (job_id,)).fetchall()
         job = dict(row)
+        for field in ("products_json", "materials_json", "colors_json"):
+            raw = job.pop(field, "[]")
+            job[field.removesuffix("_json")] = json.loads(raw or "[]")
         job["stages"] = [self._decode_row(x, "result_json") for x in stages]
         job["events"] = [self._decode_row(x, "payload_json") for x in events]
         job["artifacts"] = [dict(x) for x in artifacts]
@@ -245,6 +308,17 @@ class Store:
         with self.connect() as con:
             row = con.execute("SELECT * FROM artifacts WHERE id=?", (artifact_id,)).fetchone()
         return dict(row) if row else None
+
+    def delete_artifacts(self, job_id: str, stage_ids: set[str]) -> None:
+        """Remove stale artifact registrations when a review sends work upstream."""
+        if not stage_ids:
+            return
+        placeholders = ",".join("?" for _ in stage_ids)
+        with self.connect() as con:
+            con.execute(
+                f"DELETE FROM artifacts WHERE job_id=? AND stage_id IN ({placeholders})",
+                [job_id, *sorted(stage_ids)],
+            )
 
     def set_setting(self, key: str, value: Any) -> None:
         with self.connect() as con:

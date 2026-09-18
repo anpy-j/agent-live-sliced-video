@@ -1,0 +1,64 @@
+"""Shared deterministic policy used by AI preflight and final timeline validation."""
+from __future__ import annotations
+
+import difflib
+import re
+from typing import Any
+
+MIN_SEGMENT_SECONDS = 1.2
+MAX_SEGMENT_SECONDS = 5.0
+ALIGNMENT_EXPANSION_MARGIN = 0.30
+MAX_DEMOS = 3
+MAX_MATERIAL_SEGMENTS = 1
+
+
+def normalized(text: str) -> str:
+    return "".join(char.lower() for char in text
+                   if char.isalnum() or "\u4e00" <= char <= "\u9fff")
+
+
+def _near_duplicate(left: str, right: str) -> bool:
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    ratio = difflib.SequenceMatcher(None, left, right).ratio()
+    left_pairs = {left[index:index + 2] for index in range(max(0, len(left) - 1))}
+    right_pairs = {right[index:index + 2] for index in range(max(0, len(right) - 1))}
+    overlap = len(left_pairs & right_pairs) / max(1, len(left_pairs | right_pairs))
+    return min(len(left), len(right)) >= 6 and (ratio >= 0.84 or overlap >= 0.30)
+
+
+def shared_issues(rows: list[dict[str, Any]], *, pre_alignment: bool = False) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    maximum = MAX_SEGMENT_SECONDS - (ALIGNMENT_EXPANSION_MARGIN if pre_alignment else 0)
+    texts: list[tuple[int, str]] = []
+    material = []
+    demos = []
+    for index, row in enumerate(rows):
+        duration = float(row.get("end", 0)) - float(row.get("start", 0))
+        if duration < MIN_SEGMENT_SECONDS - 1e-6:
+            issues.append({"level": "error", "code": "segment_too_short", "segment": index,
+                           "detail": f"第 {index + 1} 段 {duration:.2f}s 过短"})
+        if duration > maximum + 1e-6:
+            issues.append({"level": "error", "code": "segment_too_long", "segment": index,
+                           "detail": f"第 {index + 1} 段 {duration:.2f}s 超过 {maximum:.2f}s"})
+        role = str(row.get("role", ""))
+        if role == "material" or re.search(r"面料|材质|成分|羊毛|醋酸", str(row.get("text", ""))):
+            material.append(index)
+        if role == "demo":
+            demos.append(index)
+        norm = normalized(str(row.get("text", "")))
+        for other_index, other in texts:
+            if _near_duplicate(norm, other):
+                issues.append({"level": "error", "code": "duplicate_text", "segments": [other_index, index],
+                               "detail": f"第 {other_index + 1}/{index + 1} 段语义重复"})
+                break
+        texts.append((index, norm))
+    if len(material) > MAX_MATERIAL_SEGMENTS:
+        issues.append({"level": "error", "code": "too_many_material_segments", "segments": material,
+                       "detail": "讲面料不要过多；完整成片面料内容最多出现一次"})
+    if len(demos) > MAX_DEMOS:
+        issues.append({"level": "warning", "code": "too_many_long_demos", "segments": demos,
+                       "detail": "连续展示较多；确认每段动作或效果确有新增信息"})
+    return issues

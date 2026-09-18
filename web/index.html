@@ -4,23 +4,25 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <title>LiveCut Agent</title>
+  <title>LiveCut Production OS</title>
   <link rel="stylesheet" href="/styles.css">
   <link rel="stylesheet" href="/forms.css">
+  <link rel="stylesheet" href="/enterprise.css">
 </head>
 <body>
+  <a class="skip-link" href="#app">跳到主要内容</a>
   <div class="shell">
     <aside class="sidebar" aria-label="主导航">
       <a class="brand" href="#/dashboard" aria-label="LiveCut Agent 首页">
         <span class="brand-mark"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6.5 12 2l8 4.5v11L12 22l-8-4.5z"/><path d="m9 8 7 4-7 4z"/></svg></span>
-        <span><b>LiveCut</b><small>Agent studio</small></span>
+        <span><b>LiveCut</b><small>Production OS</small></span>
       </a>
       <nav class="nav-list">
-        <a href="#/dashboard" data-nav="dashboard"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></svg><span>任务总览</span></a>
-        <a href="#/queue" data-nav="queue"><svg viewBox="0 0 24 24"><path d="M5 7h14M5 12h14M5 17h9"/><circle cx="4" cy="7" r=".5"/><circle cx="4" cy="12" r=".5"/><circle cx="4" cy="17" r=".5"/></svg><span>剪辑队列</span><em id="queueBadge">0</em></a>
-        <a href="#/skill" data-nav="skill"><svg viewBox="0 0 24 24"><path d="M12 3 4 7v10l8 4 8-4V7z"/><path d="m8 12 2.2 2.2L16.5 8"/></svg><span>Skill 管理</span></a>
-        <a href="#/mcp" data-nav="mcp"><svg viewBox="0 0 24 24"><path d="M8 8a4 4 0 1 0 0 8h2M16 8a4 4 0 1 1 0 8h-2M8 12h8"/></svg><span>MCP 接入</span></a>
-        <a href="#/settings" data-nav="settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6 1.7 1.7 0 0 0 10 3V2.8h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1z"/></svg><span>系统设置</span></a>
+        <a href="#/dashboard" data-nav="dashboard" title="任务总览"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></svg><span>任务总览</span></a>
+        <a href="#/queue" data-nav="queue" title="剪辑队列"><svg viewBox="0 0 24 24"><path d="M5 7h14M5 12h14M5 17h9"/><circle cx="4" cy="7" r=".5"/><circle cx="4" cy="12" r=".5"/><circle cx="4" cy="17" r=".5"/></svg><span>剪辑队列</span><em id="queueBadge">0</em></a>
+        <a href="#/skill" data-nav="skill" title="Skill 管理"><svg viewBox="0 0 24 24"><path d="M12 3 4 7v10l8 4 8-4V7z"/><path d="m8 12 2.2 2.2L16.5 8"/></svg><span>Skill 管理</span></a>
+        <a href="#/mcp" data-nav="mcp" title="MCP 接入"><svg viewBox="0 0 24 24"><path d="M8 8a4 4 0 1 0 0 8h2M16 8a4 4 0 1 1 0 8h-2M8 12h8"/></svg><span>MCP 接入</span></a>
+        <a href="#/settings" data-nav="settings" title="系统设置"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6 1.7 1.7 0 0 0 10 3V2.8h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1z"/></svg><span>系统设置</span></a>
       </nav>
       <div class="system-card"><span class="pulse"></span><div><b>本地服务运行中</b><small id="systemVersion">正在连接…</small></div></div>
     </aside>
@@ -29,7 +31,7 @@
       <header class="topbar">
         <button class="icon-button mobile-menu" id="menuButton" aria-label="打开导航"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
         <div class="breadcrumb"><span>直播切片工作台</span><strong id="pageCrumb">任务总览</strong></div>
-        <div class="top-actions"><span class="clock" id="clock"></span><button class="button primary" id="newJobButton"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>新建剪辑</button></div>
+        <div class="top-actions"><span class="clock" id="clock" aria-label="当前时间"></span><button class="button primary" id="newJobButton"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>新建剪辑</button></div>
       </header>
       <section id="app" class="content" aria-live="polite"></section>
     </main>
@@ -37,13 +39,57 @@
 
   <dialog id="newJobDialog" class="modal">
     <form id="newJobForm">
-      <div class="modal-head"><div><span class="eyebrow">NEW PRODUCTION</span><h2>创建剪辑任务</h2></div><button class="icon-button" type="button" data-close-new-job aria-label="关闭"><svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
-      <label>视频素材<div class="file-picker"><input name="source_path" required readonly placeholder="尚未选择视频"><button class="button ghost" type="button" id="pickSourceButton">选择视频</button></div><small>从系统文件选择器关联本机视频；文件不会被复制。</small></label>
-      <div class="form-grid"><label>成片名称<input name="title" required placeholder="也是最终生成的 MP4 文件名"><small>最终输出为“成片名称.mp4”。</small></label><label>执行模式<select name="mode"><option value="standard">标准 · 粗剪确认后高清导出</option><option value="fast">快速 · 跳过独立粗剪、一次直出</option><option value="refined">精修 · 粗剪确认与完整质检</option></select></label></div>
-      <label>AI 提供方与模型<div id="newJobModelPicker"><input disabled value="正在读取可用模型…"></div><small>输入提供商或模型关键词筛选；素材索引完成后，LiveCut 会直接调用所选 CLI 完成音画编排。</small></label>
-      <details class="optional-field"><summary>补充剪辑偏好（可选）</summary><label>创意偏好<textarea name="brief" rows="3" placeholder="例如：突出主播审美观点、节奏自然、控制在 60 秒左右"></textarea><small>只影响 Agent 的创意取舍；留空使用默认女装精剪策略，不会改变技术流程。</small></label></details>
-      <p class="form-error" id="newJobError" role="alert"></p>
-      <div class="modal-actions"><button class="button ghost" type="button" data-close-new-job>取消</button><button class="button primary" type="submit" id="createJobSubmit">加入队列</button></div>
+      <header class="modal-head">
+        <div class="modal-title"><span class="eyebrow">NEW PRODUCTION</span><h2>创建剪辑任务</h2><p>关联一段直播素材，配置商品与模型，加入队列后自动完成切片与一次高清渲染。</p></div>
+        <button class="icon-button" type="button" data-close-new-job aria-label="关闭"><svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+      </header>
+      <div class="modal-body">
+        <section class="form-section">
+          <header class="section-head"><i>1</i><div><b>直播素材</b><small>选择本机视频并命名成片</small></div></header>
+          <div class="file-drop" id="fileDrop">
+            <span class="file-drop-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="14" height="14" rx="2"/><path d="m17 10 4-2v8l-4-2z"/></svg></span>
+            <div class="file-drop-body"><input name="source_path" required readonly placeholder="尚未选择视频文件"><small>点击任意位置从系统文件选择器关联本机视频；文件不会被复制。</small></div>
+            <button class="button ghost small" type="button" id="pickSourceButton">浏览</button>
+          </div>
+          <label class="field">成片名称<input name="title" required placeholder="也是最终生成的 MP4 文件名"><small>最终输出为“成片名称.mp4”。</small></label>
+          <label class="field">时间戳字幕（可选）<input name="subtitle_path" placeholder="/path/to/subtitles.srt"><small>支持 SRT、VTT、ASS/SSA 和带时间码 TXT；有效时直接复用，不运行全片 Whisper。</small></label>
+        </section>
+        <section class="form-section">
+          <header class="section-head"><i>2</i><div><b>内容信息</b><small>告诉 Agent 讲什么、怎么剪</small></div></header>
+          <div class="field"><span class="field-label">交付模式</span>
+            <div class="mode-cards" role="radiogroup" aria-label="交付模式">
+              <label class="mode-card"><input type="radio" name="delivery_mode" value="merged" checked><b>唯一合并 MP4</b><small>锁定最终时间线后只编码一次</small></label>
+              <label class="mode-card"><input type="radio" name="delivery_mode" value="segments"><b>分段导出</b><small>只导出每个最终片段，供剪映自行拼接</small></label>
+            </div>
+          </div>
+          <label class="field">创作策略<select name="creative_strategy">
+            <option value="auto" selected>自动判断（推荐）</option>
+            <option value="selling">商品卖点</option>
+            <option value="tryon">试穿展示</option>
+            <option value="personality">主播人设 / 观点</option>
+            <option value="story">故事 / 反应</option>
+            <option value="visual">视觉优先</option>
+          </select><small>决定叙事重点，不再强制每条视频都按“钩子—证明—购买收口”编排。</small></label>
+          <label class="field">商品<textarea name="products" rows="3" required placeholder="例如：针织上衣&#10;阔腿裤&#10;半身裙"></textarea><small>必填，每行一个商品。成片会按商品优先分块，同一商品的内容集中讲。</small></label>
+          <div class="form-grid">
+            <label class="field">面料（可选）<input name="materials" placeholder="例如：羊毛，醋酸"><small>可不填，由 Agent 从口播判断。</small></label>
+            <label class="field">颜色（可选）<input name="colors" placeholder="例如：黑色，米白，咖色"><small>可不填，同一商品内按颜色集中编排。</small></label>
+          </div>
+        </section>
+        <section class="form-section">
+          <header class="section-head"><i>3</i><div><b>AI 编排模型</b><small>可保持默认，也可为本次任务单独指定</small></div></header>
+          <div class="form-grid">
+            <label class="field">文本编排 AI<span class="field-control" id="newJobTextModelPicker"><input disabled value="正在读取可用模型…"></span><small>只接收本地脚本筛过的候选文字，负责选句和排序。</small></label>
+            <label class="field">多模态混剪 AI<span class="field-control" id="newJobVisualModelPicker"><input disabled value="正在读取可用模型…"></span><small>仅在原画面明显差时，从联系表中选择同款全身展示画面。</small></label>
+          </div>
+          <details class="optional-field"><summary>补充剪辑偏好（可选）</summary><label class="field">创意偏好<textarea name="brief" rows="3" placeholder="例如：突出主播审美观点、节奏自然、控制在 60 秒左右"></textarea><small>只影响 Agent 的创意取舍；留空使用默认女装精剪策略，不会改变技术流程。</small></label></details>
+        </section>
+      </div>
+      <footer class="modal-actions">
+        <p class="form-error" id="newJobError" role="alert"></p>
+        <button class="button ghost" type="button" data-close-new-job>取消</button>
+        <button class="button primary" type="submit" id="createJobSubmit">加入队列</button>
+      </footer>
     </form>
   </dialog>
 

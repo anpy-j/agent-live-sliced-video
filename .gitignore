@@ -4,8 +4,8 @@ __pycache__/
 .venv/
 data/*.db
 data/*.db-*
+data/*.lock
 data/runtime.json
 data/skill-history/
 workspaces/*
 !workspaces/.gitkeep
-

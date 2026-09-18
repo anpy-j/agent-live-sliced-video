@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import mimetypes
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -14,8 +16,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback keeps single-process semantics only
+    fcntl = None  # type: ignore[assignment]
+
 from .db import Store, utc_now
 from .mcp import McpEndpoint, tool_specs
+from .rules import DirectivesManager
 from .runner import JobRunner
 
 
@@ -26,24 +34,24 @@ class Application:
         self.workspace_root = self.root / "workspaces"
         self.web_root = self.root / "web"
         self.store = Store(self.data_dir / "agent.db")
+        self.directives = DirectivesManager(self.root)
         self.runner = JobRunner(self.store, self.root)
         self._defaults()
         self.mcp = McpEndpoint(self.invoke_tool)
 
     def _defaults(self) -> None:
         defaults = {
-            "engine_path": "/Volumes/MacData/Users/anpy/develop/personal/自媒体/切片/douyin-womenswear-slicing",
             "engine_python": str(self.root / ".venv" / "bin" / "python"),
             "skill_path": str(self.root / "integrations" / "skill" / "SKILL.md"),
             "mcp_enabled": True,
             "mcp_token": secrets.token_urlsafe(24),
-            "max_parallel_jobs": 1,
             "workbuddy_cli_path": "/Applications/AI/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy",
             "workbuddy_default_model": "auto",
             "antigravity_cli_path": str(Path.home() / ".local" / "bin" / "agy"),
             "codex_cli_path": shutil.which("codex") or "/opt/homebrew/bin/codex",
             "opencode_cli_path": shutil.which("opencode") or str(Path.home() / ".opencode" / "bin" / "opencode"),
             "ai_default_selection": "workbuddy:auto",
+            "visual_ai_default_selection": "workbuddy:glm-5v-turbo",
         }
         for key, value in defaults.items():
             if self.store.get_setting(key) is None:
@@ -53,25 +61,90 @@ class Application:
         source = Path(str(payload.get("source_path", ""))).expanduser().resolve()
         if not source.is_file():
             raise ValueError(f"素材文件不存在: {source}")
-        mode = payload.get("mode") or "standard"
-        if mode not in {"fast", "standard", "refined"}:
-            raise ValueError("mode 必须是 fast、standard 或 refined")
+        # 历史 mode 仅保留兼容读取；新任务固定走最快生产路径。
+        mode = "fast"
         title = str(payload.get("title") or source.stem).strip()[:120]
         if not title:
             raise ValueError("请填写成片名称")
         brief = str(payload.get("brief") or "").strip()
+        products = self._parse_terms(payload.get("products"))
+        if not products:
+            raise ValueError("请至少填写一个商品；多个商品请换行或用逗号分隔")
+        materials = self._parse_terms(payload.get("materials"))
+        colors = self._parse_terms(payload.get("colors"))
+        subtitle_path = str(payload.get("subtitle_path") or "").strip() or None
+        if subtitle_path:
+            subtitle = Path(subtitle_path).expanduser().resolve()
+            if not subtitle.is_file():
+                raise ValueError(f"字幕文件不存在: {subtitle}")
+            if subtitle.suffix.lower() not in {".srt", ".vtt", ".ass", ".ssa", ".txt"}:
+                raise ValueError("字幕仅支持 SRT、VTT、ASS/SSA 或带时间码 TXT")
+            subtitle_path = str(subtitle)
+        delivery_mode = str(payload.get("delivery_mode") or "merged")
+        if delivery_mode not in {"merged", "segments"}:
+            raise ValueError("delivery_mode 必须是 merged 或 segments")
+        creative_strategy = str(payload.get("creative_strategy") or "auto")
+        if creative_strategy not in {"auto", "selling", "tryon", "personality", "story", "visual"}:
+            raise ValueError("creative_strategy 必须是 auto、selling、tryon、personality、story 或 visual")
         default_selection = str(self.store.get_setting("ai_default_selection", "workbuddy:auto"))
-        ai_model = str(payload.get("ai_model") or default_selection)
+        ai_model = str(payload.get("text_ai_model") or payload.get("ai_model") or default_selection)
         model_provider, model_name = self.runner.resolve_ai_selection(ai_model)
-        placeholder = self.workspace_root / "pending"
+        visual_default = str(self.store.get_setting(
+            "visual_ai_default_selection", "workbuddy:glm-5v-turbo"))
+        visual_ai_model = str(payload.get("visual_ai_model") or visual_default)
+        visual_model_provider, visual_model_name = self.runner.resolve_visual_ai_selection(
+            visual_ai_model)
+        source_workspace = self._source_workspace(source)
+        placeholder = source_workspace / "edits" / "pending"
         job_id = self.store.create_job(title=title, source_path=str(source), brief=brief,
                                        mode=mode, workspace=str(placeholder),
-                                       model_provider=model_provider, model_name=model_name)
-        workspace = self.workspace_root / job_id
+                                       model_provider=model_provider, model_name=model_name,
+                                       visual_model_provider=visual_model_provider,
+                                       visual_model_name=visual_model_name, products=products,
+                                       materials=materials, colors=colors,
+                                       subtitle_path=subtitle_path, delivery_mode=delivery_mode,
+                                       creative_strategy=creative_strategy)
+        edit_name = f"{job_id}-{self._path_slug(title, 48)}"
+        workspace = source_workspace / "edits" / edit_name
         workspace.mkdir(parents=True, exist_ok=True)
         self.store.update_job(job_id, workspace=str(workspace))
         self.runner.enqueue(job_id)
         return self.store.get_job(job_id) or {"id": job_id}
+
+    @staticmethod
+    def _path_slug(value: str, limit: int = 64) -> str:
+        slug = re.sub(r"[\\/:*?\"<>|\s]+", "-", value).strip("-. ")
+        return (slug or "untitled")[:limit]
+
+    def _source_workspace(self, source: Path) -> Path:
+        stat = source.stat()
+        identity = {"path": str(source), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+        digest = hashlib.sha256(json.dumps(
+            identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:12]
+        root = self.workspace_root / "sources" / f"{self._path_slug(source.stem)}-{digest}"
+        (root / "shared" / "indexes").mkdir(parents=True, exist_ok=True)
+        (root / "edits").mkdir(parents=True, exist_ok=True)
+        manifest = root / "source.json"
+        temporary = root / ".source.json.tmp"
+        temporary.write_text(json.dumps({
+            "version": 1, "source": identity,
+            "layout": {"shared": "shared", "edits": "edits"},
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(manifest)
+        return root
+
+    @staticmethod
+    def _parse_terms(value: Any) -> list[str]:
+        if isinstance(value, list):
+            raw = [str(item) for item in value]
+        else:
+            raw = re.split(r"[,，;；\n]+", str(value or ""))
+        result = []
+        for item in raw:
+            item = item.strip()[:80]
+            if item and item not in result:
+                result.append(item)
+        return result[:20]
 
     def pick_video_file(self) -> dict[str, Any]:
         if sys.platform != "darwin":
@@ -116,17 +189,24 @@ class Application:
         raise KeyError(f"未知工具: {name}")
 
     def settings(self) -> dict[str, Any]:
-        keys = ["engine_path", "engine_python", "skill_path", "mcp_enabled", "mcp_token",
-                "max_parallel_jobs", "workbuddy_cli_path", "workbuddy_default_model",
-                "antigravity_cli_path", "codex_cli_path", "opencode_cli_path", "ai_default_selection"]
-        return {key: self.store.get_setting(key) for key in keys}
+        keys = ["engine_python", "skill_path", "mcp_enabled", "mcp_token",
+                "workbuddy_cli_path", "workbuddy_default_model",
+                "antigravity_cli_path", "codex_cli_path", "opencode_cli_path", "ai_default_selection",
+                "visual_ai_default_selection"]
+        result = {key: self.store.get_setting(key) for key in keys}
+        result["engine_path"] = str(self.root / "agent_video" / "engine")
+        result["engine_bundled"] = True
+        return result
 
     def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
-        allowed = {"engine_path", "engine_python", "skill_path", "mcp_enabled", "max_parallel_jobs",
+        allowed = {"engine_python", "skill_path", "mcp_enabled",
                    "workbuddy_cli_path", "workbuddy_default_model", "antigravity_cli_path",
                    "codex_cli_path", "opencode_cli_path", "ai_default_selection"}
+        allowed.add("visual_ai_default_selection")
         if "ai_default_selection" in payload:
             self.runner.resolve_ai_selection(str(payload["ai_default_selection"]))
+        if "visual_ai_default_selection" in payload:
+            self.runner.resolve_visual_ai_selection(str(payload["visual_ai_default_selection"]))
         for key in allowed & payload.keys():
             self.store.set_setting(key, payload[key])
         return self.settings()
@@ -176,7 +256,10 @@ class Application:
 
     def ai_providers(self) -> dict[str, Any]:
         default_selection = self.store.get_setting("ai_default_selection", "workbuddy:auto")
+        visual_default = self.store.get_setting(
+            "visual_ai_default_selection", "workbuddy:glm-5v-turbo")
         return {"providers": self.runner.provider_infos(), "default": default_selection,
+                "visual_default": visual_default,
                 "manual": {"id": "manual", "name": "在编排节点手动决定"}}
 
 
@@ -215,6 +298,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json_response(self.app.ai_providers())
             if path == "/api/skill":
                 return self.json_response(self.app.skill())
+            if path == "/api/rules":
+                return self.json_response(self.app.directives.load())
             if path == "/api/mcp":
                 return self.json_response(self.app.mcp_info(self.headers.get("Host", "127.0.0.1:8787")))
             if path.startswith("/api/artifacts/") and path.endswith("/content"):
@@ -234,6 +319,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json_response(self.app.pick_video_file())
             if path == "/api/jobs":
                 return self.json_response(self.app.create_job(payload), 201)
+            if path == "/api/rules/enable":
+                rule_id = str(payload.get("rule_id") or "").strip()
+                if not rule_id:
+                    raise ValueError("rule_id 不能为空")
+                return self.json_response(
+                    self.app.directives.set_enabled(rule_id, bool(payload.get("enabled"))))
+            if path == "/api/rules/rollback":
+                return self.json_response(
+                    self.app.directives.rollback(int(payload.get("version"))))
             if path.startswith("/api/jobs/"):
                 parts = path.strip("/").split("/")
                 if len(parts) == 4:
@@ -251,6 +345,60 @@ class Handler(BaseHTTPRequestHandler):
                             selection = f"workbuddy:{payload.get('model') or 'auto'}"
                         return self.json_response(
                             self.app.runner.request_ai_plan(job_id, str(selection)))
+                    if action == "feedback":
+                        text = str(payload.get("feedback") or "").strip()
+                        if not text:
+                            raise ValueError("反馈内容不能为空")
+                        upgrade = bool(payload.get("upgrade", True))
+                        job = self.app.store.get_job(job_id)
+                        if not job:
+                            raise ValueError("任务不存在")
+                        workspace = Path(job.get("workspace", ""))
+                        feedback_record = {
+                            "feedback": text,
+                            "problem_type": str(payload.get("problem_type") or "general"),
+                            "task": str(payload.get("task") or "video_edit"),
+                            "timestamp": str(payload.get("timestamp") or "") or None,
+                            "segment": str(payload.get("segment") or "") or None,
+                            "product": str(payload.get("product") or "") or None,
+                            "scope": str(payload.get("scope") or "text"),
+                            "kind": str(payload.get("kind") or "soft"),
+                            "created_at": utc_now(),
+                        }
+                        if workspace.is_dir():
+                            rev_file = workspace / "revision_request.json"
+                            rev_file.write_text(json.dumps(
+                                feedback_record, ensure_ascii=False, indent=2), encoding="utf-8")
+                        self.app.store.add_event(job_id, job.get("current_stage"), "info", "job_feedback",
+                                                f"审片问题反馈: {text}", {"feedback": text, "upgrade": upgrade})
+                        if upgrade:
+                            updated = self.app.directives.add_feedback(
+                                problem_type=str(payload.get("problem_type") or "general"),
+                                task=str(payload.get("task") or "video_edit"),
+                                timestamp=str(payload.get("timestamp") or "") or None,
+                                segment=str(payload.get("segment") or "") or None,
+                                product=str(payload.get("product") or "") or None,
+                                expected_change=text,
+                                scope=str(payload.get("scope") or "text"),
+                                kind=str(payload.get("kind") or "soft"),
+                                job_id=job_id, verified=bool(payload.get("verified", False)))
+                            count = len(updated.get("rules", []))
+                            # add_feedback may deduplicate and return the unchanged list;
+                            # inspect the matching rule instead of an unrelated final entry.
+                            latest = next((item for item in reversed(updated.get("rules", []))
+                                           if item.get("expected_change") == text
+                                           and item.get("scope") == feedback_record["scope"]
+                                           and item.get("problem_type") ==
+                                           feedback_record["problem_type"]), {})
+                            message = (f"反馈已记录，但检测到规则冲突，已保持禁用，等待人工确认（累计 {count} 条）。"
+                                       if not latest.get("enabled", True) else
+                                       f"反馈已记录！Agent 规则库已升级（累计 {count} 条定制规则）。")
+                            return self.json_response({
+                                "ok": True,
+                                "message": message,
+                                "directives_count": count
+                            })
+                        return self.json_response({"ok": True, "message": "反馈已记录"})
             if path == "/api/mcp/token":
                 return self.json_response({"token": self.app.rotate_token()})
             if path == "/mcp":
@@ -368,6 +516,15 @@ class Server(ThreadingHTTPServer):
 
 
 def serve(root: Path, host: str = "127.0.0.1", port: int = 8787) -> None:
+    lock_path = Path(root) / "data" / "agent.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_handle = lock_path.open("a+")
+    if fcntl is not None:
+        try:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            lock_handle.close()
+            raise RuntimeError("已有一个 LiveCut 服务正在使用当前任务数据库") from None
     app = Application(root)
     app.runner.start()
     server = Server((host, port), app)
@@ -380,3 +537,6 @@ def serve(root: Path, host: str = "127.0.0.1", port: int = 8787) -> None:
     finally:
         app.runner.stop()
         server.server_close()
+        if fcntl is not None:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+        lock_handle.close()

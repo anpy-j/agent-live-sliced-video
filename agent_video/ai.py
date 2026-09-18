@@ -57,6 +57,8 @@ PLAN_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "properties": {
         "main_product": {"type": "string", "minLength": 1},
+        "creative_strategy": {"type": "string", "enum": [
+            "selling", "tryon", "personality", "story", "visual"]},
         "picks": {
             "type": "array",
             "minItems": 2,
@@ -65,24 +67,35 @@ PLAN_SCHEMA: dict[str, Any] = {
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
-                    "src": {"type": "integer", "minimum": 1},
-                    "start": {"type": "number", "minimum": 0},
-                    "end": {"type": "number", "minimum": 0},
-                    "text": {"type": "string", "minLength": 1},
+                    "candidate_id": {"type": "integer", "minimum": 0},
                     "role": {"type": "string", "enum": [
                         "hook", "result", "pain", "proof", "fit", "material", "craft",
                         "color", "styling", "scene", "demo", "close", "bridge",
+                        "personality", "story", "reaction", "visual",
                     ]},
                     "module": {"type": "string", "enum": ["hook_A", "body"]},
                     "product": {"type": "string", "minLength": 1},
                     "color": {"type": "string"},
                 },
-                "required": ["src", "start", "end", "text", "role", "module", "product", "color"],
+                "required": ["candidate_id", "role", "module", "product", "color"],
             },
         },
     },
-    "required": ["main_product", "picks"],
+    "required": ["main_product", "creative_strategy", "picks"],
 }
+
+PLAN_PATCH_SCHEMA: dict[str, Any] = json.loads(json.dumps(PLAN_SCHEMA))
+PLAN_PATCH_SCHEMA["properties"]["picks"]["minItems"] = 0
+patch_item = PLAN_PATCH_SCHEMA["properties"]["picks"]["items"]
+patch_item["properties"]["insert_after_candidate_id"] = {
+    "type": ["integer", "null"], "minimum": 0,
+}
+patch_item["required"].append("insert_after_candidate_id")
+PLAN_PATCH_SCHEMA["properties"]["remove_candidate_ids"] = {
+    "type": "array", "maxItems": 32,
+    "items": {"type": "integer", "minimum": 0},
+}
+PLAN_PATCH_SCHEMA["required"].append("remove_candidate_ids")
 
 VISUAL_PLAN_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -97,8 +110,13 @@ VISUAL_PLAN_SCHEMA: dict[str, Any] = {
                     "block_id": {"type": "string", "minLength": 1},
                     "candidate_id": {"type": "string", "minLength": 1},
                     "reason": {"type": "string"},
+                    "shot_type": {"type": "string", "enum": [
+                        "full_body", "side", "back", "detail", "front_face", "other"]},
+                    "mouth_visibility": {"type": "string", "enum": [
+                        "not_visible", "indistinct", "clear"]},
                 },
-                "required": ["block_id", "candidate_id", "reason"],
+                "required": ["block_id", "candidate_id", "reason", "shot_type",
+                             "mouth_visibility"],
             },
         },
     },
@@ -205,7 +223,10 @@ class CliProvider:
     def _find_plan(cls, value: Any) -> dict[str, Any] | None:
         if isinstance(value, dict):
             if isinstance(value.get("main_product"), str) and isinstance(value.get("picks"), list):
-                return {"main_product": value["main_product"], "picks": value["picks"]}
+                plan = {"main_product": value["main_product"], "picks": value["picks"]}
+                if value.get("remove_candidate_ids"):
+                    plan["remove_candidate_ids"] = value["remove_candidate_ids"]
+                return plan
             for key in ("structured_output", "result", "output", "output_text", "content", "data", "message"):
                 if key in value:
                     found = cls._find_plan(value[key])
@@ -364,13 +385,14 @@ class WorkBuddyCli(CliProvider):
                 "usage": self._find_usage(envelope)}
 
     def generate_plan(self, *, model: str, prompt: str, cwd: Path,
+                      schema: dict[str, Any] = PLAN_SCHEMA,
                       on_process: Callable[[subprocess.Popen[str]], None] | None = None,
                       timeout: int = 360) -> dict[str, Any]:
         self._ensure_available()
         self.validate_model(model)
         command = [
             str(self.executable), "-p", "--output-format", "json",
-            "--json-schema", json.dumps(PLAN_SCHEMA, ensure_ascii=False, separators=(",", ":")),
+            "--json-schema", json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
             "--model", model, "--max-turns", "1", "--tools", "StructuredOutput",
             "--permission-mode", "dontAsk", "--no-session-persistence", prompt,
         ]
@@ -420,13 +442,14 @@ class AntigravityCli(CliProvider):
         return choices
 
     def generate_plan(self, *, model: str, prompt: str, cwd: Path,
+                      schema: dict[str, Any] = PLAN_SCHEMA,
                       on_process: Callable[[subprocess.Popen[str]], None] | None = None,
                       timeout: int = 360) -> dict[str, Any]:
         self._ensure_available()
         self.validate_model(model)
         command = [
             str(self.executable), "-p", prompt, "--output-format", "json",
-            "--json-schema", json.dumps(PLAN_SCHEMA, ensure_ascii=False, separators=(",", ":")),
+            "--json-schema", json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
             "--print-timeout", f"{timeout}s", "--sandbox", "--disable-slash-commands",
         ]
         if model != "auto":
@@ -492,6 +515,7 @@ class CodexCli(CliProvider):
                 "stderr": stderr.strip(), "seconds": seconds, "usage": self._find_usage(events)}
 
     def generate_plan(self, *, model: str, prompt: str, cwd: Path,
+                      schema: dict[str, Any] = PLAN_SCHEMA,
                       on_process: Callable[[subprocess.Popen[str]], None] | None = None,
                       timeout: int = 360) -> dict[str, Any]:
         self._ensure_available()
@@ -501,7 +525,7 @@ class CodexCli(CliProvider):
             temp = Path(temp_dir)
             schema_path = temp / "plan-schema.json"
             output_path = temp / "plan.json"
-            schema_path.write_text(json.dumps(PLAN_SCHEMA, ensure_ascii=False), encoding="utf-8")
+            schema_path.write_text(json.dumps(schema, ensure_ascii=False), encoding="utf-8")
             command = [
                 str(self.executable), "exec", "--json", "--color", "never",
                 "--sandbox", "read-only", "--ephemeral", "--skip-git-repo-check",
@@ -599,24 +623,25 @@ class OpenCodeCli(CliProvider):
         return events, cls._find_plan("".join(text_parts)) if text_parts else None
 
     def generate_plan(self, *, model: str, prompt: str, cwd: Path,
+                      schema: dict[str, Any] = PLAN_SCHEMA,
                       on_process: Callable[[subprocess.Popen[str]], None] | None = None,
                       timeout: int = 360) -> dict[str, Any]:
         self._ensure_available()
         self.validate_model(model)
-        schema = json.dumps(PLAN_SCHEMA, ensure_ascii=False, separators=(",", ":"))
+        schema_json = json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
         constrained_prompt = f"""你现在是一个只返回 JSON 的编排接口，不是聊天助手。
 
 最高优先级输出契约：
 1. 第一个字符必须是 {{，最后一个字符必须是 }}。
 2. 顶层必须同时包含非空字符串 main_product 和非空数组 picks，字段名不得翻译、改名或省略。
-3. picks 的每一项必须包含 src、start、end、text、role、module、product、color 八个字段。
+3. 所有字段必须严格符合下方 Schema，不得增加、改名或省略必填字段。
 4. 不得输出分析、解释、道歉、Markdown、代码围栏或 JSON 之外的任何字符。
 5. 即使候选不完美，也必须选择最接近约束的最佳完整方案并返回上述对象；不得只描述方案或拒绝作答。
 
 {prompt}
 
 最终响应只允许是一个符合以下 Schema 的 JSON 对象：
-{schema}
+{schema_json}
 
 再次确认：必须返回 main_product 和 picks；只输出 JSON 对象。"""
         started = time.monotonic()

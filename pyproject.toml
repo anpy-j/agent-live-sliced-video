@@ -3,6 +3,15 @@ name = "agent-live-sliced-video"
 version = "0.1.0"
 description = "Observable local agent for live-stream video slicing"
 requires-python = ">=3.11"
+dependencies = [
+  "Pillow>=10,<13",
+  "pypinyin>=0.50,<1",
+  "zhconv>=1.4,<2",
+]
+
+[project.optional-dependencies]
+apple-silicon = ["mlx-whisper>=0.4,<1"]
+portable-asr = ["faster-whisper>=1.1,<2"]
 
 [project.scripts]
 slice-agent = "agent_video.__main__:main"
@@ -11,6 +20,8 @@ slice-agent = "agent_video.__main__:main"
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-packages = ["agent_video"]
+[tool.setuptools.packages.find]
+include = ["agent_video*"]
 
+[tool.setuptools.package-data]
+"agent_video.engine" = ["profiles/*.json"]

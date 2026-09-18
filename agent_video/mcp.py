@@ -14,11 +14,23 @@ def tool_specs() -> list[dict[str, Any]]:
             "description": "创建一个直播切片任务并加入本地队列。",
             "inputSchema": {"type": "object", "properties": {
                 "source_path": {"type": "string", "description": "本机视频绝对路径"},
+                "subtitle_path": {"type": "string", "description": "可选字幕绝对路径；SRT/VTT/ASS/SSA/时间码 TXT，提供后跳过全片 ASR"},
                 "title": {"type": "string"},
                 "brief": {"type": "string"},
-                "mode": {"type": "string", "enum": ["fast", "standard", "refined"]},
-                "ai_model": {"type": "string", "description": "如 workbuddy:auto、antigravity:gemini-3.1-pro-high、codex:gpt-5.6-sol、opencode:openai/gpt-5.6-sol 或 manual"},
-            }, "required": ["source_path"]},
+                "products": {"type": "array", "items": {"type": "string"}, "minItems": 1,
+                             "description": "商品名称；多商品按输入顺序组织内容"},
+                "materials": {"type": "array", "items": {"type": "string"},
+                              "description": "可选面料提示；留空由编排 Agent 判断"},
+                "colors": {"type": "array", "items": {"type": "string"},
+                           "description": "可选颜色提示；留空由编排 Agent 判断"},
+                "delivery_mode": {"type": "string", "enum": ["merged", "segments"],
+                                  "description": "merged 只输出唯一合并 MP4；segments 只输出独立片段"},
+                "creative_strategy": {"type": "string", "enum": [
+                    "auto", "selling", "tryon", "personality", "story", "visual"],
+                    "description": "创作策略；auto 让 Agent 根据素材选择，不再强套固定销售结构"},
+                "text_ai_model": {"type": "string", "description": "文本编排模型，如 workbuddy:auto、codex:gpt-5.6-sol 或 manual"},
+                "visual_ai_model": {"type": "string", "description": "多模态混剪模型，如 workbuddy:glm-5v-turbo 或 codex:gpt-5.6-sol"},
+            }, "required": ["source_path", "products"]},
         },
         {
             "name": "list_video_jobs",
@@ -37,7 +49,7 @@ def tool_specs() -> list[dict[str, Any]]:
         },
         {
             "name": "submit_stage_payload",
-            "description": "提交当前等待节点的结构化决策。编排节点提交 main_product+picks；粗剪节点提交 verdict=approve。",
+            "description": "提交当前等待的 AI 文本编排决策，内容为 main_product+picks。后续原声锁定、多模态混剪和高清渲染由平台自动完成。",
             "inputSchema": {"type": "object", "properties": {
                 "job_id": {"type": "string"},
                 "payload": {"type": "object"},

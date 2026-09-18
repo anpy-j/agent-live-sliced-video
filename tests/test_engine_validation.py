@@ -1,0 +1,134 @@
+import unittest
+import json
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
+
+from agent_video.engine.scripts.qc import stream_issues
+from agent_video.engine.scripts.textnorm import incomplete_ending
+from agent_video.engine.scripts.validate_timeline import validate_rows
+from agent_video.engine.scripts.visual_mix import apply as apply_visual_mix
+from agent_video.engine.scripts import render_dual
+
+
+class EngineValidationTest(unittest.TestCase):
+    def test_legacy_visual_review_pipeline_stays_removed(self):
+        scripts = Path(__file__).parents[1] / "agent_video" / "engine" / "scripts"
+        self.assertFalse((scripts / "visual_review.py").exists())
+        self.assertFalse((scripts / "find_broll.py").exists())
+        production = "\n".join((scripts / name).read_text(encoding="utf-8") for name in
+                               ("run_slice.py", "qc.py", "frames.py"))
+        for forbidden in ("visual_review", "selected_detail.jpg", "contact_sheet",
+                          "replace_with_broll"):
+            self.assertNotIn(forbidden, production)
+
+    def test_visual_mix_replaces_only_requested_bad_block(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            timeline = root / "body.json"
+            timeline.write_text(json.dumps([
+                {"audio": {"src": 1, "start": 1, "end": 4, "text": "显瘦"},
+                 "video": [{"src": 1, "start": 1, "end": 4, "kind": "aroll"}]},
+            ]), encoding="utf-8")
+            mapping = root / "mapping.json"
+            mapping.write_text(json.dumps({"dual_timelines": {"body": str(timeline)}}),
+                               encoding="utf-8")
+            packet = root / "packet.json"
+            packet.write_text(json.dumps({"duration": 30, "replacement_blocks": [
+                {"block_id": "body:0", "duration": 3}], "candidates": [
+                {"candidate_id": "C001", "start": 10, "end": 13}]}), encoding="utf-8")
+            decisions = root / "decisions.json"
+            decisions.write_text(json.dumps({"replacements": [
+                {"block_id": "body:0", "candidate_id": "C001", "reason": "同款全身"}]}),
+                encoding="utf-8")
+            report = apply_visual_mix(packet, decisions, mapping, root / "report.json")
+            result = json.loads(timeline.read_text(encoding="utf-8"))
+            self.assertEqual(report["replaced"], 1)
+            self.assertEqual(result[0]["audio"]["start"], 1)
+            self.assertEqual(result[0]["video"][0]["start"], 10)
+            self.assertEqual(result[0]["video"][0]["kind"], "broll")
+
+            decisions.write_text(json.dumps({"replacements": [
+                {"block_id": "body:0", "candidate_id": "C001", "reason": "正面",
+                 "shot_type": "front_face", "mouth_visibility": "clear"}]}),
+                encoding="utf-8")
+            report = apply_visual_mix(packet, decisions, mapping, root / "report-2.json")
+            result = json.loads(timeline.read_text(encoding="utf-8"))
+            self.assertEqual(report["replaced"], 0)
+            self.assertEqual(result[0]["video"][0]["start"], 1)
+            self.assertEqual(result[0]["video"][0]["kind"], "aroll")
+
+    def test_qc_rejects_wrong_resolution(self):
+        info = {
+            "format": {"duration": "2.0"},
+            "streams": [
+                {"codec_type": "video", "codec_name": "h264", "width": 320, "height": 240,
+                 "duration": "2.0"},
+                {"codec_type": "audio", "codec_name": "aac", "duration": "2.0"},
+            ],
+        }
+        _, _, _, issues = stream_issues(info)
+        resolution = next(item for item in issues if item["code"] == "unexpected_resolution")
+        self.assertEqual(resolution["expected"], [1440, 2560])
+
+    def test_sentence_rule_is_narrow_and_punctuation_cannot_hide_connector(self):
+        self.assertEqual(incomplete_ending("推荐它是因为。"), "因为")
+        self.assertIsNone(incomplete_ending("这件衣服是很显瘦的"))
+
+    @patch("agent_video.engine.scripts.validate_timeline.media_duration", return_value=100)
+    def test_timeline_validator_blocks_incomplete_close(self, _duration):
+        rows = [
+            {"src": 1, "start": 0, "end": 2, "text": "直接看效果", "role": "hook"},
+            {"src": 1, "start": 10, "end": 12, "text": "上身很显瘦", "role": "proof"},
+            {"src": 1, "start": 20, "end": 22, "text": "通勤可以穿", "role": "scene"},
+            {"src": 1, "start": 30, "end": 32, "text": "推荐它是因为", "role": "close"},
+        ]
+        result = validate_rows(rows, {"1": "source.mp4"}, 0, 20, 1, 10, 1.2, 5, 5, True)
+        self.assertIn("incomplete_sentence", {item["code"] for item in result["issues"]})
+
+    @patch("agent_video.engine.scripts.validate_timeline.media_duration", return_value=100)
+    def test_shared_validator_issues_have_levels_in_final_report(self, _duration):
+        rows = [
+            {"src": 1, "start": 0, "end": 2, "text": "羊毛面料很舒服", "role": "material"},
+            {"src": 1, "start": 10, "end": 12, "text": "这个羊毛材质很舒服", "role": "material"},
+        ]
+        result = validate_rows(rows, {"1": "source.mp4"}, 0, 20, 1, 10, 1.2, 5, 5, False)
+        self.assertTrue(result["issues"])
+        self.assertTrue(all(item["level"] in {"error", "warning"}
+                            for item in result["issues"]))
+
+    def test_render_dual_keeps_crop_position_per_piece(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.mp4"
+            source.write_bytes(b"source")
+            timeline = root / "timeline.json"
+            timeline.write_text(json.dumps([{
+                "audio": {"src": 1, "start": 0, "end": 2},
+                "video": [
+                    {"src": 1, "start": 0, "end": 1, "crop_x": 0.1},
+                    {"src": 1, "start": 1, "end": 2, "crop_x": 0.9},
+                ],
+            }]), encoding="utf-8")
+            output = root / "output.mp4"
+            commands = []
+
+            def fake_run(command):
+                commands.append(command)
+                Path(str(output.resolve()) + ".partial.mp4").write_bytes(b"video")
+                return ""
+
+            argv = ["render_dual.py", str(timeline), str(output), "--src", f"1={source}"]
+            with patch("sys.argv", argv), \
+                    patch.object(render_dual, "source_fps", return_value=30), \
+                    patch.object(render_dual, "output_size", return_value=(1080, 1920)), \
+                    patch.object(render_dual, "run", side_effect=fake_run):
+                render_dual.main()
+            command = commands[-1]
+            filters = command[command.index("-filter_complex") + 1]
+            self.assertEqual(filters.count("(iw-ow)*0.100000"), 1)
+            self.assertEqual(filters.count("(iw-ow)*0.900000"), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
