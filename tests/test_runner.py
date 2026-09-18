@@ -43,7 +43,7 @@ class RunnerTest(unittest.TestCase):
         dual.write_text("[]", encoding="utf-8")
         module.write_text("[]", encoding="utf-8")
         (engine / "visual_report.json").write_text(
-            '{"dual_timelines":{"body":"' + str(dual) + '"}}', encoding="utf-8")
+            json.dumps({"dual_timelines": {"body": str(dual)}}), encoding="utf-8")
         snapshot = self.runner._delivery_inputs(source, engine)
         self.runner._assert_delivery_inputs(snapshot, source)
         dual.write_text("[{}]", encoding="utf-8")
@@ -109,12 +109,14 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(stage["status"], "succeeded")
         self.assertEqual(job["status"], "queued")
         self.assertEqual(job["token_input"], 100)
-        self.assertEqual(json.loads((engine / "picks.json").read_text())["main_product"], "白山茶")
+        self.assertEqual(json.loads((engine / "picks.json").read_text(encoding="utf-8"))["main_product"],
+                         "白山茶")
 
-    def test_ai_provider_selection_accepts_codex_antigravity_and_opencode(self):
+    def test_ai_provider_selection_accepts_all_automatic_providers(self):
         for provider_id, model in (("codex", "gpt-5.6-sol"),
                                    ("antigravity", "gemini-3.1-pro-high"),
-                                   ("opencode", "openai/gpt-5.6-sol")):
+                                   ("opencode", "openai/gpt-5.6-sol"),
+                                   ("multica", "agent-1")):
             provider = Mock()
             provider.display_name = provider_id
             provider.info.return_value = {"available": True}
@@ -203,8 +205,10 @@ class RunnerTest(unittest.TestCase):
             )
         self.assertTrue(repaired)
         enqueue.assert_called_once_with(job_id)
-        self.assertEqual(json.loads((engine / "picks.json").read_text())["main_product"], "新方案")
-        self.assertEqual(json.loads((workspace / "validation-repair.json").read_text())["attempts"], 1)
+        self.assertEqual(json.loads((engine / "picks.json").read_text(encoding="utf-8"))["main_product"],
+                         "新方案")
+        self.assertEqual(json.loads(
+            (workspace / "validation-repair.json").read_text(encoding="utf-8"))["attempts"], 1)
 
     def test_interrupted_validation_repair_resumes_only_once(self):
         workspace = self.root / "job"
@@ -232,7 +236,7 @@ class RunnerTest(unittest.TestCase):
                 {"issues": [{"code": "missing_proof", "detail": "missing"}]}, candidates,
             )
         self.assertFalse(repaired)
-        marker = json.loads((workspace / "validation-repair.json").read_text())
+        marker = json.loads((workspace / "validation-repair.json").read_text(encoding="utf-8"))
         self.assertEqual(marker["resumes"], 1)
         self.assertEqual(marker["status"], "failed")
         with patch.object(self.runner, "_provider") as provider_lookup:
@@ -254,7 +258,7 @@ class RunnerTest(unittest.TestCase):
         dual.write_text("[]", encoding="utf-8")
         module.write_text("[]", encoding="utf-8")
         (engine / "visual_report.json").write_text(
-            '{"dual_timelines":{"body":"' + str(dual) + '"}}', encoding="utf-8")
+            json.dumps({"dual_timelines": {"body": str(dual)}}), encoding="utf-8")
         snapshot = self.runner._delivery_inputs(source, engine)
         (workspace / "proxy_complete.json").write_text(
             json.dumps({"validated_inputs": snapshot}), encoding="utf-8")

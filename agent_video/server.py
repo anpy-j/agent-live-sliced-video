@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import mimetypes
 import os
@@ -31,23 +32,56 @@ class Application:
         self.mcp = McpEndpoint(self.invoke_tool)
 
     def _defaults(self) -> None:
+        is_windows = sys.platform == "win32"
+        is_macos = sys.platform == "darwin"
+        venv_python = self.root / ".venv" / ("Scripts/python.exe" if is_windows else "bin/python")
+        detected_workbuddy = shutil.which("codebuddy")
+        detected_antigravity = shutil.which("agy")
+        detected_codex = shutil.which("codex")
+        detected_opencode = shutil.which("opencode")
+        detected_multica = shutil.which("multica")
         defaults = {
-            "engine_path": "/Volumes/MacData/Users/anpy/develop/personal/自媒体/切片/douyin-womenswear-slicing",
-            "engine_python": str(self.root / ".venv" / "bin" / "python"),
+            "engine_path": ("/Volumes/MacData/Users/anpy/develop/personal/自媒体/切片/"
+                            "douyin-womenswear-slicing") if is_macos else "",
+            "engine_python": str(venv_python),
             "skill_path": str(self.root / "integrations" / "skill" / "SKILL.md"),
             "mcp_enabled": True,
             "mcp_token": secrets.token_urlsafe(24),
             "max_parallel_jobs": 1,
-            "workbuddy_cli_path": "/Applications/AI/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy",
+            "workbuddy_cli_path": detected_workbuddy or (
+                "/Applications/AI/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy"
+                if is_macos else ""),
             "workbuddy_default_model": "auto",
-            "antigravity_cli_path": str(Path.home() / ".local" / "bin" / "agy"),
-            "codex_cli_path": shutil.which("codex") or "/opt/homebrew/bin/codex",
-            "opencode_cli_path": shutil.which("opencode") or str(Path.home() / ".opencode" / "bin" / "opencode"),
+            "antigravity_cli_path": detected_antigravity or (
+                str(Path.home() / ".local" / "bin" / "agy") if not is_windows else ""),
+            "codex_cli_path": detected_codex or ("/opt/homebrew/bin/codex" if is_macos else ""),
+            "opencode_cli_path": detected_opencode or str(
+                Path.home() / ".opencode" / "bin" / ("opencode.exe" if is_windows else "opencode")),
+            "multica_cli_path": detected_multica or "",
+            "multica_profile": "",
+            "multica_workspace_id": "",
             "ai_default_selection": "workbuddy:auto",
         }
         for key, value in defaults.items():
             if self.store.get_setting(key) is None:
                 self.store.set_setting(key, value)
+        if is_windows:
+            self._migrate_macos_defaults_on_windows(defaults)
+
+    def _migrate_macos_defaults_on_windows(self, defaults: dict[str, Any]) -> None:
+        legacy = {
+            "engine_path": ("/Volumes/MacData/Users/anpy/develop/personal/自媒体/切片/"
+                            "douyin-womenswear-slicing"),
+            "engine_python": str(self.root / ".venv" / "bin" / "python"),
+            "workbuddy_cli_path": ("/Applications/AI/WorkBuddy.app/Contents/Resources/"
+                                   "app.asar.unpacked/cli/bin/codebuddy"),
+            "antigravity_cli_path": str(Path.home() / ".local" / "bin" / "agy"),
+            "codex_cli_path": "/opt/homebrew/bin/codex",
+            "opencode_cli_path": str(Path.home() / ".opencode" / "bin" / "opencode"),
+        }
+        for key, old_value in legacy.items():
+            if self.store.get_setting(key) == old_value:
+                self.store.set_setting(key, defaults[key])
 
     def create_job(self, payload: dict[str, Any]) -> dict[str, Any]:
         source = Path(str(payload.get("source_path", ""))).expanduser().resolve()
@@ -74,8 +108,13 @@ class Application:
         return self.store.get_job(job_id) or {"id": job_id}
 
     def pick_video_file(self) -> dict[str, Any]:
-        if sys.platform != "darwin":
-            raise ValueError("当前系统暂不支持原生文件选择器")
+        if sys.platform == "win32":
+            return self._pick_video_file_windows()
+        if sys.platform == "darwin":
+            return self._pick_video_file_macos()
+        raise ValueError("原生文件选择器目前仅支持 Windows 和 macOS")
+
+    def _pick_video_file_macos(self) -> dict[str, Any]:
         script = 'POSIX path of (choose file with prompt "选择直播视频素材")'
         result = subprocess.run(["/usr/bin/osascript", "-e", script], capture_output=True,
                                 text=True, encoding="utf-8", errors="replace", timeout=300)
@@ -84,7 +123,62 @@ class Application:
             if "User canceled" in message or "-128" in message:
                 return {"cancelled": True}
             raise ValueError(message or "无法打开文件选择器")
-        path = Path(result.stdout.strip()).resolve()
+        return self._picked_video_result(result.stdout.strip())
+
+    def _pick_video_file_windows(self) -> dict[str, Any]:
+        powershell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
+        if not powershell:
+            raise ValueError("未找到 PowerShell，无法打开 Windows 文件选择器")
+        # Return Base64 instead of a raw path so Chinese filenames are independent of the
+        # console code page used by Windows PowerShell 5.1.
+        script = r"""
+Add-Type -AssemblyName System.Windows.Forms
+$owner = New-Object System.Windows.Forms.Form
+$owner.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+$owner.Size = New-Object System.Drawing.Size(1, 1)
+$owner.ShowInTaskbar = $false
+$owner.TopMost = $true
+$owner.Opacity = 0
+$dialog = New-Object System.Windows.Forms.OpenFileDialog
+$dialog.Title = '选择直播视频素材'
+$dialog.Filter = '视频文件|*.mp4;*.mov;*.mkv;*.m4v;*.avi;*.webm;*.ts|所有文件|*.*'
+$dialog.Multiselect = $false
+$dialog.CheckFileExists = $true
+$dialog.RestoreDirectory = $true
+$owner.Show()
+$owner.Activate()
+try {
+    if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) {
+        [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($dialog.FileName))
+    }
+} finally {
+    $dialog.Dispose()
+    $owner.Close()
+    $owner.Dispose()
+}
+"""
+        try:
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-NonInteractive", "-STA", "-ExecutionPolicy", "Bypass",
+                 "-Command", script],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            raise ValueError("Windows 文件选择器等待超时，请重试并检查任务栏中的选择窗口") from None
+        if result.returncode:
+            raise ValueError(result.stderr.strip() or "无法打开 Windows 文件选择器")
+        encoded_path = result.stdout.strip()
+        if not encoded_path:
+            return {"cancelled": True}
+        try:
+            raw_path = base64.b64decode(encoded_path, validate=True).decode("utf-8")
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise ValueError("Windows 文件选择器返回了无效路径") from exc
+        return self._picked_video_result(raw_path)
+
+    @staticmethod
+    def _picked_video_result(raw_path: str) -> dict[str, Any]:
+        path = Path(raw_path).resolve()
         allowed = {".mp4", ".mov", ".mkv", ".m4v", ".avi", ".webm", ".ts"}
         if not path.is_file() or path.suffix.lower() not in allowed:
             raise ValueError("请选择 MP4、MOV、MKV、M4V、AVI、WebM 或 TS 视频")
@@ -118,13 +212,15 @@ class Application:
     def settings(self) -> dict[str, Any]:
         keys = ["engine_path", "engine_python", "skill_path", "mcp_enabled", "mcp_token",
                 "max_parallel_jobs", "workbuddy_cli_path", "workbuddy_default_model",
-                "antigravity_cli_path", "codex_cli_path", "opencode_cli_path", "ai_default_selection"]
+                "antigravity_cli_path", "codex_cli_path", "opencode_cli_path", "multica_cli_path",
+                "multica_profile", "multica_workspace_id", "ai_default_selection"]
         return {key: self.store.get_setting(key) for key in keys}
 
     def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
         allowed = {"engine_path", "engine_python", "skill_path", "mcp_enabled", "max_parallel_jobs",
                    "workbuddy_cli_path", "workbuddy_default_model", "antigravity_cli_path",
-                   "codex_cli_path", "opencode_cli_path", "ai_default_selection"}
+                   "codex_cli_path", "opencode_cli_path", "multica_cli_path", "multica_profile",
+                   "multica_workspace_id", "ai_default_selection"}
         if "ai_default_selection" in payload:
             self.runner.resolve_ai_selection(str(payload["ai_default_selection"]))
         for key in allowed & payload.keys():

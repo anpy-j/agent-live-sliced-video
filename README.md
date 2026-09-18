@@ -8,6 +8,7 @@
 - 五个真实生产节点的流程总览、执行事件、错误和结果
 - 图片、JSON、日志和 MP4 产物预览
 - LiveCut 可主动调用 WorkBuddy、Antigravity、Codex 或 OpenCode CLI 完成一次创意编排，也可回退为人工或外部 MCP Agent 决策
+- Multica 可作为第五个 AI 提供方，通过工作区中的 Agent 发起编排 Run
 - 新建任务和待编排节点都可选择 AI 提供方与模型
 - 在线编辑并自动备份薄 Skill
 - 带 Bearer Token 的 Streamable HTTP MCP 入口
@@ -16,26 +17,35 @@
 
 ## 启动
 
-Web 管理端本身没有第三方依赖。首次使用切片引擎时，先建立独立 Python 3.13 环境：
+Web 管理端本身没有第三方依赖，Python 3.11 及以上可以直接启动：
 
 ```bash
-uv venv --python 3.13 .venv
-uv pip install --python .venv/bin/python -r /Volumes/MacData/Users/anpy/develop/personal/自媒体/切片/douyin-womenswear-slicing/requirements.txt
-```
-
-然后启动：
-
-```bash
-python3 -m agent_video
+python -m agent_video
 ```
 
 打开 <http://127.0.0.1:8787>。MCP 地址为 `http://127.0.0.1:8787/mcp`，客户端配置与密钥可在「MCP 接入」页面复制。
 
-首次运行前，在「系统设置」确认底层切片引擎路径。默认值指向：
+首次使用切片引擎时，建议建立独立 Python 3.13 环境并安装底层引擎依赖。
 
-```text
-/Volumes/MacData/Users/anpy/develop/personal/自媒体/切片/douyin-womenswear-slicing
+macOS：
+
+```bash
+python3.13 -m venv .venv
+.venv/bin/python -m pip install -r /path/to/douyin-womenswear-slicing/requirements.txt
 ```
+
+Windows PowerShell：
+
+```powershell
+py -3.13 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r "D:\path\to\douyin-womenswear-slicing\requirements.txt"
+```
+
+原生视频文件选择器同时支持 macOS 和 Windows。Windows 使用系统自带的 PowerShell 打开文件对话框，并支持中文文件名和目录；Linux 客户端仍需填写素材的绝对路径。
+
+如需使用 Multica，先安装 CLI 并执行 `multica setup`。随后在「系统设置」填写 Multica CLI 路径；Profile 和 Workspace ID 可留空以使用 Multica 当前默认值。模型选择器会列出工作区 Agent，并显示各 Agent 绑定的底层模型。
+
+首次运行前，在「系统设置」确认底层切片引擎目录和引擎 Python。macOS 的虚拟环境解释器通常是 `.venv/bin/python`，Windows 通常是 `.venv\Scripts\python.exe`。
 
 ## 当前工作流
 

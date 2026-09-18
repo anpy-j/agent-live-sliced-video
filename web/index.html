@@ -38,7 +38,7 @@
   <dialog id="newJobDialog" class="modal">
     <form id="newJobForm">
       <div class="modal-head"><div><span class="eyebrow">NEW PRODUCTION</span><h2>创建剪辑任务</h2></div><button class="icon-button" type="button" data-close-new-job aria-label="关闭"><svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
-      <label>视频素材<div class="file-picker"><input name="source_path" required readonly placeholder="尚未选择视频"><button class="button ghost" type="button" id="pickSourceButton">选择视频</button></div><small>从系统文件选择器关联本机视频；文件不会被复制。</small></label>
+      <label>视频素材<div class="file-picker"><input name="source_path" required placeholder="选择视频或粘贴绝对路径"><button class="button ghost" type="button" id="pickSourceButton">选择视频</button></div><small>从系统文件选择器关联本机视频，也可直接粘贴绝对路径；文件不会被复制。</small></label>
       <div class="form-grid"><label>成片名称<input name="title" required placeholder="也是最终生成的 MP4 文件名"><small>最终输出为“成片名称.mp4”。</small></label><label>执行模式<select name="mode"><option value="standard">标准 · 粗剪确认后高清导出</option><option value="fast">快速 · 跳过独立粗剪、一次直出</option><option value="refined">精修 · 粗剪确认与完整质检</option></select></label></div>
       <label>AI 提供方与模型<div id="newJobModelPicker"><input disabled value="正在读取可用模型…"></div><small>输入提供商或模型关键词筛选；素材索引完成后，LiveCut 会直接调用所选 CLI 完成音画编排。</small></label>
       <details class="optional-field"><summary>补充剪辑偏好（可选）</summary><label>创意偏好<textarea name="brief" rows="3" placeholder="例如：突出主播审美观点、节奏自然、控制在 60 秒左右"></textarea><small>只影响 Agent 的创意取舍；留空使用默认女装精剪策略，不会改变技术流程。</small></label></details>
