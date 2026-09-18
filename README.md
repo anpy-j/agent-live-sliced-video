@@ -9,6 +9,7 @@
 - 图片、JSON、日志和 MP4 产物预览
 - LiveCut 可主动调用 WorkBuddy、Antigravity、Codex 或 OpenCode CLI 完成一次创意编排，也可回退为人工或外部 MCP Agent 决策
 - 新建任务可分别选择文本编排模型和多模态混剪模型
+- Multica 可作为第五个 AI 提供方，通过工作区中的 Agent 发起编排 Run
 - 在线编辑并自动备份薄 Skill
 - 带 Bearer Token 的 Streamable HTTP MCP 入口
 - 项目内置女装切片执行内核，不依赖外部旧引擎目录
@@ -16,22 +17,37 @@
 
 ## 启动
 
-首次使用时建立独立 Python 3.13 环境。在 Apple Silicon Mac 上安装：
+首次使用时建议建立独立 Python 3.13 环境安装项目与引擎依赖。
+
+在 Apple Silicon Mac 上：
 
 ```bash
 uv venv --python 3.13 .venv
 uv pip install --python .venv/bin/python -e '.[apple-silicon]'
 ```
 
-然后启动：
+在 Windows PowerShell 上：
+
+```powershell
+py -3.13 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e .
+```
+
+启动 Web 控制台（Web 管理端本身没有第三方依赖，Python 3.11 及以上也可直接启动）：
 
 ```bash
-python3 -m agent_video
+python -m agent_video
 ```
 
 打开 <http://127.0.0.1:8787>。MCP 地址为 `http://127.0.0.1:8787/mcp`，客户端配置与密钥可在「MCP 接入」页面复制。
 
 执行内核位于 `agent_video/engine`，随项目代码一起升级；系统设置只需确认引擎 Python 环境。
+
+原生视频文件选择器同时支持 macOS 和 Windows。Windows 使用系统自带的 PowerShell 打开文件对话框，并支持中文文件名和目录；Linux 客户端仍需填写素材的绝对路径。
+
+如需使用 Multica，先安装 CLI 并执行 `multica setup`。随后在「系统设置」填写 Multica CLI 路径；Profile 和 Workspace ID 可留空以使用 Multica 当前默认值。模型选择器会列出工作区 Agent，并显示各 Agent 绑定的底层模型。
+
+首次运行前，在「系统设置」确认引擎 Python。macOS 的虚拟环境解释器通常是 `.venv/bin/python`，Windows 通常是 `.venv\Scripts\python.exe`。
 
 ## 当前工作流
 

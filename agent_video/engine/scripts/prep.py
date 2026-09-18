@@ -367,87 +367,94 @@ def main():
     # Keep the deterministic cache writer single-process; the lock is released
     # automatically when the short-lived prep process exits.
     cache_lock_handle = open(os.path.join(workdir, ".prep.lock"), "a+", encoding="utf-8")
-    atexit.register(cache_lock_handle.close)
-    if fcntl is not None:
-        fcntl.flock(cache_lock_handle.fileno(), fcntl.LOCK_EX)
+    try:
+        if fcntl is not None:
+            fcntl.flock(cache_lock_handle.fileno(), fcntl.LOCK_EX)
 
-    asr_config = None if a.subtitle else resolve_config(a.backend, a.model)
-    subtitle = os.path.abspath(a.subtitle) if a.subtitle else None
-    key = cache_key(media, subtitle, asr_config, a.no_words)
-    if not a.force and cache_complete(workdir, key):
-        print(f"cache hit -> {workdir}")
-        return
+        asr_config = None if a.subtitle else resolve_config(a.backend, a.model)
+        subtitle = os.path.abspath(a.subtitle) if a.subtitle else None
+        key = cache_key(media, subtitle, asr_config, a.no_words)
+        if not a.force and cache_complete(workdir, key):
+            print(f"cache hit -> {workdir}")
+            return
 
-    t0 = time.time()
-    ptxt, dur = probe(media, workdir)
-    print(ptxt)
-    # Time-coded subtitles are sufficient for candidate selection and normal
-    # boundary alignment.  Defer audio extraction unless cuts.py actually needs
-    # an ASR/silence fallback after picks are known.
-    wav = (os.path.join(workdir, "audio16k.wav") if subtitle
-           else extract_audio(media, workdir))
+        t0 = time.time()
+        ptxt, dur = probe(media, workdir)
+        print(ptxt)
+        # Time-coded subtitles are sufficient for candidate selection and normal
+        # boundary alignment.  Defer audio extraction unless cuts.py actually needs
+        # an ASR/silence fallback after picks are known.
+        wav = (os.path.join(workdir, "audio16k.wav") if subtitle
+               else extract_audio(media, workdir))
 
-    transcript_key = {"version": 2, "media": fingerprint(media),
-                      "subtitle": fingerprint(subtitle) if subtitle else None,
-                      "mode": "subtitle" if subtitle else "whisper", "asr": asr_config,
-                      "no_words": bool(a.no_words)}
-    words = []
-    if transcript_cache_complete(workdir, transcript_key):
-        sentences = json.load(open(os.path.join(workdir, "sentences.json"), encoding="utf-8"))
-        words_path = os.path.join(workdir, "words.json")
-        if os.path.isfile(words_path) and not a.no_words:
-            words = json.load(open(words_path, encoding="utf-8"))
-        mode = f"转写缓存（{len(sentences)} 句）"
-    else:
-        if subtitle:
-            blocks = parse_subtitle(subtitle)
-            if not blocks:
-                raise ValueError(f"字幕文件没有可用时间码: {subtitle}")
-            dump_json(os.path.join(workdir, "subtitle_blocks.json"), blocks)
-            sentences = merge_blocks(blocks)
-            words = words_from_subtitles(blocks)
-            if words:
-                dump_json(os.path.join(workdir, "words.json"), words)
-            mode = f"字幕直用模式（{len(blocks)} 个可信块边界，0 次 ASR）"
+        transcript_key = {"version": 2, "media": fingerprint(media),
+                          "subtitle": fingerprint(subtitle) if subtitle else None,
+                          "mode": "subtitle" if subtitle else "whisper", "asr": asr_config,
+                          "no_words": bool(a.no_words)}
+        words = []
+        if transcript_cache_complete(workdir, transcript_key):
+            sentences = json.load(open(os.path.join(workdir, "sentences.json"), encoding="utf-8"))
+            words_path = os.path.join(workdir, "words.json")
+            if os.path.isfile(words_path) and not a.no_words:
+                words = json.load(open(words_path, encoding="utf-8"))
+            mode = f"转写缓存（{len(sentences)} 句）"
         else:
-            transcriber = Transcriber(a.backend, a.model)
-            sentences, words = whisper_full(wav, transcriber, want_words=not a.no_words)
-            mode = f"Whisper {transcriber.backend} 模式（{len(sentences)} 句）"
-            if words:
-                dump_json(os.path.join(workdir, "words.json"), words)
-        dump_json(os.path.join(workdir, "sentences.json"), sentences)
-        with open(os.path.join(workdir, "transcript_manifest.json"), "w",
-                  encoding="utf-8") as handle:
-            json.dump({"key": transcript_key}, handle, ensure_ascii=False, indent=2)
+            if subtitle:
+                blocks = parse_subtitle(subtitle)
+                if not blocks:
+                    raise ValueError(f"字幕文件没有可用时间码: {subtitle}")
+                dump_json(os.path.join(workdir, "subtitle_blocks.json"), blocks)
+                sentences = merge_blocks(blocks)
+                words = words_from_subtitles(blocks)
+                if words:
+                    dump_json(os.path.join(workdir, "words.json"), words)
+                mode = f"字幕直用模式（{len(blocks)} 个可信块边界，0 次 ASR）"
+            else:
+                transcriber = Transcriber(a.backend, a.model)
+                sentences, words = whisper_full(wav, transcriber, want_words=not a.no_words)
+                mode = f"Whisper {transcriber.backend} 模式（{len(sentences)} 句）"
+                if words:
+                    dump_json(os.path.join(workdir, "words.json"), words)
+            dump_json(os.path.join(workdir, "sentences.json"), sentences)
+            with open(os.path.join(workdir, "transcript_manifest.json"), "w",
+                      encoding="utf-8") as handle:
+                json.dump({"key": transcript_key}, handle, ensure_ascii=False, indent=2)
 
-    kept = []
-    for sentence in sentences:
-        if usable(sentence):
-            item = dict(sentence)
-            review = review_hits(item.get("text", ""))
-            if review:
-                item["review_terms"] = review
-            kept.append(item)
-    dropped = len(sentences) - len(kept)
-    dump_json(os.path.join(workdir, "candidates.json"), kept)
-    with open(os.path.join(workdir, "cache_manifest.json"), "w", encoding="utf-8") as handle:
-        json.dump({"key": key, "created_at": int(time.time())}, handle,
-                  ensure_ascii=False, indent=2)
+        kept = []
+        for sentence in sentences:
+            if usable(sentence):
+                item = dict(sentence)
+                review = review_hits(item.get("text", ""))
+                if review:
+                    item["review_terms"] = review
+                kept.append(item)
+        dropped = len(sentences) - len(kept)
+        dump_json(os.path.join(workdir, "candidates.json"), kept)
+        with open(os.path.join(workdir, "cache_manifest.json"), "w", encoding="utf-8") as handle:
+            json.dump({"key": key, "created_at": int(time.time())}, handle,
+                      ensure_ascii=False, indent=2)
 
-    print(f"\n索引完成 → {workdir}")
-    print(f"  {mode}")
-    unit = "字幕块" if subtitle else "词"
-    audio_state = ("audio16k.wav 延迟提取（正常字幕边界路径无需音频）"
-                   if subtitle and not os.path.isfile(wav) else "audio16k.wav 可用")
-    print(f"  {audio_state} / sentences.json {len(sentences)} 句"
-          + (f" / words.json {len(words)} 个{unit}" if words else " / 无 words.json"))
-    print(f"  candidates.json {len(kept)} 句（本地过滤剔除 {dropped} 句，含违禁词/过短/非中文）")
-    print(f"  耗时 {time.time() - t0:.0f}s")
-    if a.verbose:
-        print(f"\n候选完整句（仅 verbose，显示前 {a.top} 句）：")
-        for i, s in enumerate(kept[:a.top]):
-            print(f"{i:4d} {ts(s['start'])}-{ts(s['end'])} "
-                  f"({s['end'] - s['start']:4.1f}s)  {s['text']}")
+        print(f"\n索引完成 → {workdir}")
+        print(f"  {mode}")
+        unit = "字幕块" if subtitle else "词"
+        audio_state = ("audio16k.wav 延迟提取（正常字幕边界路径无需音频）"
+                       if subtitle and not os.path.isfile(wav) else "audio16k.wav 可用")
+        print(f"  {audio_state} / sentences.json {len(sentences)} 句"
+              + (f" / words.json {len(words)} 个{unit}" if words else " / 无 words.json"))
+        print(f"  candidates.json {len(kept)} 句（本地过滤剔除 {dropped} 句，含违禁词/过短/非中文）")
+        print(f"  耗时 {time.time() - t0:.0f}s")
+        if a.verbose:
+            print(f"\n候选完整句（仅 verbose，显示前 {a.top} 句）：")
+            for i, s in enumerate(kept[:a.top]):
+                print(f"{i:4d} {ts(s['start'])}-{ts(s['end'])} "
+                      f"({s['end'] - s['start']:4.1f}s)  {s['text']}")
+    finally:
+        try:
+            if fcntl is not None:
+                fcntl.flock(cache_lock_handle.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        cache_lock_handle.close()
 
 
 if __name__ == "__main__":

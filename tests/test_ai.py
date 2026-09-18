@@ -1,9 +1,10 @@
 import json
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from agent_video.ai import (AntigravityCli, CodexCli, OpenCodeCli,
+from agent_video.ai import (AntigravityCli, CodexCli, MulticaCli, OpenCodeCli,
                             ProviderResponseError, WorkBuddyCli)
 
 
@@ -121,6 +122,81 @@ class WorkBuddyCliTest(unittest.TestCase):
                 provider.generate_plan(model="jysd/test", prompt="业务规则", cwd=Path("/tmp"))
         self.assertEqual(raised.exception.raw["stdout"], stdout)
         self.assertEqual(raised.exception.raw["stderr"], "warning")
+
+    def test_multica_agents_are_exposed_as_model_choices(self):
+        provider = MulticaCli(Path("/tmp/multica"), profile="desktop", workspace_id="workspace-1")
+        agents = {"agents": [
+            {"id": "agent-1", "name": "剪辑师", "model": "gpt-5.6-sol",
+             "runtime_id": "runtime-1"},
+            {"id": "agent-2", "name": "审片师", "runtime": {"name": "Codex"},
+             "runtime_id": "runtime-1"},
+            {"id": "agent-offline", "name": "离线 Agent", "runtime_id": "runtime-old"},
+            {"id": "agent-old", "name": "旧 Agent", "runtime_id": "runtime-1",
+             "archived_at": "2026-01-01"},
+        ]}
+        runtimes = [{"id": "runtime-1", "status": "online"},
+                    {"id": "runtime-old", "status": "offline"}]
+        with patch.object(Path, "is_file", return_value=True), \
+                patch("agent_video.ai.os.access", return_value=True), \
+                patch.object(provider, "_run_json",
+                             side_effect=[(agents, ""), (runtimes, "")]):
+            models = provider.models()
+        self.assertEqual(models, [
+            ("agent-1", "剪辑师 · gpt-5.6-sol"),
+            ("agent-2", "审片师 · Codex"),
+        ])
+        self.assertEqual(provider._command_prefix(), [
+            str(Path("/tmp/multica")), "--profile", "desktop", "--workspace-id", "workspace-1",
+        ])
+
+    def test_multica_creates_run_and_extracts_structured_plan(self):
+        provider = MulticaCli(Path("/tmp/multica"))
+        provider._model_cache = (time.monotonic(), [("agent-1", "剪辑师")])
+        plan = {
+            "main_product": "风衣",
+            "picks": [
+                {"src": 1, "start": 0, "end": 3, "text": "开头", "role": "hook",
+                 "module": "hook_A"},
+                {"src": 1, "start": 4, "end": 8, "text": "正文", "role": "proof",
+                 "module": "body"},
+            ],
+        }
+        responses = [
+            ({"issue": {"id": "issue-1"}}, ""),
+            ({"runs": [{"task_id": "task-1", "status": "running"}]}, ""),
+            ({"runs": [{"task_id": "task-1", "status": "completed"}]}, ""),
+            ({"messages": [{"content": json.dumps(plan, ensure_ascii=False)}]}, ""),
+            ({"input_tokens": 90, "output_tokens": 30}, ""),
+        ]
+        with patch.object(provider, "_ensure_available"), \
+                patch.object(provider, "_run_json", side_effect=responses) as run, \
+                patch("agent_video.ai.time.sleep"):
+            result = provider.generate_plan(model="agent-1", prompt="编排", cwd=Path("/tmp"))
+
+        self.assertEqual(result["plan"], plan)
+        self.assertEqual(result["usage"], {"input_tokens": 90, "output_tokens": 30})
+        create_args = run.call_args_list[0].args[0]
+        self.assertIn("--description-stdin", create_args)
+        self.assertIn("--assignee-id", create_args)
+
+    def test_multica_cancels_remote_run_when_local_job_is_cancelled(self):
+        provider = MulticaCli(Path("/tmp/multica"))
+        provider._model_cache = (time.monotonic(), [("agent-1", "剪辑师")])
+        responses = [
+            ({"issue": {"id": "issue-1"}}, ""),
+            ({"runs": [{"task_id": "task-1", "status": "running"}]}, ""),
+        ]
+        cancelled = iter([False, True])
+        with patch.object(provider, "_ensure_available"), \
+                patch.object(provider, "_run_json", side_effect=responses), \
+                patch.object(provider, "_cancel_task") as cancel, \
+                patch("agent_video.ai.time.sleep"):
+            with self.assertRaisesRegex(RuntimeError, "已取消"):
+                provider.generate_plan(
+                    model="agent-1", prompt="编排", cwd=Path("/tmp"),
+                    should_cancel=lambda: next(cancelled),
+                )
+        cancel.assert_called_once_with("task-1", "issue-1", Path("/tmp"))
 
 
 if __name__ == "__main__":

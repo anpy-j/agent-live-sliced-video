@@ -82,7 +82,7 @@ class RunnerTest(unittest.TestCase):
         dual.write_text("[]", encoding="utf-8")
         module.write_text("[]", encoding="utf-8")
         (engine / "video_mapping_report.json").write_text(
-            '{"dual_timelines":{"body":"' + str(dual) + '"}}', encoding="utf-8")
+            json.dumps({"dual_timelines": {"body": str(dual)}}), encoding="utf-8")
         snapshot = self.runner._delivery_inputs(source, engine)
         self.runner._assert_delivery_inputs(snapshot, source)
         dual.write_text("[{}]", encoding="utf-8")
@@ -194,7 +194,8 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(stage["status"], "succeeded")
         self.assertEqual(job["status"], "queued")
         self.assertEqual(job["token_input"], 100)
-        self.assertEqual(json.loads((engine / "picks.json").read_text())["main_product"], "白山茶")
+        self.assertEqual(json.loads((engine / "picks.json").read_text(encoding="utf-8"))["main_product"],
+                         "白山茶")
 
     def test_soft_structure_warnings_do_not_trigger_another_model_call(self):
         workspace = self.root / "job"
@@ -231,14 +232,15 @@ class RunnerTest(unittest.TestCase):
                 patch.object(self.runner, "enqueue") as enqueue:
             self.runner._run_ai_plan(self.store.get_job(job_id), engine)
         self.assertEqual(provider.generate_plan.call_count, 1)
-        self.assertEqual(json.loads((engine / "picks.json").read_text())["picks"], invalid["picks"])
+        self.assertEqual(json.loads((engine / "picks.json").read_text(encoding="utf-8"))["picks"], invalid["picks"])
         self.assertEqual(self.store.get_job(job_id)["token_input"], 10)
         enqueue.assert_called_once_with(job_id)
 
-    def test_ai_provider_selection_accepts_codex_antigravity_and_opencode(self):
+    def test_ai_provider_selection_accepts_all_automatic_providers(self):
         for provider_id, model in (("codex", "gpt-5.6-sol"),
                                    ("antigravity", "gemini-3.1-pro-high"),
-                                   ("opencode", "openai/gpt-5.6-sol")):
+                                   ("opencode", "openai/gpt-5.6-sol"),
+                                   ("multica", "agent-1")):
             provider = Mock()
             provider.display_name = provider_id
             provider.info.return_value = {"available": True}
@@ -317,7 +319,7 @@ class RunnerTest(unittest.TestCase):
         job = self.store.get_job(job_id)
         self.assertEqual(job["status"], "queued")
         self.assertEqual(job["model_provider"], "opencode")
-        self.assertEqual(json.loads((engine / "picks.json").read_text())["main_product"], "白山茶")
+        self.assertEqual(json.loads((engine / "picks.json").read_text(encoding="utf-8"))["main_product"], "白山茶")
         kinds = [event["kind"] for event in job["events"]]
         self.assertIn("ai_plan_fallback", kinds)
         self.assertNotIn("input_required", kinds)
@@ -495,7 +497,7 @@ class RunnerTest(unittest.TestCase):
         self.store.stage_fail(job_id, "validation", "失败")
         with patch.object(self.runner, "enqueue") as enqueue:
             self.runner.retry(job_id)
-        self.assertEqual(json.loads((engine / "picks.json").read_text()), accepted)
+        self.assertEqual(json.loads((engine / "picks.json").read_text(encoding="utf-8")), accepted)
         self.assertEqual(self.store.get_job(job_id)["current_stage"], "validation")
         enqueue.assert_called_once_with(job_id)
 
@@ -539,7 +541,7 @@ class RunnerTest(unittest.TestCase):
         dual.write_text("[]", encoding="utf-8")
         module.write_text("[]", encoding="utf-8")
         (engine / "video_mapping_report.json").write_text(
-            '{"dual_timelines":{"body":"' + str(dual) + '"}}', encoding="utf-8")
+            json.dumps({"dual_timelines": {"body": str(dual)}}), encoding="utf-8")
         snapshot = self.runner._delivery_inputs(source, engine)
         marker = workspace / "timeline_locked.json"
         marker.write_text(json.dumps({"validated_inputs": snapshot}), encoding="utf-8")
@@ -594,7 +596,7 @@ class RunnerTest(unittest.TestCase):
             self.runner._prepare_render(job, Path("/tmp/source.mp4"), workspace, engine,
                                         workspace / "timeline_locked.json")
         provider_lookup.assert_not_called()
-        self.assertEqual(json.loads(picks.read_text()), old)
+        self.assertEqual(json.loads(picks.read_text(encoding="utf-8")), old)
         self.assertFalse((workspace / "validation-repair.json").exists())
 
     def test_delivery_reuses_snapshot_without_full_pipeline(self):
@@ -609,7 +611,7 @@ class RunnerTest(unittest.TestCase):
         dual.write_text("[]", encoding="utf-8")
         module.write_text("[]", encoding="utf-8")
         (engine / "video_mapping_report.json").write_text(
-            '{"dual_timelines":{"body":"' + str(dual) + '"}}', encoding="utf-8")
+            json.dumps({"dual_timelines": {"body": str(dual)}}), encoding="utf-8")
         snapshot = self.runner._delivery_inputs(source, engine)
         (workspace / "timeline_locked.json").write_text(
             json.dumps({"validated_inputs": snapshot}), encoding="utf-8")

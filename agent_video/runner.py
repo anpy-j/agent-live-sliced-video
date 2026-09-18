@@ -16,13 +16,13 @@ from pathlib import Path
 from typing import Any
 
 from .ai import (PLAN_PATCH_SCHEMA, AntigravityCli, CliProvider, CodexCli,
-                 OpenCodeCli, WorkBuddyCli)
+                 MulticaCli, OpenCodeCli, WorkBuddyCli)
 from .db import Store, utc_now
 from .engine.scripts.textnorm import context_dependent_start, incomplete_ending
 from .engine.validation_policy import shared_issues
 from .rules import DirectivesManager
 
-AI_PROVIDER_IDS = frozenset({"workbuddy", "antigravity", "codex", "opencode"})
+AI_PROVIDER_IDS = frozenset({"workbuddy", "antigravity", "codex", "opencode", "multica"})
 MIN_PICK_SECONDS = 1.2
 MAX_PICK_SECONDS = 5.0
 MAX_CONTINUOUS_SOURCE_SECONDS = 10.0
@@ -200,7 +200,7 @@ class JobRunner:
 
     def provider_infos(self) -> list[dict[str, Any]]:
         return [self._provider(provider_id).info()
-                for provider_id in ("workbuddy", "antigravity", "codex", "opencode")]
+                for provider_id in ("workbuddy", "antigravity", "codex", "opencode", "multica")]
 
     def resolve_ai_selection(self, selection: str) -> tuple[str, str | None]:
         if selection == "manual":
@@ -525,10 +525,29 @@ class JobRunner:
             "antigravity": AntigravityCli(Path(self.store.get_setting("antigravity_cli_path", ""))),
             "codex": CodexCli(Path(self.store.get_setting("codex_cli_path", ""))),
             "opencode": OpenCodeCli(Path(self.store.get_setting("opencode_cli_path", ""))),
+            "multica": MulticaCli(
+                Path(self.store.get_setting("multica_cli_path", "")),
+                profile=str(self.store.get_setting("multica_profile", "") or ""),
+                workspace_id=str(self.store.get_setting("multica_workspace_id", "") or ""),
+            ),
         }
         if provider_id not in providers:
             raise ValueError(f"不支持的 AI 提供方: {provider_id}")
         return providers[provider_id]
+
+    def _generate_plan(self, provider: CliProvider, *, job_id: str, model: str,
+                       prompt: str) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "prompt": prompt,
+            "cwd": self.project_root,
+            "on_process": lambda process: self._active.__setitem__(job_id, process),
+        }
+        if isinstance(provider, MulticaCli):
+            kwargs["should_cancel"] = lambda: (
+                (self.store.get_job(job_id) or {}).get("status") == "cancelled"
+            )
+        return provider.generate_plan(**kwargs)
 
     def _run_ai_plan(self, job: dict[str, Any], engine_work: Path) -> None:
         """全自动编排：优先用任务指定的模型，失败后自动降级到其他可用模型，不再等待人工决策。"""
@@ -605,10 +624,9 @@ class JobRunner:
         usage_recorded = False
         refinement_started = False
         try:
-            result = self._with_heartbeat(job_id, lambda: provider.generate_plan(
-                model=model, prompt=prompt, cwd=self.project_root,
-                on_process=lambda process: self._active.__setitem__(job_id, process),
-            ))
+            result = self._with_heartbeat(
+                job_id, lambda: self._generate_plan(
+                    provider, job_id=job_id, model=model, prompt=prompt))
             attempts.append({"raw": result.get("raw"), "issues": [],
                              "seconds": result.get("seconds"),
                              "usage": result.get("usage") or {}})

@@ -667,3 +667,213 @@ class OpenCodeCli(CliProvider):
             )
         return {"plan": plan, "raw": {"events": events}, "stderr": stderr.strip(),
                 "seconds": seconds, "usage": self._find_usage(events)}
+
+
+class MulticaCli(CliProvider):
+    provider_id = "multica"
+    display_name = "Multica"
+
+    def __init__(self, executable: Path, *, profile: str = "", workspace_id: str = ""):
+        super().__init__(executable)
+        self.profile = profile.strip()
+        self.workspace_id = workspace_id.strip()
+        self._model_cache: tuple[float, list[tuple[str, str]]] | None = None
+
+    def _command_prefix(self) -> list[str]:
+        command = [str(self.executable)]
+        if self.profile:
+            command.extend(["--profile", self.profile])
+        if self.workspace_id:
+            command.extend(["--workspace-id", self.workspace_id])
+        return command
+
+    def info(self) -> dict[str, Any]:
+        installed = self.executable.is_file() and os.access(self.executable, os.X_OK)
+        models = self.models() if installed else []
+        return {
+            "id": self.provider_id,
+            "name": self.display_name,
+            "available": installed and bool(models),
+            "installed": installed,
+            "path": str(self.executable),
+            "models": [{"id": model_id, "name": name} for model_id, name in models],
+        }
+
+    def _run_json(self, args: list[str], *, cwd: Path, timeout: int = 30,
+                  input_text: str | None = None,
+                  on_process: Callable[[subprocess.Popen[str]], None] | None = None) -> tuple[Any, str]:
+        command = [*self._command_prefix(), *args, "--output", "json"]
+        process = subprocess.Popen(
+            command, cwd=str(cwd), stdin=subprocess.PIPE if input_text is not None else None,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
+            errors="replace", env={**os.environ, "NO_COLOR": "1", "TERM": "xterm"},
+        )
+        if on_process:
+            on_process(process)
+        try:
+            stdout, stderr = process.communicate(input=input_text, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+            raise RuntimeError(f"Multica 命令超过 {timeout} 秒，已停止") from None
+        if process.returncode:
+            detail = (stderr or stdout).strip()[-1600:]
+            raise RuntimeError(f"Multica 命令失败：{detail or f'退出码 {process.returncode}'}")
+        return self._parse_json(stdout), stderr.strip()
+
+    @staticmethod
+    def _agents(envelope: Any) -> list[dict[str, Any]]:
+        if isinstance(envelope, list):
+            return [item for item in envelope if isinstance(item, dict)]
+        if isinstance(envelope, dict):
+            for key in ("agents", "items", "data"):
+                value = envelope.get(key)
+                if isinstance(value, list):
+                    return [item for item in value if isinstance(item, dict)]
+        return []
+
+    @staticmethod
+    def _runtimes(envelope: Any) -> list[dict[str, Any]]:
+        if isinstance(envelope, list):
+            return [item for item in envelope if isinstance(item, dict)]
+        if isinstance(envelope, dict):
+            for key in ("runtimes", "items", "data"):
+                value = envelope.get(key)
+                if isinstance(value, list):
+                    return [item for item in value if isinstance(item, dict)]
+        return []
+
+    def models(self) -> list[tuple[str, str]]:
+        now = time.monotonic()
+        if self._model_cache and now - self._model_cache[0] < 120:
+            return self._model_cache[1]
+        choices: list[tuple[str, str]] = []
+        if self.executable.is_file() and os.access(self.executable, os.X_OK):
+            try:
+                envelope, _ = self._run_json(["agent", "list"], cwd=Path.cwd(), timeout=20)
+                runtime_envelope, _ = self._run_json(
+                    ["runtime", "list"], cwd=Path.cwd(), timeout=20)
+                online_runtime_ids = {
+                    str(runtime.get("id")) for runtime in self._runtimes(runtime_envelope)
+                    if str(runtime.get("status") or "").lower() == "online" and runtime.get("id")
+                }
+                seen: set[str] = set()
+                for agent in self._agents(envelope):
+                    agent_id = str(agent.get("id") or "").strip()
+                    name = str(agent.get("name") or agent.get("display_name") or agent_id).strip()
+                    runtime_id = str(agent.get("runtime_id") or "").strip()
+                    if (not agent_id or agent_id in seen or agent.get("archived_at")
+                            or not runtime_id or runtime_id not in online_runtime_ids):
+                        continue
+                    seen.add(agent_id)
+                    model = str(agent.get("model") or "").strip()
+                    runtime = agent.get("runtime") if isinstance(agent.get("runtime"), dict) else {}
+                    runtime_name = str(runtime.get("name") or agent.get("runtime_name") or "").strip()
+                    detail = model or runtime_name or "运行时默认模型"
+                    choices.append((agent_id, f"{name} · {detail}"))
+            except (OSError, RuntimeError, subprocess.TimeoutExpired):
+                pass
+        self._model_cache = (now, choices)
+        return choices
+
+    @staticmethod
+    def _issue_id(envelope: Any) -> str | None:
+        if isinstance(envelope, dict):
+            issue = envelope.get("issue")
+            if isinstance(issue, dict) and issue.get("id"):
+                return str(issue["id"])
+            if envelope.get("id"):
+                return str(envelope["id"])
+            if envelope.get("issue_id"):
+                return str(envelope["issue_id"])
+        return None
+
+    @staticmethod
+    def _runs(envelope: Any) -> list[dict[str, Any]]:
+        if isinstance(envelope, list):
+            return [item for item in envelope if isinstance(item, dict)]
+        if isinstance(envelope, dict):
+            for key in ("runs", "tasks", "items", "data"):
+                value = envelope.get(key)
+                if isinstance(value, list):
+                    return [item for item in value if isinstance(item, dict)]
+        return []
+
+    def _cancel_task(self, task_id: str, issue_id: str, cwd: Path) -> None:
+        try:
+            self._run_json(["issue", "cancel-task", task_id, "--issue", issue_id],
+                           cwd=cwd, timeout=15)
+        except (OSError, RuntimeError):
+            pass
+
+    def generate_plan(self, *, model: str, prompt: str, cwd: Path,
+                      on_process: Callable[[subprocess.Popen[str]], None] | None = None,
+                      should_cancel: Callable[[], bool] | None = None,
+                      timeout: int = 360) -> dict[str, Any]:
+        self._ensure_available()
+        self.validate_model(model)
+        schema = json.dumps(PLAN_SCHEMA, ensure_ascii=False, separators=(",", ":"))
+        constrained_prompt = (
+            f"{prompt}\n\n这是一次只读编排任务，不要修改文件、创建代码或调用外部工具。"
+            f"最终消息只输出 JSON，不要 Markdown，并且必须符合此 JSON Schema：{schema}"
+        )
+        started = time.monotonic()
+        created, create_stderr = self._run_json(
+            ["issue", "create", "--title", "LiveCut AI 音画编排", "--description-stdin",
+             "--assignee-id", model],
+            cwd=cwd, timeout=min(60, timeout), input_text=constrained_prompt,
+            on_process=on_process,
+        )
+        issue_id = self._issue_id(created)
+        if not issue_id:
+            raise RuntimeError("Multica 已创建请求，但响应中没有 Issue ID")
+
+        task_id = ""
+        final_run: dict[str, Any] = {}
+        deadline = started + timeout
+        terminal_failures = {"failed", "cancelled", "blocked"}
+        while time.monotonic() < deadline:
+            if should_cancel and should_cancel():
+                if task_id:
+                    self._cancel_task(task_id, issue_id, cwd)
+                raise RuntimeError("Multica 编排已取消")
+            runs_envelope, _ = self._run_json(
+                ["issue", "runs", issue_id, "--full-id"], cwd=cwd,
+                timeout=min(30, max(1, int(deadline - time.monotonic()))),
+                on_process=on_process,
+            )
+            runs = self._runs(runs_envelope)
+            if runs:
+                final_run = runs[0]
+                task_id = str(final_run.get("task_id") or final_run.get("id") or "")
+                status = str(final_run.get("status") or "").lower()
+                if status == "completed":
+                    break
+                if status in terminal_failures:
+                    detail = final_run.get("error") or final_run.get("failure_reason") or status
+                    raise RuntimeError(f"Multica Run 未完成：{detail}")
+            time.sleep(2)
+        else:
+            if task_id:
+                self._cancel_task(task_id, issue_id, cwd)
+            raise RuntimeError(f"Multica 编排超过 {timeout // 60} 分钟，已请求取消")
+
+        if not task_id:
+            raise RuntimeError("Multica Run 已完成，但响应中没有 Task ID")
+        messages, message_stderr = self._run_json(
+            ["issue", "run-messages", task_id, "--issue", issue_id],
+            cwd=cwd, timeout=30, on_process=on_process,
+        )
+        plan = self._find_plan(messages)
+        if not plan:
+            raise RuntimeError("Multica 已返回结果，但没有找到 main_product 和 picks")
+        try:
+            usage, _ = self._run_json(["issue", "usage", issue_id], cwd=cwd, timeout=20,
+                                      on_process=on_process)
+        except (OSError, RuntimeError):
+            usage = {}
+        seconds = round(time.monotonic() - started, 2)
+        raw = {"issue": created, "run": final_run, "messages": messages, "usage": usage}
+        stderr = "\n".join(item for item in (create_stderr, message_stderr) if item)
+        return {"plan": plan, "raw": raw, "stderr": stderr, "seconds": seconds,
+                "usage": self._find_usage(usage)}
