@@ -94,6 +94,61 @@ class EngineValidationTest(unittest.TestCase):
             self.assertEqual(result[0]["video"][0]["start"], 1)
             self.assertEqual(result[0]["video"][0]["kind"], "aroll")
 
+    def test_visual_mix_rejects_reused_shots_across_blocks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            timeline = root / "body.json"
+            timeline.write_text(json.dumps([
+                {"audio": {"src": 1, "start": 1, "end": 4, "text": "第一句"},
+                 "video": [{"src": 1, "start": 1, "end": 4, "kind": "aroll"}]},
+                {"audio": {"src": 1, "start": 5, "end": 7, "text": "第二句"},
+                 "video": [{"src": 1, "start": 5, "end": 7, "kind": "aroll"}]},
+                {"audio": {"src": 1, "start": 8, "end": 10, "text": "第三句"},
+                 "video": [{"src": 1, "start": 8, "end": 10, "kind": "aroll"}]},
+            ]), encoding="utf-8")
+            mapping = root / "mapping.json"
+            mapping.write_text(json.dumps({"dual_timelines": {"body": str(timeline)}}),
+                               encoding="utf-8")
+            packet = root / "packet.json"
+            packet.write_text(json.dumps({"duration": 40, "replacement_blocks": [
+                {"block_id": "body:0", "duration": 3},
+                {"block_id": "body:1", "duration": 2},
+                {"block_id": "body:2", "duration": 2}], "candidates": [
+                {"candidate_id": "C001", "start": 10, "end": 13},
+                {"candidate_id": "C002", "start": 20, "end": 23},
+                {"candidate_id": "C003", "start": 11, "end": 14}]}), encoding="utf-8")
+            decisions = root / "decisions.json"
+            decisions.write_text(json.dumps({"replacements": [
+                {"block_id": "body:0", "candidate_id": "C001", "reason": "同款全身"},
+                {"block_id": "body:1", "candidate_id": "C001", "reason": "同款全身"},
+                {"block_id": "body:2", "candidate_id": "C003", "reason": "同款细节"}]}),
+                encoding="utf-8")
+            report = apply_visual_mix(packet, decisions, mapping, root / "report.json")
+            result = json.loads(timeline.read_text(encoding="utf-8"))
+            self.assertEqual(report["replaced"], 1)
+            self.assertEqual(result[0]["video"][0]["candidate_id"], "C001")
+            self.assertEqual(result[1]["video"][0]["kind"], "aroll")
+            self.assertEqual(result[2]["video"][0]["kind"], "aroll")
+            ignored_reasons = [str(item.get("reason", "")) for item in report["ignored"]]
+            self.assertEqual(len([reason for reason in ignored_reasons if "重复" in reason]), 2)
+            self.assertEqual(report["duplicate_shots_rejected"], 2)
+
+    def test_price_vocabulary_is_hard_banned(self):
+        import importlib
+        import os
+        from agent_video.engine.scripts import badvocab
+        self.assertTrue(badvocab.hit("这个蓝牛也能搭就配这件外套5,980专柜售价"))
+        self.assertIsNone(badvocab.hit("这件毛衣上身显瘦又利落"))
+        self.assertIn("专柜", badvocab.review_hits("专柜品质的做工"))
+        profile = Path(__file__).parents[1] / "agent_video" / "engine" / "profiles" / "douyin-strict.json"
+        with patch.dict(os.environ, {"DOUYIN_VOCAB_PROFILE": str(profile)}):
+            strict = importlib.reload(badvocab)
+            self.assertTrue(strict.hit("到手价只要三百块"))
+            self.assertTrue(strict.hit("这件专柜售价一千二"))
+            self.assertTrue(strict.hit("这款只卖5,980"))
+            self.assertIsNone(strict.hit("这件毛衣上身显瘦又利落"))
+        importlib.reload(badvocab)
+
     def test_qc_rejects_wrong_resolution(self):
         info = {
             "format": {"duration": "2.0"},

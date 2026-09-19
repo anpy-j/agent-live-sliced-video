@@ -261,6 +261,15 @@ def prepare(source: Path, mapping_path: Path, output_dir: Path,
     return packet
 
 
+def _overlap_ratio(a_start: float, a_end: float, b_start: float, b_end: float) -> float:
+    """Overlap length relative to the shorter clip; 1.0 means one contains the other."""
+    overlap = min(a_end, b_end) - max(a_start, b_start)
+    if overlap <= 0:
+        return 0.0
+    shorter = max(1e-6, min(a_end - a_start, b_end - b_start))
+    return overlap / shorter
+
+
 def apply(packet_path: Path, decisions_path: Path, mapping_path: Path,
           report_path: Path) -> dict:
     packet, decisions, mapping = read_json(packet_path), read_json(decisions_path), read_json(mapping_path)
@@ -284,6 +293,13 @@ def apply(packet_path: Path, decisions_path: Path, mapping_path: Path,
         module, raw_index = block_id.rsplit(":", 1)
         by_module.setdefault(module, []).append({**item, "index": int(raw_index)})
     blocks = {item["block_id"]: item for item in packet.get("blocks", [])}
+    # 画面不重复是硬约束：同一候选镜头、或与任何已成片画面（含原声 A-roll）
+    # 重叠过半的范围，都只允许出现一次。跨模块全局去重，钩子和正文共用同一份记录。
+    used_candidate_ids: set[str] = set()
+    used_ranges: list[tuple[int, float, float]] = []
+    for item in blocks.values():
+        used_ranges.append((int(item.get("src", 1) or 1),
+                            float(item.get("start", 0)), float(item.get("end", 0))))
     for module, timeline_value in mapping.get("dual_timelines", {}).items():
         changes = by_module.get(module, [])
         timeline_path = Path(timeline_value)
@@ -308,7 +324,18 @@ def apply(packet_path: Path, decisions_path: Path, mapping_path: Path,
             if clip_end > float(packet["duration"]) + 0.001:
                 ignored.append({**change, "reason": "候选画面长度不足"})
                 continue
-            rows[index]["video"] = [{"src": 1, "start": float(candidate["start"]),
+            clip_start = float(candidate["start"])
+            if change["candidate_id"] in used_candidate_ids:
+                ignored.append({**change, "reason": "同一镜头已被其他片段使用，画面不得重复"})
+                continue
+            collision = next(((src, s, e) for src, s, e in used_ranges
+                              if src == 1 and _overlap_ratio(clip_start, clip_end, s, e) >= 0.5), None)
+            if collision:
+                ignored.append({**change, "reason": "替换画面与成片中已有画面重复"})
+                continue
+            used_candidate_ids.add(str(change["candidate_id"]))
+            used_ranges.append((1, clip_start, clip_end))
+            rows[index]["video"] = [{"src": 1, "start": clip_start,
                                      "end": round(clip_end, 3), "kind": "broll",
                                      "candidate_id": change["candidate_id"],
                                      "crop_x": float(candidate.get("crop_x", 0.5))}]
@@ -320,7 +347,9 @@ def apply(packet_path: Path, decisions_path: Path, mapping_path: Path,
         write_json_atomic(timeline_path, rows)
     report = {"ok": True, "requested": len(needed), "replaced": len(accepted),
               "kept_original": len(needed) - len(accepted), "accepted": accepted,
-              "ignored": ignored}
+              "ignored": ignored,
+              "duplicate_shots_rejected": sum(
+                  1 for item in ignored if "重复" in str(item.get("reason", "")))}
     write_json_atomic(report_path, report)
     return report
 

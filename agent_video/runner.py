@@ -656,19 +656,21 @@ class JobRunner:
 判定标准：
 1. standalone 只有在该句脱离前后文仍能独立理解、句首句尾都完整时才为 true。
 2. 场控、助播沟通、删改指令、库存物流、催单、后台问答、换商品操作一律 reject。
-3. ASR 乱码、词序错误、问答残缺、指代不明、只说半句、低信息口头禅一律 reject。
-4. 提到其他商品时，只有明确服务于主商品的有效搭配建议才可保留；商品切换和副商品销售 reject。
-5. selling_value 评估对短视频的实际贡献：明确效果、版型、适穿、可信证据、颜色搭配或有效人设内容得高分；重复和空话得低分。
-6. 近义重复只保留表达最完整、最有信息量的一条，其余标记 repetition 并 reject。
-7. verdict=keep 必须同时满足 standalone=true、main_product_relevant=true、selling_value>=50，且不属于垃圾类别。
-8. 不得改写文本、脑补上下文或因为需要凑时长而放宽标准。宁可少留，不可错留。
+3. 报价与交易信息一律 reject：售价、专柜价、原价、价格数字（如 5,980）、优惠、折扣、券，无论是否强调"只是专柜价"。
+4. ASR 乱码、词序错误、问答残缺、指代不明、只说半句、低信息口头禅一律 reject。
+5. 提到其他商品时，只有明确服务于主商品的有效搭配建议才可保留；商品切换和副商品销售 reject。
+6. selling_value 评估对短视频的实际贡献：明确效果、版型、适穿、可信证据、颜色搭配或有效人设内容得高分；重复和空话得低分。
+7. 近义重复只保留表达最完整、最有信息量的一条，其余标记 repetition 并 reject。
+8. verdict=keep 必须同时满足 standalone=true、main_product_relevant=true、selling_value>=50，且不属于垃圾类别。
+9. 不得改写文本、脑补上下文或因为需要凑时长而放宽标准。宁可少留，不可错留。
 
 候选：
 {payload}"""
 
     @staticmethod
     def _kept_ids_from_decisions(decisions: list[dict[str, Any]]) -> set[int]:
-        rejected_types = {"stage_chatter", "inventory_logistics", "secondary_product",
+        rejected_types = {"stage_chatter", "inventory_logistics", "price_quote",
+                          "secondary_product",
                           "repetition", "fragment", "garbled", "low_information"}
         return {
             int(item["candidate_id"]) for item in decisions
@@ -1829,7 +1831,7 @@ class JobRunner:
 
 匹配顺序：同商品同颜色 > 同商品其他颜色 > 不替换。优先站立全身、走动、转身、侧身、背身或对应细节；清晰、无遮挡、无黑屏。候选画面必须支持当前台词，涉及颜色、长度、口袋、版型、面料或上身效果时不得使用冲突画面。
 嘴部清晰可辨的正面画面禁止异时配音，因为会形成明显假口型；只有全身远景、侧身、背身、商品细节或嘴部不突出的镜头才可覆盖原声。无法确认同款、同色或嘴型安全时不要替换，保留原始同步画面。
-只换画面，原声保持不变。每个 block_id 最多出现一次，只能使用该片段候选集合中的 candidate_id。必须返回 shot_type 与 mouth_visibility；mouth_visibility=clear 的替换会被本地程序拒绝。reason 必须简短写明镜头类型与嘴型为何安全，例如“同款背身转身，嘴部不可见”。
+只换画面，原声保持不变。每个 block_id 最多出现一次，只能使用该片段候选集合中的 candidate_id。同一个 candidate_id 在整支成片（含钩子和正文）最多使用一次：同一镜头重复出现是不可接受的，重复选择会被本地程序拒绝并回退原画面。必须返回 shot_type 与 mouth_visibility；mouth_visibility=clear 的替换会被本地程序拒绝。reason 必须简短写明镜头类型与嘴型为何安全，例如“同款背身转身，嘴部不可见”。
 
 任务：{job['title']}
 本任务视觉规则：

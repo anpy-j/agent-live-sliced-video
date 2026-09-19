@@ -118,7 +118,8 @@ SEMANTIC_AUDIT_SCHEMA: dict[str, Any] = {
                     "content_type": {"type": "string", "enum": [
                         "selling_point", "fit", "material", "color", "styling",
                         "scene", "proof", "personality", "story", "reaction",
-                        "stage_chatter", "inventory_logistics", "secondary_product",
+                        "stage_chatter", "inventory_logistics", "price_quote",
+                        "secondary_product",
                         "repetition", "fragment", "garbled", "low_information",
                     ]},
                     "selling_value": {"type": "integer", "minimum": 0, "maximum": 100},
