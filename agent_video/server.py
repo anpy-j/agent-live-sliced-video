@@ -179,15 +179,47 @@ class Application:
                 result.append(item)
         return result[:20]
 
-    def pick_video_file(self) -> dict[str, Any]:
+    def pick_file(self, kind: str = "video") -> dict[str, Any]:
         if sys.platform == "win32":
-            return self._pick_video_file_windows()
+            return self._pick_file_windows(kind=kind)
         if sys.platform == "darwin":
-            return self._pick_video_file_macos()
+            return self._pick_file_macos(kind=kind)
         raise ValueError("原生文件选择器目前仅支持 Windows 和 macOS")
 
-    def _pick_video_file_macos(self) -> dict[str, Any]:
-        script = 'POSIX path of (choose file with prompt "选择直播视频素材")'
+    def pick_video_file(self) -> dict[str, Any]:
+        return self.pick_file(kind="video")
+
+    def deliverable_info(self, job: dict[str, Any]) -> dict[str, Any]:
+        """成片输出目录：<workspace>/deliverables（合并成片与分段成片都在这里）。"""
+        workspace = Path(str(job.get("workspace") or ""))
+        folder = workspace / "deliverables"
+        return {"folder": str(folder), "exists": folder.is_dir()}
+
+    def open_deliverable_folder(self, job_id: str) -> dict[str, Any]:
+        """在系统文件管理器中打开任务成片文件夹。
+
+        路径只从任务记录推导，不信任前端传入的任何路径。
+        """
+        job = self.store.get_job(job_id)
+        if not job:
+            raise ValueError("任务不存在")
+        info = self.deliverable_info(job)
+        folder = Path(info["folder"])
+        if not folder.is_dir():
+            raise ValueError(f"成片文件夹尚未生成: {folder}")
+        if sys.platform == "win32":
+            os.startfile(str(folder))  # type: ignore[attr-defined]  # noqa: S606
+        elif sys.platform == "darwin":
+            subprocess.run(["open", str(folder)], check=False, timeout=30)
+        else:
+            subprocess.run(["xdg-open", str(folder)], check=False, timeout=30)
+        return {"opened": True, "folder": str(folder)}
+
+    def _pick_file_macos(self, kind: str = "video") -> dict[str, Any]:
+        if kind == "subtitle":
+            script = 'POSIX path of (choose file with prompt "选择时间戳字幕文件" of type {"srt", "vtt", "ass", "ssa", "txt"})'
+        else:
+            script = 'POSIX path of (choose file with prompt "选择直播视频素材")'
         result = subprocess.run(["/usr/bin/osascript", "-e", script], capture_output=True,
                                 text=True, encoding="utf-8", errors="replace", timeout=300)
         if result.returncode:
@@ -195,15 +227,22 @@ class Application:
             if "User canceled" in message or "-128" in message:
                 return {"cancelled": True}
             raise ValueError(message or "无法打开文件选择器")
-        return self._picked_video_result(result.stdout.strip())
+        return self._picked_file_result(result.stdout.strip(), kind=kind)
 
-    def _pick_video_file_windows(self) -> dict[str, Any]:
+    def _pick_video_file_macos(self) -> dict[str, Any]:
+        return self._pick_file_macos(kind="video")
+
+    def _pick_file_windows(self, kind: str = "video") -> dict[str, Any]:
         powershell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
         if not powershell:
             raise ValueError("未找到 PowerShell，无法打开 Windows 文件选择器")
-        # Return Base64 instead of a raw path so Chinese filenames are independent of the
-        # console code page used by Windows PowerShell 5.1.
-        script = r"""
+        if kind == "subtitle":
+            title = '选择时间戳字幕文件'
+            filter_spec = '字幕文件 (*.srt;*.vtt;*.ass;*.ssa;*.txt)|*.srt;*.vtt;*.ass;*.ssa;*.txt|所有文件 (*.*)|*.*'
+        else:
+            title = '选择直播视频素材'
+            filter_spec = '视频文件 (*.mp4;*.mov;*.mkv;*.m4v;*.avi;*.webm;*.ts)|*.mp4;*.mov;*.mkv;*.m4v;*.avi;*.webm;*.ts|所有文件 (*.*)|*.*'
+        script = rf"""
 Add-Type -AssemblyName System.Windows.Forms
 $owner = New-Object System.Windows.Forms.Form
 $owner.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
@@ -212,22 +251,22 @@ $owner.ShowInTaskbar = $false
 $owner.TopMost = $true
 $owner.Opacity = 0
 $dialog = New-Object System.Windows.Forms.OpenFileDialog
-$dialog.Title = '选择直播视频素材'
-$dialog.Filter = '视频文件|*.mp4;*.mov;*.mkv;*.m4v;*.avi;*.webm;*.ts|所有文件|*.*'
+$dialog.Title = '{title}'
+$dialog.Filter = '{filter_spec}'
 $dialog.Multiselect = $false
 $dialog.CheckFileExists = $true
 $dialog.RestoreDirectory = $true
 $owner.Show()
 $owner.Activate()
-try {
-    if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) {
+try {{
+    if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) {{
         [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($dialog.FileName))
-    }
-} finally {
+    }}
+}} finally {{
     $dialog.Dispose()
     $owner.Close()
     $owner.Dispose()
-}
+}}
 """
         try:
             result = subprocess.run(
@@ -246,15 +285,27 @@ try {
             raw_path = base64.b64decode(encoded_path, validate=True).decode("utf-8")
         except (ValueError, UnicodeDecodeError) as exc:
             raise ValueError("Windows 文件选择器返回了无效路径") from exc
-        return self._picked_video_result(raw_path)
+        return self._picked_file_result(raw_path, kind=kind)
+
+    def _pick_video_file_windows(self) -> dict[str, Any]:
+        return self._pick_file_windows(kind="video")
+
+    @staticmethod
+    def _picked_file_result(raw_path: str, kind: str = "video") -> dict[str, Any]:
+        path = Path(raw_path).resolve()
+        if kind == "subtitle":
+            allowed = {".srt", ".vtt", ".ass", ".ssa", ".txt"}
+            if not path.is_file() or path.suffix.lower() not in allowed:
+                raise ValueError("请选择 SRT、VTT、ASS/SSA 或 TXT 字幕文件")
+        else:
+            allowed = {".mp4", ".mov", ".mkv", ".m4v", ".avi", ".webm", ".ts"}
+            if not path.is_file() or path.suffix.lower() not in allowed:
+                raise ValueError("请选择 MP4、MOV、MKV、M4V、AVI、WebM 或 TS 视频")
+        return {"cancelled": False, "path": str(path), "name": path.stem}
 
     @staticmethod
     def _picked_video_result(raw_path: str) -> dict[str, Any]:
-        path = Path(raw_path).resolve()
-        allowed = {".mp4", ".mov", ".mkv", ".m4v", ".avi", ".webm", ".ts"}
-        if not path.is_file() or path.suffix.lower() not in allowed:
-            raise ValueError("请选择 MP4、MOV、MKV、M4V、AVI、WebM 或 TS 视频")
-        return {"cancelled": False, "path": str(path), "name": path.stem}
+        return Application._picked_file_result(raw_path, kind="video")
 
     def invoke_tool(self, name: str, args: dict[str, Any]) -> Any:
         if name == "create_video_job":
@@ -276,6 +327,13 @@ try {
                 raise KeyError("任务不存在")
             self.runner.retry(job_id)
             return {"job_id": job_id, "queued": True}
+        if name == "restart_video_job":
+            job_id = str(args.get("job_id", ""))
+            self.runner.restart(job_id)
+            return {"job_id": job_id, "restarted": True}
+        if name == "delete_video_job":
+            job_id = str(args.get("job_id", ""))
+            return {"job_id": job_id, "deleted": self.runner.delete(job_id)}
         if name == "cancel_video_job":
             job_id = str(args.get("job_id", ""))
             return {"job_id": job_id, "cancelled": self.runner.cancel(job_id)}
@@ -385,6 +443,7 @@ class Handler(BaseHTTPRequestHandler):
                 job = self.app.store.get_job(job_id)
                 if job:
                     job["runtime"] = self.app.runner.runtime(job_id)
+                    job["deliverables"] = self.app.deliverable_info(job)
                 return self.json_response(job or {"error": "任务不存在"}, 200 if job else 404)
             if path == "/api/settings":
                 return self.json_response(self.app.settings())
@@ -410,7 +469,8 @@ class Handler(BaseHTTPRequestHandler):
             path = self.path.partition("?")[0]
             payload = self.read_json()
             if path == "/api/files/pick":
-                return self.json_response(self.app.pick_video_file())
+                kind = str(payload.get("kind") or "video")
+                return self.json_response(self.app.pick_file(kind=kind))
             if path == "/api/jobs":
                 return self.json_response(self.app.create_job(payload), 201)
             if path == "/api/rules/enable":
@@ -431,6 +491,13 @@ class Handler(BaseHTTPRequestHandler):
                     if action == "retry":
                         self.app.runner.retry(job_id)
                         return self.json_response({"queued": True})
+                    if action == "restart":
+                        self.app.runner.restart(job_id)
+                        return self.json_response({"restarted": True})
+                    if action == "delete":
+                        return self.json_response({"deleted": self.app.runner.delete(job_id)})
+                    if action == "open-folder":
+                        return self.json_response(self.app.open_deliverable_folder(job_id))
                     if action == "submit":
                         return self.json_response(self.app.runner.submit(job_id, payload))
                     if action == "ai-plan":
@@ -520,6 +587,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json_response(self.app.save_skill(str(payload.get("content", ""))))
             return self.json_response({"error": "Not found"}, 404)
         except ValueError as exc:
+            self.json_response({"error": str(exc)}, 400)
+        except Exception as exc:
+            self.json_response({"error": str(exc)}, 500)
+
+    def do_DELETE(self) -> None:
+        try:
+            path = self.path.partition("?")[0]
+            if path.startswith("/api/jobs/"):
+                job_id = path.removeprefix("/api/jobs/").strip("/")
+                if not job_id:
+                    raise ValueError("job_id 不能为空")
+                deleted = self.app.runner.delete(job_id)
+                return self.json_response({"deleted": deleted})
+            self.send_error(404, "未找到端点")
+        except (ValueError, KeyError) as exc:
             self.json_response({"error": str(exc)}, 400)
         except Exception as exc:
             self.json_response({"error": str(exc)}, 500)

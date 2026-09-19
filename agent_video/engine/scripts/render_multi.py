@@ -12,6 +12,10 @@ import argparse
 import json
 import os
 import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from ffmpeg_graph import filter_complex_args  # noqa: E402
 
 
 def run(cmd):
@@ -131,12 +135,17 @@ def main():
 
     final_output = os.path.abspath(args.output)
     partial_output = final_output + ".partial.mp4"
-    command += ["-filter_complex", ";".join(filters), "-map", "[vcat]", "-map", "[aout]",
+    filter_args, filter_script = filter_complex_args(filters)
+    command += [*filter_args, "-map", "[vcat]", "-map", "[aout]",
                 "-c:v", "libx264", "-crf", str(args.crf), "-preset", args.preset,
                 "-pix_fmt", "yuv420p", "-r", f"{fps:.6f}",
                 "-c:a", "aac", "-b:a", args.audio_bitrate, "-ar", "48000", "-ac", "2",
                 "-movflags", "+faststart", partial_output]
-    run(command)
+    try:
+        run(command)
+    finally:
+        if os.path.exists(filter_script):
+            os.unlink(filter_script)
     os.replace(partial_output, final_output)
     print(f"rendered {len(timeline)} segments -> {args.output}")
 

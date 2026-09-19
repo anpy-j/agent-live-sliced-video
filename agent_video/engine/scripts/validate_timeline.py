@@ -11,8 +11,9 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
 from badvocab import hit, review_hits  # noqa: E402
-from textnorm import context_dependent_start, incomplete_ending  # noqa: E402
-from agent_video.engine.validation_policy import shared_issues  # noqa: E402
+from textnorm import content_rejection, context_dependent_start, incomplete_ending  # noqa: E402
+from agent_video.engine.validation_policy import (ALIGNMENT_EXPANSION_MARGIN,
+                                                   shared_issues)  # noqa: E402
 
 ALLOWED_ROLES = {"hook", "result", "pain", "proof", "fit", "material", "craft",
                  "color", "styling", "scene", "demo", "close", "bridge",
@@ -85,8 +86,11 @@ def validate_rows(rows, sources, min_total, max_total, min_segments, max_segment
         demo_count += int(is_demo)
         allowed_max = max_demo_segment if is_demo else max_segment
         if dur > allowed_max + EPS:
+            level = ("warning" if dur <= allowed_max + ALIGNMENT_EXPANSION_MARGIN + EPS
+                     else "error")
             issues.append(issue("segment_too_long", f"segment {index}: {dur:.2f}s",
-                                segment=index, duration=round(dur, 3), maximum=allowed_max))
+                                level=level, segment=index, duration=round(dur, 3),
+                                maximum=allowed_max))
         if dur < min_segment - EPS:
             issues.append(issue("segment_too_short", f"segment {index}: {dur:.2f}s",
                                 segment=index, duration=round(dur, 3)))
@@ -103,6 +107,12 @@ def validate_rows(rows, sources, min_total, max_total, min_segments, max_segment
             issues.append(issue("incomplete_sentence",
                                 f"segment {index}: dangling connector {ending}",
                                 segment=index, ending=ending))
+        else:
+            rejection = content_rejection(text)
+            if rejection:
+                issues.append(issue(rejection,
+                                    f"segment {index}: unusable spoken text ({rejection})",
+                                    segment=index))
         norm = normalized(text)
         if COMPOSITION_CLAIM.search(norm):
             composition_rows.append(index)

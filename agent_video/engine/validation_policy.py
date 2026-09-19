@@ -41,7 +41,10 @@ def shared_issues(rows: list[dict[str, Any]], *, pre_alignment: bool = False) ->
             issues.append({"level": "error", "code": "segment_too_short", "segment": index,
                            "detail": f"第 {index + 1} 段 {duration:.2f}s 过短"})
         if duration > maximum + 1e-6:
-            issues.append({"level": "error", "code": "segment_too_long", "segment": index,
+            tolerated = (MAX_SEGMENT_SECONDS if pre_alignment
+                         else MAX_SEGMENT_SECONDS + ALIGNMENT_EXPANSION_MARGIN)
+            level = "warning" if duration <= tolerated + 1e-6 else "error"
+            issues.append({"level": level, "code": "segment_too_long", "segment": index,
                            "detail": f"第 {index + 1} 段 {duration:.2f}s 超过 {maximum:.2f}s"})
         role = str(row.get("role", ""))
         if role == "material" or re.search(r"面料|材质|成分|羊毛|醋酸", str(row.get("text", ""))):

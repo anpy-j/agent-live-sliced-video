@@ -61,6 +61,16 @@ def tool_specs() -> list[dict[str, Any]]:
             "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]},
         },
         {
+            "name": "restart_video_job",
+            "description": "从头重新开始一个任务，重置全部阶段与产物。",
+            "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]},
+        },
+        {
+            "name": "delete_video_job",
+            "description": "彻底删除一个任务及其工作空间与产物。",
+            "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]},
+        },
+        {
             "name": "cancel_video_job",
             "description": "取消一个排队或运行中的任务。",
             "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]},

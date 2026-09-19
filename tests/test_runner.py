@@ -4,8 +4,25 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from agent_video.ai import SEMANTIC_AUDIT_SCHEMA
 from agent_video.db import Store
 from agent_video.runner import JobCancelled, JobRunner
+
+
+def semantic_audit_response(candidates, main_product="上衣", reject_ids=()):
+    reject_ids = set(reject_ids)
+    decisions = [{
+        "candidate_id": int(item["i"]),
+        "verdict": "reject" if int(item["i"]) in reject_ids else "keep",
+        "standalone": int(item["i"]) not in reject_ids,
+        "main_product_relevant": int(item["i"]) not in reject_ids,
+        "content_type": "stage_chatter" if int(item["i"]) in reject_ids else "selling_point",
+        "selling_value": 0 if int(item["i"]) in reject_ids else 80,
+        "reason": "测试审核",
+    } for item in candidates]
+    plan = {"main_product": main_product, "picks": decisions}
+    return {"plan": plan, "raw": {"result": plan}, "seconds": 0.5,
+            "usage": {"input_tokens": 0, "output_tokens": 0}}
 
 
 class RunnerTest(unittest.TestCase):
@@ -41,6 +58,32 @@ class RunnerTest(unittest.TestCase):
         text = target.read_text(encoding="utf-8")
         self.assertIn("00:00:00,000 --> 00:00:02,500", text)
         self.assertIn("00:00:02,500 --> 00:00:04,500", text)
+
+    def test_execute_forwards_job_subtitle_to_every_engine_stage(self):
+        source = self.root / "source.mp4"
+        source.write_bytes(b"source")
+        subtitle = self.root / "source.srt"
+        subtitle.write_text("subtitle", encoding="utf-8")
+        workspace = self.root / "job"
+        engine = workspace / "engine"
+        engine.mkdir(parents=True)
+        entry = self.root / "agent_video" / "engine" / "scripts" / "run_slice.py"
+        entry.parent.mkdir(parents=True)
+        entry.write_text("", encoding="utf-8")
+        job_id = self.store.create_job(
+            title="字幕任务", source_path=str(source), brief="", mode="fast",
+            workspace=str(workspace), subtitle_path=str(subtitle))
+        process = Mock(stdout=iter(()))
+        process.wait.return_value = 0
+
+        with patch("agent_video.runner.subprocess.Popen", return_value=process) as popen:
+            self.runner._execute(job_id, source, workspace, engine, "validation",
+                                 ["--stop-before-render"])
+
+        command = popen.call_args.args[0]
+        subtitle_index = command.index("--subtitle")
+        self.assertEqual(command[subtitle_index + 1], str(subtitle.resolve()))
+        self.assertIn("--stop-before-render", command)
 
     def test_source_edit_history_marks_previously_used_candidates(self):
         source_root = self.root / "sources" / "source-abc"
@@ -125,7 +168,7 @@ class RunnerTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "等待决策"):
             self.runner.submit(job_id, {"main_product": "测试", "picks": []})
 
-    def test_cancelled_engine_failure_does_not_replace_status(self):
+    def test_cancelled_job_is_never_forced_through_fallback_delivery(self):
         workspace = self.root / "job"
         workspace.mkdir()
         job_id = self.store.create_job(title="测试", source_path="/tmp/source.mp4",
@@ -133,7 +176,7 @@ class RunnerTest(unittest.TestCase):
         self.store.stage_start(job_id, "validation", "执行中")
         self.runner.cancel(job_id)
         with self.assertRaises(JobCancelled):
-            self.runner._fail_engine(job_id, "validation", 143, {"state": "failed"})
+            self.runner._complete_with_fallback(job_id, "engine interrupted")
         self.assertEqual(self.store.get_job(job_id)["status"], "cancelled")
         stage = next(item for item in self.store.get_job(job_id)["stages"]
                      if item["stage_id"] == "validation")
@@ -183,10 +226,12 @@ class RunnerTest(unittest.TestCase):
         }
         provider = Mock()
         provider.display_name = "WorkBuddy CLI"
-        provider.generate_plan.return_value = {
+        plan_response = {
             "plan": plan, "raw": {"result": plan}, "stderr": "", "seconds": 1.2,
             "usage": {"input_tokens": 100, "output_tokens": 30},
         }
+        provider.generate_plan.side_effect = [
+            semantic_audit_response(candidates, "白山茶"), plan_response]
         with patch.object(self.runner, "_provider", return_value=provider):
             self.runner._run_ai_plan(self.store.get_job(job_id), engine)
         job = self.store.get_job(job_id)
@@ -196,6 +241,37 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(job["token_input"], 100)
         self.assertEqual(json.loads((engine / "picks.json").read_text(encoding="utf-8"))["main_product"],
                          "白山茶")
+
+    def test_semantic_audit_builds_and_reuses_candidate_whitelist(self):
+        workspace = self.root / "semantic-job"
+        engine = workspace / "engine"
+        engine.mkdir(parents=True)
+        candidates = [
+            {"i": 1, "s": 0, "e": 2, "c": "result", "t": "这件毛衣上身显瘦"},
+            {"i": 2, "s": 3, "e": 5, "c": "scene", "t": "删掉来整个先删掉"},
+            {"i": 3, "s": 6, "e": 8, "c": "fit", "t": "腰线位置做得很利落"},
+        ]
+        job_id = self.store.create_job(
+            title="语义审核", source_path="/tmp/source.mp4", brief="", mode="fast",
+            workspace=str(workspace), products=["毛衣"])
+        provider = Mock(display_name="Mock AI")
+        provider.generate_plan.return_value = semantic_audit_response(
+            candidates, "毛衣", reject_ids={2})
+        filtered, meta = self.runner._semantic_review_candidates(
+            self.store.get_job(job_id), engine, provider, "workbuddy", "auto", candidates)
+        self.assertEqual([item["i"] for item in filtered], [1, 3])
+        self.assertFalse(meta["cached"])
+        self.assertIs(provider.generate_plan.call_args.kwargs["schema"],
+                      SEMANTIC_AUDIT_SCHEMA)
+        report = json.loads((engine / "semantic_audit.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["kept_candidate_ids"], [1, 3])
+
+        provider.reset_mock()
+        cached, meta = self.runner._semantic_review_candidates(
+            self.store.get_job(job_id), engine, provider, "workbuddy", "auto", candidates)
+        self.assertEqual([item["i"] for item in cached], [1, 3])
+        self.assertTrue(meta["cached"])
+        provider.generate_plan.assert_not_called()
 
     def test_soft_structure_warnings_do_not_trigger_another_model_call(self):
         workspace = self.root / "job"
@@ -223,6 +299,7 @@ class RunnerTest(unittest.TestCase):
         ]}
         provider = Mock(display_name="OpenCode CLI")
         provider.generate_plan.side_effect = [
+            semantic_audit_response(candidates, "测试"),
             {"plan": invalid, "raw": {"result": invalid}, "seconds": 1,
              "usage": {"input_tokens": 10, "output_tokens": 5}},
             {"plan": valid, "raw": {"result": valid}, "seconds": 2,
@@ -231,7 +308,7 @@ class RunnerTest(unittest.TestCase):
         with patch.object(self.runner, "_provider", return_value=provider), \
                 patch.object(self.runner, "enqueue") as enqueue:
             self.runner._run_ai_plan(self.store.get_job(job_id), engine)
-        self.assertEqual(provider.generate_plan.call_count, 1)
+        self.assertEqual(provider.generate_plan.call_count, 2)
         self.assertEqual(json.loads((engine / "picks.json").read_text(encoding="utf-8"))["picks"], invalid["picks"])
         self.assertEqual(self.store.get_job(job_id)["token_input"], 10)
         enqueue.assert_called_once_with(job_id)
@@ -287,10 +364,15 @@ class RunnerTest(unittest.TestCase):
         if error is not None:
             provider.generate_plan.side_effect = error
         else:
-            provider.generate_plan.return_value = {
+            plan_response = {
                 "plan": plan, "raw": {"result": plan}, "seconds": 1,
                 "usage": {"input_tokens": 10, "output_tokens": 5},
             }
+            provider.generate_plan.side_effect = [
+                semantic_audit_response([
+                    {"i": 1}, {"i": 2}, {"i": 3}, {"i": 4}], "白山茶"),
+                plan_response,
+            ]
         return provider
 
     @staticmethod
@@ -326,7 +408,7 @@ class RunnerTest(unittest.TestCase):
         stage = next(item for item in job["stages"] if item["stage_id"] == "edit_plan")
         self.assertEqual(stage["status"], "succeeded")
 
-    def test_all_providers_failing_fails_job_instead_of_waiting(self):
+    def test_all_providers_failing_blocks_instead_of_rendering_local_plan(self):
         engine = self._plan_setup_engine()
         job_id = self.store.create_job(title="全部失败", source_path="/tmp/source.mp4",
                                        brief="", mode="fast", workspace=str(self.root / "job"),
@@ -335,9 +417,11 @@ class RunnerTest(unittest.TestCase):
         with patch.object(self.runner, "_provider", return_value=failing):
             self.runner._run_ai_plan(self.store.get_job(job_id), engine)
         job = self.store.get_job(job_id)
-        self.assertEqual(job["status"], "failed")
-        self.assertIn("自动编排失败", str(job["error"]))
+        self.assertEqual(job["status"], "blocked")
+        self.assertFalse((engine / "picks.json").is_file())
+        self.assertTrue((engine / "picks.local-draft.json").is_file())
         kinds = [event["kind"] for event in job["events"]]
+        self.assertIn("ai_plan_local_fallback_blocked", kinds)
         self.assertNotIn("input_required", kinds)
 
     def test_manual_provider_job_automatically_resolves_default_model(self):
@@ -459,7 +543,8 @@ class RunnerTest(unittest.TestCase):
         job_id = self.store.create_job(title="退回编排", source_path="/tmp/source.mp4",
                                        brief="", mode="fast", workspace=str(workspace),
                                        model_provider="opencode", model_name="jysd/glm-5.3-flash")
-        self.store.stage_fail(job_id, "validation", "失败")
+        self.store.update_stage(job_id, "validation", status="failed", error="legacy")
+        self.store.update_job(job_id, status="failed", current_stage="validation")
         with patch.object(self.runner, "enqueue") as enqueue:
             self.runner.retry(job_id)
         self.assertFalse((engine / "picks.json").exists())
@@ -494,7 +579,8 @@ class RunnerTest(unittest.TestCase):
             title="恢复旧方案", source_path="/tmp/source.mp4", brief="", mode="fast",
             workspace=str(workspace), model_provider="opencode", model_name="test",
         )
-        self.store.stage_fail(job_id, "validation", "失败")
+        self.store.update_stage(job_id, "validation", status="failed", error="legacy")
+        self.store.update_job(job_id, status="failed", current_stage="validation")
         with patch.object(self.runner, "enqueue") as enqueue:
             self.runner.retry(job_id)
         self.assertEqual(json.loads((engine / "picks.json").read_text(encoding="utf-8")), accepted)
@@ -518,7 +604,8 @@ class RunnerTest(unittest.TestCase):
         marker.write_text("{", encoding="utf-8")
         job_id = self.store.create_job(title="损坏锁", source_path=str(source), brief="",
                                        mode="fast", workspace=str(workspace))
-        self.store.stage_fail(job_id, "delivery", "锁损坏")
+        self.store.update_stage(job_id, "delivery", status="failed", error="legacy")
+        self.store.update_job(job_id, status="failed", current_stage="delivery")
         with patch.object(self.runner, "enqueue") as enqueue:
             self.runner.retry(job_id)
         job = self.store.get_job(job_id)
@@ -555,17 +642,12 @@ class RunnerTest(unittest.TestCase):
         deliver.assert_not_called()
         self.assertFalse(marker.exists())
 
-    def test_validation_failure_message_lists_actionable_issues(self):
-        workspace = self.root / "job"
-        workspace.mkdir()
-        job_id = self.store.create_job(title="测试", source_path="/tmp/source.mp4",
-                                       brief="", mode="fast", workspace=str(workspace))
+    def test_engine_issue_message_lists_actionable_issues(self):
         summary = {"state": "failed", "issues": [
             {"code": "too_few_segments", "detail": "9 segments; minimum 14"},
             {"code": "missing_proof", "detail": "timeline needs proof or demo"},
         ]}
-        self.runner._fail_engine(job_id, "validation", 1, summary)
-        error = self.store.get_job(job_id)["error"]
+        error = self.runner._engine_issue_message(1, summary)
         self.assertIn("入选片段数量不足", error)
         self.assertIn("缺少效果佐证或展示", error)
 
@@ -592,12 +674,104 @@ class RunnerTest(unittest.TestCase):
         summary = {"state": "failed", "publish_ready": False,
                    "issues": [{"code": "continuous_source_run", "detail": "too long"}]}
         with patch.object(self.runner, "_execute", return_value=(1, summary)), \
-                patch.object(self.runner, "_provider") as provider_lookup:
+                patch.object(self.runner, "_provider") as provider_lookup, \
+                patch.object(self.runner, "_complete_with_fallback") as fallback:
             self.runner._prepare_render(job, Path("/tmp/source.mp4"), workspace, engine,
                                         workspace / "timeline_locked.json")
         provider_lookup.assert_not_called()
+        fallback.assert_called_once()
         self.assertEqual(json.loads(picks.read_text(encoding="utf-8")), old)
         self.assertFalse((workspace / "validation-repair.json").exists())
+
+    def test_unexpected_pipeline_error_completes_with_emergency_cut(self):
+        source = self.root / "source.mp4"
+        source.write_bytes(b"source-video")
+        workspace = self.root / "job"
+        job_id = self.store.create_job(title="保底交付", source_path=str(source),
+                                       brief="", mode="fast", workspace=str(workspace))
+
+        def render_step(_job_id, _label, command, steps, _progress, stage="delivery"):
+            Path(command[-1]).write_bytes(b"fallback-video")
+            steps.append({"name": "fallback", "ok": True})
+
+        with patch.object(self.runner, "_probe",
+                          return_value={"format": {"duration": "120"}}), \
+                patch.object(self.runner, "_run_delivery_step", side_effect=render_step):
+            self.runner._complete_with_fallback(job_id, "synthetic interruption")
+
+        job = self.store.get_job(job_id)
+        self.assertEqual(job["status"], "completed")
+        self.assertEqual(job["progress"], 100)
+        self.assertNotIn("failed", {stage["status"] for stage in job["stages"]})
+        videos = [item for item in job["artifacts"] if item["kind"] == "video"]
+        self.assertEqual(len(videos), 1)
+        self.assertTrue(Path(videos[0]["path"]).is_file())
+
+    def test_validation_repair_removes_later_duplicate_and_moves_close_to_end(self):
+        body = []
+        for candidate_id in range(1, 20):
+            body.append({
+                "src": 1, "start": candidate_id * 5.0,
+                "end": candidate_id * 5.0 + 2.0,
+                "text": "重复卖点" if candidate_id in {1, 19} else f"卖点 {candidate_id}",
+                "role": "close" if candidate_id == 2 else "proof",
+                "module": "body", "_candidate_id": candidate_id,
+            })
+        plan = {"main_product": "上衣", "picks": [
+            {"src": 1, "start": 0.0, "end": 2.0, "text": "钩子", "role": "hook",
+             "module": "hook_A", "_candidate_id": 100},
+            *body,
+        ]}
+        repaired, report = self.runner._repair_validation_plan(plan, [
+            {"where": "A", "code": "duplicate_text", "detail": [1, 19]},
+            {"where": "A", "code": "content_after_close",
+             "detail": "close must be the final segment"},
+        ])
+        repaired_body = [item for item in repaired["picks"] if item["module"] == "body"]
+        self.assertTrue(report["changed"])
+        self.assertEqual(report["removed_duplicate_candidate_ids"], [19])
+        self.assertNotIn(19, [item["_candidate_id"] for item in repaired_body])
+        self.assertEqual(repaired_body[-1]["_candidate_id"], 2)
+        self.assertEqual(repaired_body[-1]["role"], "close")
+
+    def test_prepare_render_repairs_supported_validation_errors_and_retries(self):
+        workspace = self.root / "job"
+        engine = workspace / "engine"
+        engine.mkdir(parents=True)
+        (engine / "candidate_digest.json").write_text("[]", encoding="utf-8")
+        picks = engine / "picks.json"
+        picks.write_text(json.dumps({"main_product": "上衣", "picks": [
+            {"src": 1, "start": 0.0, "end": 2.0, "text": "钩子", "role": "hook",
+             "module": "hook_A", "_candidate_id": 100},
+            {"src": 1, "start": 2.0, "end": 4.0, "text": "显瘦", "role": "proof",
+             "module": "body", "_candidate_id": 1},
+            {"src": 1, "start": 4.0, "end": 6.0, "text": "现在下单", "role": "close",
+             "module": "body", "_candidate_id": 2},
+            {"src": 1, "start": 6.0, "end": 8.0, "text": "显瘦", "role": "proof",
+             "module": "body", "_candidate_id": 3},
+        ]}, ensure_ascii=False), encoding="utf-8")
+        job_id = self.store.create_job(
+            title="自动修复校验", source_path="/tmp/source.mp4", brief="", mode="fast",
+            workspace=str(workspace))
+        failed = {"state": "failed", "issues": [
+            {"where": "A", "code": "duplicate_text", "detail": [1, 3]},
+            {"where": "A", "code": "content_after_close",
+             "detail": "close must be the final segment"},
+        ]}
+        ready = {"state": "ready_to_render"}
+        with patch.object(self.runner, "_execute", side_effect=[(1, failed), (0, ready)]) as execute, \
+                patch.object(self.runner, "_audio_inputs", return_value={"snapshot": True}), \
+                patch.object(self.runner, "_prepare_visual_mix") as prepare_visual:
+            self.runner._prepare_render(
+                self.store.get_job(job_id), Path("/tmp/source.mp4"), workspace, engine,
+                workspace / "audio_timeline_locked.json")
+        self.assertEqual(execute.call_count, 2)
+        self.assertTrue((workspace / "validation-repair.json").is_file())
+        repaired = json.loads(picks.read_text(encoding="utf-8"))
+        repaired_body = [item for item in repaired["picks"] if item["module"] == "body"]
+        self.assertEqual([item["_candidate_id"] for item in repaired_body], [1, 2])
+        self.assertEqual(repaired_body[-1]["role"], "close")
+        prepare_visual.assert_called_once()
 
     def test_delivery_reuses_snapshot_without_full_pipeline(self):
         source = self.root / "source.mp4"
@@ -684,6 +858,24 @@ class RunnerTest(unittest.TestCase):
         self.assertIn("指定商品（必须按商品集中讲解，严禁交叉穿插）：上衣、阔腿裤", prompt)
         self.assertIn("指定面料（篇幅精简适中）：羊毛", prompt)
         self.assertIn("主播背身展示不要切断", prompt)
+
+    def test_repair_plan_locally_avoids_continuous_source_run(self):
+        # Three candidates that are continuous and sum to 12s
+        candidates = [
+            {"i": 1, "s": 10.0, "e": 14.0, "c": "scene", "t": "连续一"},
+            {"i": 2, "s": 14.0, "e": 18.0, "c": "scene", "t": "连续二"},
+            {"i": 3, "s": 18.0, "e": 22.0, "c": "scene", "t": "连续三"},
+            {"i": 4, "s": 50.0, "e": 54.0, "c": "styling", "t": "跳跃四"},
+        ]
+        plan = {"main_product": "测试", "picks": [
+            {"src": 1, "start": 0.0, "end": 2.0, "text": "开头", "role": "hook", "module": "hook_A"},
+            {"src": 1, "start": 90.0, "end": 92.0, "text": "收尾", "role": "close", "module": "body"},
+        ]}
+        limits = {"min_total": 10, "max_total": 30, "min_segments": 3, "max_segments": 10}
+        repaired, stats = self.runner._repair_plan_locally(plan, candidates, limits, {"products": []})
+        issues = self.runner._plan_preflight_issues(repaired, limits)
+        continuous = [item for item in issues if item["code"] == "continuous_source_run"]
+        self.assertEqual(len(continuous), 0)
 
 
 if __name__ == "__main__":

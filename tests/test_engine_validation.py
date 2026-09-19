@@ -1,3 +1,4 @@
+import subprocess
 import unittest
 import json
 import tempfile
@@ -5,13 +6,48 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_video.engine.scripts.qc import stream_issues
-from agent_video.engine.scripts.textnorm import incomplete_ending
+from agent_video.engine.scripts.audit_bounds import issue_level, main as audit_bounds_main
+from agent_video.engine.scripts.textnorm import content_rejection, incomplete_ending
 from agent_video.engine.scripts.validate_timeline import validate_rows
 from agent_video.engine.scripts.visual_mix import apply as apply_visual_mix
 from agent_video.engine.scripts import render_dual
 
+GRAPH_OPTIONS = ("-filter_complex_script", "-/filter_complex")
+
+
+def read_filter_graph(command):
+    option = next(name for name in GRAPH_OPTIONS if name in command)
+    return Path(command[command.index(option) + 1]).read_text(encoding="utf-8")
+
 
 class EngineValidationTest(unittest.TestCase):
+    def test_secondary_product_detail_is_advisory(self):
+        self.assertEqual(issue_level({"type": "secondary_product_detail"}), "warning")
+        self.assertEqual(issue_level({"type": "cut_inside_token"}), "error")
+
+    def test_secondary_product_detail_does_not_fail_boundary_audit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            timeline = root / "timeline.json"
+            timeline.write_text(json.dumps([
+                {"src": 1, "start": 0, "end": 2, "text": "牛仔裤颜色"},
+            ]), encoding="utf-8")
+            words = root / "words.json"
+            words.write_text(json.dumps([
+                {"s": 0, "e": 2, "w": "牛仔裤颜色"},
+            ]), encoding="utf-8")
+            report = root / "report.json"
+            argv = ["audit_bounds.py", str(timeline), str(words),
+                    "--main-product", "针织衫", "--secondary-products", "牛仔裤",
+                    "--secondary-attributes", "颜色", "--report", str(report)]
+            with patch("sys.argv", argv):
+                code = audit_bounds_main()
+            result = json.loads(report.read_text(encoding="utf-8"))
+            self.assertEqual(code, 0)
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["error_count"], 0)
+            self.assertEqual(result["warning_count"], 1)
+
     def test_legacy_visual_review_pipeline_stays_removed(self):
         scripts = Path(__file__).parents[1] / "agent_video" / "engine" / "scripts"
         self.assertFalse((scripts / "visual_review.py").exists())
@@ -75,6 +111,13 @@ class EngineValidationTest(unittest.TestCase):
         self.assertEqual(incomplete_ending("推荐它是因为。"), "因为")
         self.assertIsNone(incomplete_ending("这件衣服是很显瘦的"))
 
+    def test_content_gate_rejects_fragments_stage_chatter_and_malformed_asr(self):
+        self.assertEqual(content_rejection("的收腰的感觉很像"),
+                         "context_dependent_start")
+        self.assertEqual(content_rejection("删掉来整个先删掉好"), "stage_chatter")
+        self.assertEqual(content_rejection("轻柔羊毛手手"), "malformed_speech")
+        self.assertIsNone(content_rejection("这件毛衣上身显瘦又利落"))
+
     @patch("agent_video.engine.scripts.validate_timeline.media_duration", return_value=100)
     def test_timeline_validator_blocks_incomplete_close(self, _duration):
         rows = [
@@ -97,6 +140,16 @@ class EngineValidationTest(unittest.TestCase):
         self.assertTrue(all(item["level"] in {"error", "warning"}
                             for item in result["issues"]))
 
+    @patch("agent_video.engine.scripts.validate_timeline.media_duration", return_value=100)
+    def test_timeline_validator_allows_small_alignment_overrun(self, _duration):
+        rows = [
+            {"src": 1, "start": 0, "end": 5.3, "text": "完整卖点", "role": "proof"},
+        ]
+        result = validate_rows(rows, {"1": "source.mp4"}, 0, 20, 1, 10, 1.2, 5, 5, False)
+        overruns = [item for item in result["issues"] if item["code"] == "segment_too_long"]
+        self.assertTrue(overruns)
+        self.assertTrue(all(item["level"] == "warning" for item in overruns))
+
     def test_render_dual_keeps_crop_position_per_piece(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -112,8 +165,10 @@ class EngineValidationTest(unittest.TestCase):
             }]), encoding="utf-8")
             output = root / "output.mp4"
             commands = []
+            graphs = []
 
             def fake_run(command):
+                graphs.append(read_filter_graph(command))
                 commands.append(command)
                 Path(str(output.resolve()) + ".partial.mp4").write_bytes(b"video")
                 return ""
@@ -124,10 +179,41 @@ class EngineValidationTest(unittest.TestCase):
                     patch.object(render_dual, "output_size", return_value=(1080, 1920)), \
                     patch.object(render_dual, "run", side_effect=fake_run):
                 render_dual.main()
-            command = commands[-1]
-            filters = command[command.index("-filter_complex") + 1]
+            filters = graphs[-1]
             self.assertEqual(filters.count("(iw-ow)*0.100000"), 1)
             self.assertEqual(filters.count("(iw-ow)*0.900000"), 1)
+
+    @patch.object(render_dual, "source_fps", return_value=30)
+    @patch.object(render_dual, "output_size", return_value=(1080, 1920))
+    def test_render_dual_long_timeline_stays_under_command_line_limit(self, *_):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.mp4"
+            source.write_bytes(b"source")
+            rows = [{"audio": {"src": 1, "start": index * 2, "end": index * 2 + 2},
+                     "video": [{"src": 1, "start": index * 2, "end": index * 2 + 2}]}
+                    for index in range(120)]
+            timeline = root / "timeline.json"
+            timeline.write_text(json.dumps(rows), encoding="utf-8")
+            output = root / "output.mp4"
+            commands = []
+            graphs = []
+
+            def fake_run(command):
+                graphs.append(read_filter_graph(command))
+                commands.append(command)
+                Path(str(output.resolve()) + ".partial.mp4").write_bytes(b"video")
+                return ""
+
+            argv = ["render_dual.py", str(timeline), str(output), "--src", f"1={source}"]
+            with patch("sys.argv", argv), \
+                    patch.object(render_dual, "run", side_effect=fake_run):
+                render_dual.main()
+            command = commands[-1]
+            self.assertLess(len(subprocess.list2cmdline(command)), 32767)
+            filters = graphs[-1]
+            self.assertEqual(filters.count("[vcat]"), 1)
+            self.assertEqual(len(filters.split(";")), 120 + 120 + 3)
 
 
 if __name__ == "__main__":

@@ -30,6 +30,14 @@ LIVE_COORDINATION_RE = re.compile(r"要[^，。！？]{0,8}(?:ok|OK)|(?:ok|OK)[^
 # 否则刚好 0.30s 的片段会被误判成头/尾静音。
 EPS = 1e-6
 
+# Editorial preferences should remain visible in the audit report without
+# blocking an otherwise executable timeline.
+SOFT_ISSUE_TYPES = {"secondary_product_detail"}
+
+
+def issue_level(item):
+    return "warning" if item.get("type") in SOFT_ISSUE_TYPES else "error"
+
 
 def norm(text):
     """数字先转中文再比对：字幕写「150斤」、转写出「一百五十斤」时，
@@ -190,6 +198,10 @@ def main():
             print(f"{index:02d} src{source_id} {start:.3f}-{end:.3f} "
                   f"{''.join(str(word.get('w', '')) for word in inside)}")
 
+    for item in issues:
+        item.setdefault("level", issue_level(item))
+    errors = [item for item in issues if item["level"] == "error"]
+    warnings = [item for item in issues if item["level"] == "warning"]
     by_type = {}
     for item in issues:
         by_type[item["type"]] = by_type.get(item["type"], 0) + 1
@@ -198,13 +210,15 @@ def main():
                     for item in issues
                     if item.get("word_coverage") is not None
                     and item["word_coverage"] < 0.5]
-    report = {"ok": not issues, "segments": len(timeline), "issue_count": len(issues),
+    report = {"ok": not errors, "segments": len(timeline), "issue_count": len(issues),
+              "error_count": len(errors), "warning_count": len(warnings),
               "issue_types": by_type, "low_coverage_segments": low_coverage,
               "issues": issues}
     with open(args.report, "w", encoding="utf-8") as handle:
         json.dump(report, handle, ensure_ascii=False, indent=2)
-    print(f"boundary audit: {len(timeline)} segments, {len(issues)} issues -> {args.report}")
-    return 0 if not issues else 1
+    print(f"boundary audit: {len(timeline)} segments, {len(errors)} errors, "
+          f"{len(warnings)} warnings -> {args.report}")
+    return 0 if not errors else 1
 
 
 if __name__ == "__main__":

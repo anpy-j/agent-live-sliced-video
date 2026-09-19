@@ -35,7 +35,7 @@ except ImportError:  # pragma: no cover - Windows degrades to process-local cach
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from badvocab import BAD_RE, review_hits  # noqa: E402
 from asr_backend import Transcriber, resolve_config  # noqa: E402
-from textnorm import incomplete_ending  # noqa: E402
+from textnorm import content_rejection, context_dependent_start, incomplete_ending  # noqa: E402
 
 try:
     from zhconv import convert as _zh
@@ -277,9 +277,11 @@ def words_from_subtitles(blocks):
             and float(block["end"]) > float(block["start"])]
 
 
-def merge_blocks(blocks, max_gap=0.55, max_dur=6.5, max_blocks=3):
+def merge_blocks(blocks, max_gap=0.55, max_dur=6.5, max_blocks=3,
+                 hard_max_dur=10.0, hard_max_blocks=6):
     """一个字幕块不等于一句完整话：按语义/停顿合并到句尾完整为止。
-    上限：间隔 ≤0.55s、累计 ≤6.5s、最多 3 块——避免把几句不同的话粘成一大坨。"""
+    通常间隔 ≤0.55s、累计 ≤6.5s、最多 3 块；明显承接块可扩到硬上限，
+    避免把一句话切成两个无法独立理解的片段。"""
     out = []
     cur = None
     for b in blocks:
@@ -289,8 +291,18 @@ def merge_blocks(blocks, max_gap=0.55, max_dur=6.5, max_blocks=3):
             continue
         gap = b["start"] - cur["end"]
         prev_ends = cur["text"][-1] in FINAL_PUNCT
-        if (gap <= max_gap and not prev_ends and cur["_n"] < max_blocks
-                and (b["end"] - cur["start"]) <= max_dur):
+        combined_duration = b["end"] - cur["start"]
+        within_soft_limit = cur["_n"] < max_blocks and combined_duration <= max_dur
+        # Subtitle blocks are display units, not sentences.  If the next block visibly
+        # continues the current phrase (for example "腰部" + "的一个线条"), extend past
+        # the ordinary compact-candidate limit instead of manufacturing two fragments.
+        semantic_continuation = (
+            (incomplete_ending(cur["text"]) is not None
+             or context_dependent_start(b["text"]) is not None)
+            and cur["_n"] < hard_max_blocks
+            and combined_duration <= hard_max_dur
+        )
+        if gap <= max_gap and not prev_ends and (within_soft_limit or semantic_continuation):
             cur["text"] += b["text"]
             cur["end"] = b["end"]
             cur["_n"] += 1
@@ -334,7 +346,7 @@ def usable(s):
         return False
     if BAD_RE.search(t):
         return False
-    if incomplete_ending(t):
+    if content_rejection(t):
         return False
     if s["end"] - s["start"] < 0.5:
         return False
@@ -387,7 +399,7 @@ def main():
         wav = (os.path.join(workdir, "audio16k.wav") if subtitle
                else extract_audio(media, workdir))
 
-        transcript_key = {"version": 2, "media": fingerprint(media),
+        transcript_key = {"version": 3, "media": fingerprint(media),
                           "subtitle": fingerprint(subtitle) if subtitle else None,
                           "mode": "subtitle" if subtitle else "whisper", "asr": asr_config,
                           "no_words": bool(a.no_words)}

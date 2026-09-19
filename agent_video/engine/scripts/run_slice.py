@@ -151,13 +151,13 @@ def media_duration(path):
 
 
 def adaptive_limits(seconds):
-    """候选预算固定在低 Token 区间；本地排序负责把强候选放进 40–80 条窗口。"""
+    """候选不再设条数上限：脚本只筛确定性垃圾，可用性由 AI 分批逐条审核。"""
     minutes = seconds / 60.0
     if minutes <= 15:
-        return {"mode": "fast", "overview_frames": 16, "candidate_limit": 60}
+        return {"mode": "fast", "overview_frames": 16, "candidate_limit": 0}
     if minutes <= 35:
-        return {"mode": "fast", "overview_frames": 20, "candidate_limit": 80}
-    return {"mode": "fast", "overview_frames": 24, "candidate_limit": 80}
+        return {"mode": "fast", "overview_frames": 20, "candidate_limit": 0}
+    return {"mode": "fast", "overview_frames": 24, "candidate_limit": 0}
 
 
 def normalize_picks(path, media, output, max_pick_seconds=MAX_PICK_SECONDS):
@@ -525,8 +525,7 @@ def main():
         # 等价的全片 ASR；切点与边界审计直接复用字幕边界。
         runner.run("digest", [sys.executable, SCRIPTS / "digest_candidates.py",
                               index / "candidates.json", workdir / "candidate_digest.json",
-                              "--limit", str(limits["candidate_limit"]),
-                              "--max-total-chars", "6000", "--compact"])
+                              "--limit", str(limits["candidate_limit"]), "--compact"])
         if not args.skip_overview:
             runner.run("overview", [sys.executable, SCRIPTS / "frames.py", "overview", media,
                                     workdir / "overview.jpg", "--n",
@@ -639,7 +638,8 @@ def main():
         deliverables.mkdir(parents=True, exist_ok=True)
         runner.run("validate_video_mapping_body", [sys.executable,
                    SCRIPTS / "validate_dual_timeline.py", dual_timelines["body"],
-                   "--src", f"1={media}", "--min-total", "0", "--max-total", "120",
+                   "--src", f"1={media}", "--min-total", "0",
+                   "--max-total", str(args.max_total),
                    "--report", workdir / "dual_body_report.json"])
         for name, path in sorted(timelines.items()):
             if not name.startswith("hook_"):

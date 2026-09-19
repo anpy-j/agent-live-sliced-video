@@ -88,6 +88,56 @@ class StoreTest(unittest.TestCase):
             workspace="/tmp/job", creative_strategy="personality")
         self.assertEqual(self.store.get_job(job_id)["creative_strategy"], "personality")
 
+    def test_job_persists_target_duration(self):
+        job_id = self.store.create_job(
+            title="长视频", source_path="/tmp/source.mp4", brief="", mode="fast",
+            workspace="/tmp/job", target_min_seconds=180, target_max_seconds=240)
+        job = self.store.get_job(job_id)
+        self.assertEqual(job["target_min_seconds"], 180)
+        self.assertEqual(job["target_max_seconds"], 240)
+
+
+    def test_delete_job_removes_job_and_cascades(self):
+        job_id = self.store.create_job(title="待删除", source_path="/tmp/source.mp4",
+                                       brief="", mode="standard", workspace="/tmp/job")
+        self.store.add_event(job_id, "material_index", "info", "test_event", "测试事件")
+        artifact_file = Path(self.tmp.name) / "test_artifact.txt"
+        artifact_file.write_text("hello", encoding="utf-8")
+        self.store.add_artifact(job_id, "material_index", "log", "测试产物", artifact_file)
+        
+        self.assertIsNotNone(self.store.get_job(job_id))
+        deleted = self.store.delete_job(job_id)
+        self.assertTrue(deleted)
+        self.assertIsNone(self.store.get_job(job_id))
+        with self.store.connect() as con:
+            stages_count = con.execute("SELECT count(*) FROM stages WHERE job_id=?", (job_id,)).fetchone()[0]
+            events_count = con.execute("SELECT count(*) FROM events WHERE job_id=?", (job_id,)).fetchone()[0]
+            artifacts_count = con.execute("SELECT count(*) FROM artifacts WHERE job_id=?", (job_id,)).fetchone()[0]
+        self.assertEqual(stages_count, 0)
+        self.assertEqual(events_count, 0)
+        self.assertEqual(artifacts_count, 0)
+
+    def test_reset_job_resets_stages_and_artifacts(self):
+        job_id = self.store.create_job(title="待重置", source_path="/tmp/source.mp4",
+                                       brief="", mode="standard", workspace="/tmp/job")
+        self.store.stage_start(job_id, "material_index", "进行中")
+        self.store.stage_done(job_id, "material_index", "完成")
+        self.store.stage_recover(job_id, "edit_plan", "AI 不可用，正在自动降级")
+        artifact_file = Path(self.tmp.name) / "test_artifact2.txt"
+        artifact_file.write_text("hello2", encoding="utf-8")
+        self.store.add_artifact(job_id, "material_index", "log", "测试产物2", artifact_file)
+
+        self.store.reset_job(job_id)
+        job = self.store.get_job(job_id)
+        self.assertEqual(job["status"], "queued")
+        self.assertEqual(job["current_stage"], "material_index")
+        self.assertEqual(job["progress"], 0)
+        self.assertIsNone(job["error"])
+        for stage in job["stages"]:
+            self.assertEqual(stage["status"], "pending")
+            self.assertEqual(stage["progress"], 0)
+        self.assertEqual(len(job["artifacts"]), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

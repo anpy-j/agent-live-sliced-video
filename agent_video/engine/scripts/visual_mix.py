@@ -183,20 +183,16 @@ def prepare(source: Path, mapping_path: Path, output_dir: Path,
                            "color": str(audio.get("color", "")),
                            "duration": round(end - start, 3), "quality": metrics,
                            "crop_x": crop_x})
-            selected_images.append((f"{block_id}  {timestamp_label((start + end) / 2)}", str(frame)))
+            for suffix, at in zip(("start", "middle", "end"), sample_times(start, end, duration)):
+                selected_images.append(
+                    (f"{block_id} {suffix} {timestamp_label(at)}",
+                     str(selected_dir / f"{module}-{index:03d}-{suffix}.jpg")))
     reference = output_dir / "selected-reference.jpg"
     build_overview(selected_images, str(reference))
 
-    replacement_blocks = [item for item in blocks if item["quality"]["bad"]]
-    if not replacement_blocks:
-        packet = {
-            "source": str(source.resolve()), "duration": round(duration, 3),
-            "reference_image": str(reference.resolve()), "candidate_sheets": [],
-            "blocks": blocks, "replacement_blocks": [], "candidate_sets": {},
-            "candidates": [], "search_strategy": "selected_only_early_exit",
-        }
-        write_json_atomic(output_dir / "visual_mix_packet.json", packet)
-        return packet
+    # Every selected segment is reviewed semantically.  Local pixel metrics cannot
+    # detect empty sets, a missing presenter, wardrobe changes, or the wrong product.
+    replacement_blocks = list(blocks)
 
     candidates, good_images = [], []
     label_anchors = []
@@ -259,7 +255,7 @@ def prepare(source: Path, mapping_path: Path, output_dir: Path,
         "blocks": blocks, "replacement_blocks": replacement_blocks,
         "candidate_sets": candidate_sets,
         "candidates": [item for item in candidates if item["candidate_id"] in allowed_ids],
-        "search_strategy": "bad_clip_nearby_windows",
+        "search_strategy": "full_selected_visual_audit_nearby_windows",
     }
     write_json_atomic(output_dir / "visual_mix_packet.json", packet)
     return packet

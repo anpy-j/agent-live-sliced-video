@@ -2,12 +2,13 @@ const $ = (selector, root=document) => root.querySelector(selector);
 const $$ = (selector, root=document) => [...root.querySelectorAll(selector)];
 const app = $('#app');
 const state = { dashboard:null, job:null, poll:null, mcp:null, selectedStage:null };
-const labels = {queued:'排队中',running:'执行中',waiting_input:'待决策',completed:'已完成',failed:'失败',cancelled:'已取消',pending:'等待',succeeded:'完成'};
+const labels = {queued:'排队中',running:'执行中',waiting_input:'待恢复',completed:'已完成',failed:'自动恢复中',cancelled:'已取消',pending:'等待',succeeded:'完成'};
 const stageLabels = {material_index:'素材索引',edit_plan:'AI 文本编排',validation:'文本校验与原声锁定',visual_mix:'多模态画面混剪',delivery:'一次高清渲染'};
 const icons = {
   video:'<svg viewBox="0 0 24 24"><rect x="3" y="5" width="14" height="14" rx="2"/><path d="m17 10 4-2v8l-4-2z"/></svg>',
   file:'<svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v5h5M9 13h6M9 17h6"/></svg>',
   image:'<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m4 17 5-5 4 4 2-2 5 4"/></svg>',
+  folder:'<svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h9a1 1 0 0 1 1 1v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>',
   empty:'<svg viewBox="0 0 24 24"><path d="M4 7h16v12H4zM8 4h8v3"/><path d="M9 12h6"/></svg>',
   arrow:'<svg viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg>'
 };
@@ -24,18 +25,15 @@ function formatExactTime(value){if(!value)return '—';const d=new Date(value);r
 function durationText(seconds=0){seconds=Math.max(0,Math.floor(seconds));const h=Math.floor(seconds/3600),m=Math.floor(seconds%3600/60),s=seconds%60;return h?`${h} 小时 ${m} 分`:m?`${m} 分 ${s} 秒`:`${s} 秒`;}
 function bytes(value=0){if(value<1024)return `${value} B`;if(value<1048576)return `${(value/1024).toFixed(1)} KB`;return `${(value/1048576).toFixed(1)} MB`;}
 function clipTime(value=0){const seconds=Math.max(0,Number(value)||0),m=Math.floor(seconds/60),s=Math.floor(seconds%60);return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;}
-function status(value){return `<span class="status ${value}">${labels[value]||value}</span>`;}
+function visualStatus(value){return value==='failed'?'running':value;}
+function status(value){return `<span class="status ${visualStatus(value)}">${labels[value]||value}</span>`;}
 function toast(message){const el=$('#toast');el.textContent=message;el.classList.add('show');clearTimeout(el.timer);el.timer=setTimeout(()=>el.classList.remove('show'),2400);}
 function loading(){app.innerHTML='<div class="loading"><div class="spinner"></div>正在读取本地任务状态</div>';}
 function setCrumb(text){$('#pageCrumb').textContent=text;$$('[data-nav]').forEach(x=>{const active=location.hash.includes(x.dataset.nav);x.classList.toggle('active',active);if(active)x.setAttribute('aria-current','page');else x.removeAttribute('aria-current')});}
 
 function jobRows(jobs){
   if(!jobs.length)return `<div class="empty">${icons.empty}<h3>还没有剪辑任务</h3><p>添加第一段直播素材，流程节点、日志和产物会在这里持续更新。</p><button class="button primary" data-new-job>新建剪辑任务</button></div>`;
-  return `<table class="jobs-table"><thead><tr><th>任务</th><th>当前节点</th><th>进度</th><th>状态</th><th></th></tr></thead><tbody>${jobs.map(j=>`<tr>
-    <td><div class="job-name"><span class="job-thumb">${icons.video}</span><div><b>${escapeHtml(j.title)}</b><small>${escapeHtml(j.source_path)}</small></div></div></td>
-    <td><small>${escapeHtml(stageLabels[j.current_stage]||j.current_stage||'—')}</small></td>
-    <td><div class="progress"><div class="progress-line"><i style="width:${Math.max(2,j.progress||0)}%"></i></div><small>${Math.round(j.progress||0)}% · ${formatTime(j.updated_at)}</small></div></td>
-    <td>${status(j.status)}</td><td><button class="link-button" data-open-job="${j.id}">查看详情 →</button></td></tr>`).join('')}</tbody></table>`;
+  return `<table class="jobs-table"><thead><tr><th>任务</th><th>当前节点</th><th>进度</th><th>状态</th><th>操作</th></tr></thead><tbody>${jobs.map(j=>`<tr>\n    <td><div class="job-name"><span class="job-thumb">${icons.video}</span><div><b>${escapeHtml(j.title)}</b><small>${escapeHtml(j.source_path)}</small></div></div></td>\n    <td><small>${escapeHtml(stageLabels[j.current_stage]||j.current_stage||"—")}</small></td>\n    <td><div class="progress"><div class="progress-line"><i style="width:${Math.max(2,j.progress||0)}%"></i></div><small>${Math.round(j.progress||0)}% · ${formatTime(j.updated_at)}</small></div></td>\n    <td>${status(j.status)}</td>\n    <td><div class="job-row-actions">\n      <button class="link-button" data-open-job="${j.id}">详情</button>\n      ${j.status==='completed'?`<button class="link-button" data-open-folder="${j.id}">打开文件夹</button>`:''}\n      <button class="link-button" data-restart-job="${j.id}" data-job-title="${escapeHtml(j.title)}">重新开始</button>\n      <button class="link-button text-danger" data-delete-job="${j.id}" data-job-title="${escapeHtml(j.title)}">删除</button>\n    </div></td></tr>`).join('')}</tbody></table>`;
 }
 
 async function renderDashboard(){
@@ -116,8 +114,9 @@ function decisionPanel(job,packet,ai){
       <div class="candidate-list" aria-label="候选片段">${candidates.map(c=>`<label class="candidate-row"><input type="checkbox" data-candidate="${c.i}"><span class="candidate-time">${clipTime(c.s)}–${clipTime(c.e)}</span><span class="candidate-copy"><span class="candidate-tag ${escapeHtml(c.c)}">${escapeHtml(categoryLabel(c.c))}</span><span>${escapeHtml(c.t)}</span></span><select data-module="${c.i}" aria-label="片段用途" disabled><option value="${c.c==='hook'?'hook_A':'body'}">${c.c==='hook'?'开头':'正文'}</option><option value="${c.c==='hook'?'body':'hook_A'}">${c.c==='hook'?'正文':'开头'}</option></select></label>`).join('')}</div>
       <div class="plan-submit"><p class="form-error" id="editPlanError" role="alert"></p><button class="button primary" type="submit" id="submitEditPlan">提交编排并继续</button></div></form></details></section>`;
 }
-function jobFlags(job){return {active:['queued','running'].includes(job.status),canRetry:['failed','cancelled'].includes(job.status),canPlan:job.status==='waiting_input'&&job.current_stage==='edit_plan'};}
-function jobControlsHtml(job){const {active,canRetry}=jobFlags(job),retryLabel=job.current_stage==='validation'&&String(job.error||'').includes('校验未通过')?'退回 AI 重新编排':'重新排队';return `${status(job.status)}${canRetry?`<button class="button ghost small" id="retryJob">${retryLabel}</button>`:''}${active?'<button class="button danger small" id="cancelJob">取消任务</button>':''}`;}
+function jobFlags(job){return {active:['queued','running','failed'].includes(job.status),canRetry:job.status==='cancelled',canPlan:job.status==='waiting_input'&&job.current_stage==='edit_plan'};}
+function jobControlsHtml(job){const {active,canRetry}=jobFlags(job),retryLabel=job.current_stage==='validation'&&String(job.error||'').includes('校验未通过')?'退回 AI 重新编排':'重新排队';const folder=job.deliverables||{},showFolder=job.status==='completed'&&folder.exists;return `${status(job.status)}${showFolder?`${folder.folder?`<span class="folder-path" title="${escapeHtml(folder.folder)}">${escapeHtml(folder.folder)}</span>`:''}<button class="button ghost small" id="openDeliverableFolder">${icons.folder}打开成片文件夹</button>`:''}${canRetry?`<button class="button ghost small" id="retryJob">${retryLabel}</button>`:''}<button class="button ghost small" id="restartJob">重新开始</button>${active?'<button class="button danger small" id="cancelJob">取消任务</button>':''}<button class="button danger small" id="deleteJob">删除任务</button>`;}
+function deliverablesControlsKey(job){return JSON.stringify([job.status,job.deliverables&&job.deliverables.exists,job.deliverables&&job.deliverables.folder]);}
 function jobActionsHtml(job,packet,ai){
   const {canPlan}=jobFlags(job);
   let feedbackHtml='';
@@ -135,10 +134,10 @@ function jobActionsHtml(job,packet,ai){
         </div>
       </form></section>`;
   }
-  return `${job.error?`<div class="danger-box"><b>执行失败：</b> ${escapeHtml(job.error)}</div>`:''}${canPlan?decisionPanel(job,packet,ai):''}${feedbackHtml}`;
+  return `${job.error?`<div class="danger-box"><b>自动恢复记录：</b> ${escapeHtml(job.error)}</div>`:''}${canPlan?decisionPanel(job,packet,ai):''}${feedbackHtml}`;
 }
 function selectedStageId(job){return job.stages.some(s=>s.stage_id===state.selectedStage)?state.selectedStage:(job.current_stage||job.stages[0]?.stage_id);}
-function workflowHtml(job){const selected=selectedStageId(job);return job.stages.map((s,i)=>`<button type="button" class="stage ${s.status} ${s.stage_id===selected?'selected':''}" data-stage-select="${escapeHtml(s.stage_id)}" aria-pressed="${s.stage_id===selected}"><span class="stage-dot">${s.status==='succeeded'?'✓':String(i+1).padStart(2,'0')}</span><b>${escapeHtml(s.name)}</b><small>${labels[s.status]||s.status}</small></button>`).join('');}
+function workflowHtml(job){const selected=selectedStageId(job);return job.stages.map((s,i)=>`<button type="button" class="stage ${visualStatus(s.status)} ${s.stage_id===selected?'selected':''}" data-stage-select="${escapeHtml(s.stage_id)}" aria-pressed="${s.stage_id===selected}"><span class="stage-dot">${s.status==='succeeded'?'✓':String(i+1).padStart(2,'0')}</span><b>${escapeHtml(s.name)}</b><small>${labels[s.status]||s.status}</small></button>`).join('');}
 function payloadHtml(payload){if(!payload)return '';const value=JSON.stringify(payload,null,2);return `<details class="event-data"><summary>查看执行数据</summary><pre>${escapeHtml(value.length>6000?`${value.slice(0,6000)}\n……`:value)}</pre></details>`;}
 function stageDetailHtml(job){
   const id=selectedStageId(job),stage=job.stages.find(s=>s.stage_id===id)||job.stages[0],events=job.events.filter(e=>e.stage_id===id),artifacts=job.artifacts.filter(a=>a.stage_id===id),isCurrent=job.current_stage===id&&['queued','running'].includes(job.status),runtime=job.runtime||{};
@@ -157,8 +156,28 @@ function markJobDisconnected(){const indicator=$('#jobConnectionState');if(indic
 function scheduleJobPoll(jobId,job){clearTimeout(state.poll);if(jobFlags(job).active)state.poll=setTimeout(()=>{if(location.hash===`#/jobs/${jobId}`)refreshJob(jobId).catch(()=>{markJobDisconnected();scheduleJobPoll(jobId,state.job||job)})},1800);}
 function bindArtifactPreviews(root=document){$$('[data-preview]',root).forEach(x=>{if(x.dataset.previewBound)return;x.dataset.previewBound='true';x.addEventListener('click',()=>previewArtifact(x.dataset.preview,x.dataset.mime,x.dataset.title))});}
 function bindJobControls(jobId){
+  $('#openDeliverableFolder')?.addEventListener('click',async()=>{
+    try{const res=await api(`/api/jobs/${jobId}/open-folder`,{method:'POST',body:'{}'});toast('已打开成片文件夹');}
+    catch(err){toast(err.message);}
+  });
   $('#cancelJob')?.addEventListener('click',async()=>{await api(`/api/jobs/${jobId}/cancel`,{method:'POST',body:'{}'});toast('任务已取消');await refreshJob(jobId)});
   $('#retryJob')?.addEventListener('click',async e=>{const returned=e.currentTarget.textContent.includes('重新编排');await api(`/api/jobs/${jobId}/retry`,{method:'POST',body:'{}'});toast(returned?'旧方案已退回编排节点':'任务已重新排队');await refreshJob(jobId)});
+  $('#restartJob')?.addEventListener('click',async()=>{
+    if(!confirm('确定要从头重新开始该任务吗？所有阶段执行进度和产物将被重置。'))return;
+    try{
+      await api(`/api/jobs/${jobId}/restart`,{method:'POST',body:'{}'});
+      toast('任务已重新开始');
+      await refreshJob(jobId);
+    }catch(err){toast(err.message);}
+  });
+  $('#deleteJob')?.addEventListener('click',async()=>{
+    if(!confirm('确定要彻底删除该任务吗？此操作将删除该任务的全部执行数据与产物，且不可恢复。'))return;
+    try{
+      await api(`/api/jobs/${jobId}/delete`,{method:'POST',body:'{}'});
+      toast('任务已删除');
+      location.hash='#/queue';
+    }catch(err){toast(err.message);}
+  });
 }
 function bindStageSelection(jobId){$$('[data-stage-select]').forEach(button=>button.addEventListener('click',()=>{state.selectedStage=button.dataset.stageSelect;patchJobRegion('#jobWorkflow',workflowHtml(state.job),`selected:${state.selectedStage}:${JSON.stringify(state.job.stages.map(x=>[x.stage_id,x.status]))}`);patchJobRegion('#jobStageDetail',stageDetailHtml(state.job),stageDetailKey(state.job));bindStageSelection(jobId);bindArtifactPreviews($('#jobStageDetail'));updateLiveTimes()}));}
 function updateLiveTimes(){
@@ -201,7 +220,7 @@ async function refreshJob(jobId){
   let packet=null,ai=null;if(flags.canPlan&&actionsChanged)[packet,ai]=await Promise.all([api(`/api/jobs/${jobId}/packet`),api('/api/ai/providers')]);
   state.job=job;
   const connection=$('#jobConnectionState');if(connection){connection.classList.remove('offline');connection.textContent='实时连接正常';}
-  if(patchJobRegion('#jobControls',jobControlsHtml(job),JSON.stringify([job.status,flags.active,flags.canRetry])))bindJobControls(jobId);
+  if(patchJobRegion('#jobControls',jobControlsHtml(job),deliverablesControlsKey(job)))bindJobControls(jobId);
   const note=$('#jobModelNote');if(note){note.textContent=job.model_provider&&job.model_provider!=='manual'?`文本编排：${providerLabel(job.model_provider)} · ${job.model_name||'auto'} ｜ 画面混剪：${providerLabel(job.visual_model_provider)} · ${job.visual_model_name||'—'}`:'';note.hidden=!note.textContent;}
   const beforeActionScroll=window.scrollY;if(actionsChanged&&patchJobRegion('#jobActions',jobActionsHtml(job,packet,ai),actionKey)){bindJobActions(jobId,job,packet);window.scrollTo(0,Math.min(beforeActionScroll,Math.max(0,document.documentElement.scrollHeight-window.innerHeight)));}
   $('#jobProgressMeta').textContent=`${Math.round(job.progress||0)}% · 当前节点 ${stageLabels[job.current_stage]||job.current_stage||'—'}`;
@@ -216,7 +235,7 @@ async function renderJob(jobId){
   setCrumb('任务详情');loading();const job=await api(`/api/jobs/${jobId}`),flags=jobFlags(job);state.job=job;state.selectedStage=job.current_stage||job.stages[0]?.stage_id;
   const decisionData=flags.canPlan?await Promise.all([api(`/api/jobs/${jobId}/packet`),api('/api/ai/providers')]):[null,null],packet=decisionData[0],ai=decisionData[1],actionKey=JSON.stringify([job.status,job.current_stage,job.error,job.model_provider,job.model_name,job.visual_model_provider,job.visual_model_name]),stageKey=JSON.stringify(job.stages.map(x=>[x.stage_id,x.status,x.message,x.error,x.finished_at,x.started_at])),artifactKey=JSON.stringify(job.artifacts.map(x=>[x.id,x.size,x.title])),eventKey=JSON.stringify(job.events.map(x=>x.id));
   const metaInfo=[(job.products||[]).length?`<b>商品</b>${escapeHtml(job.products.join('、'))}`:'', (job.materials||[]).length?`<b>面料</b>${escapeHtml(job.materials.join('、'))}`:'', (job.colors||[]).length?`<b>颜色</b>${escapeHtml(job.colors.join('、'))}`:''].filter(Boolean).map(x=>`<span>${x}</span>`).join('');
-  app.innerHTML=`<a href="#/queue" class="back-link">${icons.arrow}返回队列</a><div class="detail-head"><div class="detail-title"><span class="eyebrow">${escapeHtml(job.id)}</span><h1>${escapeHtml(job.title)}</h1><p>${escapeHtml(job.source_path)}</p>${metaInfo?`<div class="job-meta">${metaInfo}</div>`:''}<small class="model-note" id="jobModelNote" ${job.model_provider&&job.model_provider!=='manual'?'':'hidden'}>${job.model_provider&&job.model_provider!=='manual'?`文本编排：${escapeHtml(providerLabel(job.model_provider))} · ${escapeHtml(job.model_name||'auto')} ｜ 画面混剪：${escapeHtml(providerLabel(job.visual_model_provider))} · ${escapeHtml(job.visual_model_name||'—')}`:''}</small></div><div class="detail-actions" id="jobControls" data-render-key="${escapeHtml(JSON.stringify([job.status,flags.active,flags.canRetry]))}">${jobControlsHtml(job)}</div></div>
+  app.innerHTML=`<a href="#/queue" class="back-link">${icons.arrow}返回队列</a><div class="detail-head"><div class="detail-title"><span class="eyebrow">${escapeHtml(job.id)}</span><h1>${escapeHtml(job.title)}</h1><p>${escapeHtml(job.source_path)}</p>${metaInfo?`<div class="job-meta">${metaInfo}</div>`:''}<small class="model-note" id="jobModelNote" ${job.model_provider&&job.model_provider!=='manual'?'':'hidden'}>${job.model_provider&&job.model_provider!=='manual'?`文本编排：${escapeHtml(providerLabel(job.model_provider))} · ${escapeHtml(job.model_name||'auto')} ｜ 画面混剪：${escapeHtml(providerLabel(job.visual_model_provider))} · ${escapeHtml(job.visual_model_name||'—')}`:''}</small></div><div class="detail-actions" id="jobControls" data-render-key="${escapeHtml(deliverablesControlsKey(job))}">${jobControlsHtml(job)}</div></div>
   <div id="jobActions" data-render-key="${escapeHtml(actionKey)}">${jobActionsHtml(job,packet,ai)}</div>
   <div class="panel"><div class="panel-head"><div><h2>整体流程</h2><p id="jobProgressMeta">${Math.round(job.progress||0)}% · 当前节点 ${escapeHtml(stageLabels[job.current_stage]||job.current_stage||'—')}</p></div><div class="workflow-meta"><span class="connection-state" id="jobConnectionState"><i></i>实时连接正常</span><span class="panel-hint">点击节点查看详情</span></div></div><div class="workflow" id="jobWorkflow" data-render-key="${escapeHtml(`${selectedStageId(job)}:${JSON.stringify(job.stages.map(x=>[x.stage_id,x.status]))}`)}">${workflowHtml(job)}</div></div>
   <div class="detail-grid"><div><div class="panel stage-detail" id="jobStageDetail" data-render-key="${escapeHtml(stageDetailKey(job))}">${stageDetailHtml(job)}</div>
@@ -265,6 +284,33 @@ async function openNewJob(){
 function bindCommon(){
   $$('[data-new-job]').forEach(x=>x.addEventListener('click',openNewJob));
   $$('[data-open-job]').forEach(x=>x.addEventListener('click',()=>location.hash=`#/jobs/${x.dataset.openJob}`));
+  $$('[data-open-folder]').forEach(x=>x.addEventListener('click',async e=>{
+    e.stopPropagation();
+    try{
+      await api(`/api/jobs/${x.dataset.openFolder}/open-folder`,{method:'POST',body:'{}'});
+      toast('已打开成片文件夹');
+    }catch(err){toast(err.message);}
+  }));
+  $$('[data-restart-job]').forEach(x=>x.addEventListener('click',async e=>{
+    e.stopPropagation();
+    const jobId=x.dataset.restartJob,title=x.dataset.jobTitle||jobId;
+    if(!confirm(`确定要从头重新开始任务“${title}”吗？`))return;
+    try{
+      await api(`/api/jobs/${jobId}/restart`,{method:'POST',body:'{}'});
+      toast('任务已重新开始');
+      route();
+    }catch(err){toast(err.message);}
+  }));
+  $$('[data-delete-job]').forEach(x=>x.addEventListener('click',async e=>{
+    e.stopPropagation();
+    const jobId=x.dataset.deleteJob,title=x.dataset.jobTitle||jobId;
+    if(!confirm(`确定要彻底删除任务“${title}”吗？此操作不可恢复。`))return;
+    try{
+      await api(`/api/jobs/${jobId}/delete`,{method:'POST',body:'{}'});
+      toast('任务已删除');
+      route();
+    }catch(err){toast(err.message);}
+  }));
 }
 async function route(){
   clearTimeout(state.poll);const hash=location.hash||'#/dashboard';
@@ -276,6 +322,7 @@ $$('[data-close-new-job]').forEach(button=>button.addEventListener('click',()=>$
 $('#newJobDialog').addEventListener('cancel',e=>{e.preventDefault();$('#newJobDialog').close()});
 $('#newJobDialog').addEventListener('click',e=>{if(e.target===$('#newJobDialog'))$('#newJobDialog').close()});
 $('#newJobForm [name="title"]').addEventListener('input',e=>{e.target.dataset.userEdited=e.target.value?'true':''});
+$('#targetDuration')?.addEventListener('change',e=>{const el=$('#customDurationFields');if(el)el.hidden=e.target.value!=='custom'});
 $('#pickSourceButton').addEventListener('click',async e=>{
   const button=e.currentTarget, source=$('#newJobForm [name="source_path"]'), title=$('#newJobForm [name="title"]');
   button.disabled=true;button.textContent='选择中…';$('#newJobError').textContent='';
@@ -283,6 +330,12 @@ $('#pickSourceButton').addEventListener('click',async e=>{
   catch(err){$('#newJobError').textContent=err.message}finally{button.disabled=false;button.textContent='浏览';}
 });
 $('#fileDrop').addEventListener('click',e=>{if(!e.target.closest('#pickSourceButton'))$('#pickSourceButton').click()});
+$('#pickSubtitleButton')?.addEventListener('click',async e=>{
+  const button=e.currentTarget, subtitle=$('#newJobForm [name="subtitle_path"]');
+  button.disabled=true;button.textContent='选择中…';$('#newJobError').textContent='';
+  try{const result=await api('/api/files/pick',{method:'POST',body:JSON.stringify({kind:'subtitle'})});if(result.cancelled)return;subtitle.value=result.path;}
+  catch(err){$('#newJobError').textContent=err.message}finally{button.disabled=false;button.textContent='浏览';}
+});
 $('#newJobForm').addEventListener('submit',async e=>{
   e.preventDefault();const submit=$('#createJobSubmit');submit.disabled=true;submit.textContent='正在创建…';$('#newJobError').textContent='';
   try{const f=new FormData(e.target);const data=await api('/api/jobs',{method:'POST',body:JSON.stringify(Object.fromEntries(f.entries()))});$('#newJobDialog').close();e.target.reset();$('#newJobForm [name="title"]').dataset.userEdited='';location.hash=`#/jobs/${data.id}`;toast('任务已加入队列');}

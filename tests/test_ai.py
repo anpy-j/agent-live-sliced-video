@@ -1,4 +1,5 @@
 import json
+import subprocess
 import time
 import unittest
 from pathlib import Path
@@ -9,6 +10,22 @@ from agent_video.ai import (AntigravityCli, CodexCli, MulticaCli, OpenCodeCli,
 
 
 class WorkBuddyCliTest(unittest.TestCase):
+    def test_windows_timeout_kills_entire_provider_process_tree(self):
+        provider = WorkBuddyCli(Path("C:/workbuddy.cmd"))
+        process = Mock(pid=4321, stdin=None, stdout=None, stderr=None, returncode=1)
+        process.poll.return_value = None
+        expired = subprocess.TimeoutExpired("workbuddy", 2, output="partial", stderr="waiting")
+        process.communicate.side_effect = [expired, ("tail", "closed")]
+        with patch("agent_video.ai.subprocess.Popen", return_value=process), \
+                patch("agent_video.ai.subprocess.run") as run, \
+                patch("agent_video.ai.sys.platform", "win32"):
+            with self.assertRaisesRegex(ProviderResponseError, "已停止"):
+                provider._complete(["workbuddy"], cwd=Path("."), on_process=None,
+                                   timeout=2, started=time.monotonic(), stdin_text="prompt")
+        self.assertEqual(run.call_args.args[0],
+                         ["taskkill", "/PID", "4321", "/T", "/F"])
+        process.communicate.assert_called_with(timeout=10)
+
     def test_extracts_nested_structured_plan_and_usage(self):
         plan = {
             "main_product": "白山茶",
@@ -40,6 +57,8 @@ class WorkBuddyCliTest(unittest.TestCase):
         cmd = complete.call_args.args[0]
         tools_idx = cmd.index("--tools")
         self.assertEqual(cmd[tools_idx + 1], "StructuredOutput")
+        self.assertNotIn("test", cmd)
+        self.assertEqual(complete.call_args.kwargs["stdin_text"], "test")
 
     def test_all_providers_share_structured_plan_parser(self):
         envelope = {"output_text": '{"main_product":"风衣","picks":[]}'}

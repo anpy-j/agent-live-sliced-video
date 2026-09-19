@@ -5,6 +5,11 @@ import bisect
 import difflib
 import json
 
+try:
+    from .textnorm import content_rejection
+except ImportError:  # Script entry point: its directory is already on sys.path.
+    from textnorm import content_rejection
+
 # 常规片段下限；验收硬门槛是 1.2 秒。
 MIN_SPEECH = 1.5
 MAX_SPEECH = 5.0
@@ -90,12 +95,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("input")
     parser.add_argument("output")
-    parser.add_argument("--limit", type=int, default=80)
+    parser.add_argument("--limit", type=int, default=0,
+                        help="候选条数上限；0 表示不限制。脚本只做确定性筛选，"
+                             "语义可用性由 AI 逐条审核，不应在这里提前淘汰候选")
     parser.add_argument("--other-share", type=float, default=0.25,
-                        help="未分类候选最多占摘要的比例（它们多为直播碎片）")
+                        help="未分类候选最多占摘要的比例（仅在 limit>0 时生效）")
     parser.add_argument("--near-duplicate", type=float, default=0.90)
-    parser.add_argument("--max-total-chars", type=int, default=6000,
-                        help="候选正文总字符预算；条数上限不能单独约束模型上下文")
+    parser.add_argument("--max-total-chars", type=int, default=0,
+                        help="候选正文总字符预算；0 表示不限制（仅在 limit>0 时生效，"
+                             "分批审核后单批上下文由调用方控制）")
     parser.add_argument("--compact", action="store_true",
                         help="输出供模型读取的短键紧凑 JSON")
     args = parser.parse_args()
@@ -103,7 +111,8 @@ def main():
     # 只把可直接进入编排的剪辑原子暴露给 AI。过短片段无法可靠对齐，过长片段
     # 即使被选中也会在后续门禁失败；在候选阶段剔除比渲染前才报错更省时间。
     rows = [row for row in rows if MIN_SPEECH <=
-            float(row.get("end", 0)) - float(row.get("start", 0)) <= MAX_SPEECH]
+            float(row.get("end", 0)) - float(row.get("start", 0)) <= MAX_SPEECH
+            and not content_rejection(str(row.get("text", "")))]
     ranked = sorted(rows, key=lambda row: (-quality(row), float(row.get("start", 0))))
     kept, norms = [], []
     for row in ranked:
@@ -121,24 +130,30 @@ def main():
     for row in kept:
         buckets[row["category"]].append(row)
     named = [name for name in CATEGORIES]
-    digest = []
-    chars = 0
-    while any(buckets[name] for name in named) and len(digest) < args.limit:
-        for name in named:
-            if buckets[name] and len(digest) < args.limit:
-                item = buckets[name].pop(0)
+    if args.limit <= 0:
+        # 不做任何基于关键词/评分的取舍：脚本只保留确定性筛选（时长、垃圾规则、
+        # 完全重复）之后的全部候选，交给 AI 分批逐条判定可用性。
+        digest = kept
+        chars = sum(len(row.get("text", "")) for row in digest)
+    else:
+        digest = []
+        chars = 0
+        while any(buckets[name] for name in named) and len(digest) < args.limit:
+            for name in named:
+                if buckets[name] and len(digest) < args.limit:
+                    item = buckets[name].pop(0)
+                    size = len(item.get("text", ""))
+                    if args.max_total_chars <= 0 or chars + size <= args.max_total_chars:
+                        digest.append(item)
+                        chars += size
+        if len(digest) < args.limit and buckets["other"]:
+            for item in buckets["other"][:max(0, min(args.limit - len(digest),
+                                                     int(args.limit * args.other_share)))]:
                 size = len(item.get("text", ""))
-                if chars + size <= args.max_total_chars:
-                    digest.append(item)
-                    chars += size
-    if len(digest) < args.limit and buckets["other"]:
-        for item in buckets["other"][:max(0, min(args.limit - len(digest),
-                                                 int(args.limit * args.other_share)))]:
-            size = len(item.get("text", ""))
-            if chars + size > args.max_total_chars:
-                break
-            digest.append(item)
-            chars += size
+                if args.max_total_chars > 0 and chars + size > args.max_total_chars:
+                    break
+                digest.append(item)
+                chars += size
     digest.sort(key=lambda row: float(row.get("start", 0)))
     payload = digest
     if args.compact:
@@ -146,7 +161,8 @@ def main():
         for index, row in enumerate(digest):
             item = {"i": index, "s": round(float(row.get("start", 0)), 3),
                     "e": round(float(row.get("end", 0)), 3),
-                    "c": row.get("category", "other"), "t": row.get("text", "")}
+                    "c": row.get("category", "other"), "t": row.get("text", ""),
+                    "q": int(row.get("quality_hint", 0))}
             if row.get("review_terms"):
                 item["r"] = row["review_terms"]
             payload.append(item)

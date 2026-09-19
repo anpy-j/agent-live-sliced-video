@@ -9,6 +9,7 @@ from agent_video.ai import PLAN_PATCH_SCHEMA, ProviderResponseError
 from agent_video.engine.scripts.cuts import expand
 from agent_video.engine.scripts.digest_candidates import category, quality
 from agent_video.engine.scripts.prep import (cache_key, parse_subtitle,
+                                             merge_blocks, usable,
                                              words_from_subtitles)
 from agent_video.engine.scripts import cuts, prep
 from agent_video.engine.scripts.visual_mix import (apply as apply_visual_mix,
@@ -18,6 +19,22 @@ from agent_video.engine.validation_policy import shared_issues
 from agent_video.rules import DirectivesManager
 from agent_video.runner import JobRunner, PlanRefinementError
 from agent_video.server import Application
+
+
+def semantic_audit_response(candidates, main_product="上衣", reject_ids=()):
+    reject_ids = set(reject_ids)
+    decisions = [{
+        "candidate_id": int(item["i"]),
+        "verdict": "reject" if int(item["i"]) in reject_ids else "keep",
+        "standalone": int(item["i"]) not in reject_ids,
+        "main_product_relevant": int(item["i"]) not in reject_ids,
+        "content_type": "stage_chatter" if int(item["i"]) in reject_ids else "selling_point",
+        "selling_value": 0 if int(item["i"]) in reject_ids else 80,
+        "reason": "测试审核",
+    } for item in candidates]
+    plan = {"main_product": main_product, "picks": decisions}
+    return {"plan": plan, "raw": {"result": plan}, "seconds": 0.5,
+            "usage": {"input_tokens": 0, "output_tokens": 0}}
 
 
 class PipelineFeatureTest(unittest.TestCase):
@@ -222,6 +239,41 @@ class PipelineFeatureTest(unittest.TestCase):
         self.assertIn("duplicate_text", codes)
         self.assertIn("too_many_material_segments", codes)
         self.assertNotIn("too_many_long_demos", codes)
+        material = next(item for item in shared_issues(rows)
+                        if item["code"] == "too_many_material_segments")
+        self.assertEqual(material["level"], "error")
+
+    def test_subtitle_merge_extends_past_soft_limit_for_dependent_continuation(self):
+        blocks = [
+            {"start": 0.0, "end": 1.0, "text": "带一点点腰身的"},
+            {"start": 1.0, "end": 2.0, "text": "肚子特别大的"},
+            {"start": 2.0, "end": 3.0, "text": "它会给你很好的腰部"},
+            {"start": 3.0, "end": 4.0, "text": "的一个线条的修饰。"},
+        ]
+        merged = merge_blocks(blocks)
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["text"],
+                         "带一点点腰身的肚子特别大的它会给你很好的腰部的一个线条的修饰。")
+
+    def test_candidate_filter_rejects_production_chatter(self):
+        self.assertFalse(usable({"start": 0, "end": 3,
+                                 "text": "删掉来整个先删掉好"}))
+        self.assertFalse(usable({"start": 0, "end": 3,
+                                 "text": "轻柔羊毛手手"}))
+        self.assertTrue(usable({"start": 0, "end": 3,
+                                "text": "这件毛衣上身显瘦又利落"}))
+
+    def test_shared_policy_tolerates_alignment_margin_as_warning(self):
+        pre_alignment = shared_issues([
+            {"start": 0, "end": 5.0, "text": "完整卖点", "role": "proof"}],
+            pre_alignment=True)
+        self.assertEqual(pre_alignment[0]["code"], "segment_too_long")
+        self.assertEqual(pre_alignment[0]["level"], "warning")
+
+        final = shared_issues([
+            {"start": 0, "end": 5.3, "text": "完整卖点", "role": "proof"}])
+        self.assertEqual(final[0]["code"], "segment_too_long")
+        self.assertEqual(final[0]["level"], "warning")
 
     def test_incremental_merge_does_not_reselect_existing_candidate(self):
         base = {"main_product": "上衣", "picks": [
@@ -249,6 +301,27 @@ class PipelineFeatureTest(unittest.TestCase):
             chain = runner._text_model_chain({"model_provider": "workbuddy", "model_name": "auto"})
             self.assertLessEqual(len(chain), 2)
 
+    def test_model_chain_skips_unavailable_provider_before_applying_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner = JobRunner(Store(root / "db.sqlite"), root)
+            availability = {
+                "opencode": False,
+                "workbuddy": True,
+                "codex": True,
+                "antigravity": True,
+            }
+
+            def provider(provider_id):
+                item = Mock()
+                item.info.return_value = {"available": availability.get(provider_id, False)}
+                return item
+
+            with patch.object(runner, "_provider", side_effect=provider):
+                chain = runner._text_model_chain(
+                    {"model_provider": "opencode", "model_name": "auto"})
+            self.assertEqual(chain, [("workbuddy", "auto"), ("codex", "auto")])
+
     def test_refinement_exhaustion_does_not_switch_provider(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -267,7 +340,9 @@ class PipelineFeatureTest(unittest.TestCase):
                 runner._run_ai_plan(store.get_job(job_id), engine)
             self.assertEqual(lookup.call_count, 1)
             self.assertEqual(attempt.call_count, 1)
-            self.assertEqual(store.get_job(job_id)["status"], "failed")
+            self.assertEqual(store.get_job(job_id)["status"], "blocked")
+            self.assertFalse((engine / "picks.json").is_file())
+            self.assertTrue((engine / "picks.local-draft.json").is_file())
 
     def test_failed_model_usage_is_counted(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -276,7 +351,9 @@ class PipelineFeatureTest(unittest.TestCase):
             runner = JobRunner(store, root)
             engine = root / "job" / "engine"
             engine.mkdir(parents=True)
-            (engine / "candidate_digest.json").write_text("[]", encoding="utf-8")
+            (engine / "candidate_digest.json").write_text(
+                json.dumps([{"i": 0, "s": 0, "e": 2, "c": "other", "t": "候选一句"}]),
+                encoding="utf-8")
             job_id = store.create_job(title="usage", source_path="/tmp/source.mp4", brief="",
                                       mode="fast", workspace=str(engine.parent))
             provider = Mock(display_name="Mock")
@@ -296,18 +373,23 @@ class PipelineFeatureTest(unittest.TestCase):
             runner = JobRunner(store, root)
             engine = root / "job" / "engine"
             engine.mkdir(parents=True)
-            (engine / "candidate_digest.json").write_text(json.dumps([
-                {"i": 1, "s": 0, "e": 2, "c": "other", "t": "有效候选"}
-            ]), encoding="utf-8")
+            candidates = [
+                {"i": 1, "s": 0, "e": 2, "c": "other", "t": "有效候选一"},
+                {"i": 2, "s": 3, "e": 5, "c": "other", "t": "有效候选二"},
+            ]
+            (engine / "candidate_digest.json").write_text(
+                json.dumps(candidates), encoding="utf-8")
             job_id = store.create_job(title="usage", source_path="/tmp/source.mp4", brief="",
                                       mode="fast", workspace=str(engine.parent))
             provider = Mock(display_name="Mock")
             invalid = {"main_product": "上衣", "picks": [{
                 "candidate_id": 999, "role": "hook", "module": "hook_A",
                 "product": "上衣", "color": ""}]}
-            provider.generate_plan.return_value = {
+            invalid_response = {
                 "plan": invalid, "raw": {"result": invalid}, "seconds": 1,
                 "usage": {"input_tokens": 123, "output_tokens": 7}}
+            provider.generate_plan.side_effect = [
+                semantic_audit_response(candidates), invalid_response]
             with self.assertRaises(ValueError):
                 runner._run_ai_plan_attempt(store.get_job(job_id), engine,
                                             provider, "workbuddy", "auto")
@@ -334,6 +416,7 @@ class PipelineFeatureTest(unittest.TestCase):
                 for index, role in enumerate(("hook", "proof", "scene", "close"))]}
             provider = Mock(display_name="Mock")
             provider.generate_plan.side_effect = [
+                semantic_audit_response(candidates),
                 {"plan": initial, "raw": {"result": initial}, "seconds": 1,
                  "usage": {"input_tokens": 10, "output_tokens": 2}},
                 ProviderResponseError("bad patch", {
@@ -373,16 +456,17 @@ class PipelineFeatureTest(unittest.TestCase):
 
             provider = Mock(display_name="Mock")
             provider.generate_plan.side_effect = [
+                semantic_audit_response(candidates),
                 response([0, 1, 2, 3], ["hook", "proof", "styling", "close"]),
                 response([4], ["bridge"]), response([5], ["bridge"])]
             with patch.object(runner, "enqueue"):
                 runner._run_ai_plan_attempt(store.get_job(job_id), engine, provider, "workbuddy", "auto")
-            self.assertEqual(provider.generate_plan.call_count, 3)
-            second_prompt = provider.generate_plan.call_args_list[1].kwargs["prompt"]
-            third_prompt = provider.generate_plan.call_args_list[2].kwargs["prompt"]
+            self.assertEqual(provider.generate_plan.call_count, 4)
+            second_prompt = provider.generate_plan.call_args_list[2].kwargs["prompt"]
+            third_prompt = provider.generate_plan.call_args_list[3].kwargs["prompt"]
             self.assertNotIn("候选原文0", second_prompt)
             self.assertNotIn("候选原文4", third_prompt)
-            self.assertIs(provider.generate_plan.call_args_list[1].kwargs["schema"],
+            self.assertIs(provider.generate_plan.call_args_list[2].kwargs["schema"],
                           PLAN_PATCH_SCHEMA)
             self.assertIn("remove_candidate_ids", PLAN_PATCH_SCHEMA["required"])
             self.assertEqual(store.get_job(job_id)["token_input"], 30)
@@ -440,10 +524,66 @@ class PipelineFeatureTest(unittest.TestCase):
                     patch("agent_video.engine.scripts.visual_mix.build_overview"), \
                     patch("agent_video.engine.scripts.visual_mix.scene_boundaries") as scenes:
                 packet = prepare_visual_mix(source, mapping, root / "visual", 10, 24)
-            self.assertEqual(packet["search_strategy"], "selected_only_early_exit")
-            self.assertEqual(packet["candidates"], [])
-            self.assertEqual(inspect.call_count, 1)
+            self.assertEqual(packet["search_strategy"], "full_selected_visual_audit_nearby_windows")
+            self.assertEqual(len(packet["replacement_blocks"]), 1)
+            self.assertGreater(len(packet["candidates"]), 0)
+            self.assertGreater(inspect.call_count, 1)
             scenes.assert_not_called()
+
+    def test_long_material_defaults_to_selective_short_video_target(self):
+        candidates = [{"i": index, "s": index * 4.0, "e": index * 4.0 + 4.0,
+                       "c": "proof", "t": f"主商品卖点{index}"}
+                      for index in range(75)]
+        limits = JobRunner._editing_constraints(candidates, {})
+        self.assertEqual((limits["min_total"], limits["max_total"]), (70, 120))
+        self.assertEqual(limits["min_segments"], 18)
+        self.assertEqual(limits["max_segments"], 32)
+
+    def test_local_repair_removes_secondary_products_and_fills_duration(self):
+        candidates = [
+            {"i": 0, "s": 0, "e": 4, "c": "hook", "t": "这件针织衫很显气质"},
+            {"i": 1, "s": 5, "e": 9, "c": "styling", "t": "里面搭一件小打底"},
+            {"i": 2, "s": 10, "e": 14, "c": "proof", "t": "纹理细节很高级"},
+            {"i": 3, "s": 15, "e": 19, "c": "fit", "t": "上身不会压个子"},
+        ]
+        plan = {"main_product": "针织衫", "creative_strategy": "selling", "picks": [
+            {"src": 1, "start": row["s"], "end": row["e"], "text": row["t"],
+             "role": row["c"], "module": "hook_A" if row["i"] == 0 else "body",
+             "product": "针织衫", "color": "", "_candidate_id": row["i"]}
+            for row in candidates[:2]
+        ]}
+        repaired, report = JobRunner._repair_plan_locally(
+            plan, candidates, {"min_total": 12, "max_total": 20, "max_segments": 8},
+            {"products": ["针织衫"]})
+        text = "".join(item["text"] for item in repaired["picks"])
+        self.assertNotIn("打底", text)
+        self.assertGreaterEqual(report["duration"], 12)
+        self.assertEqual(report["removed_secondary_candidate_ids"], [1])
+
+    def test_local_repair_never_uses_garbage_to_reach_duration(self):
+        candidates = [
+            {"i": 0, "s": 0, "e": 4, "c": "proof", "q": 9,
+             "t": "这件毛衣上身显瘦又利落"},
+            {"i": 1, "s": 10, "e": 14, "c": "scene", "q": 20,
+             "t": "删掉来整个先删掉好"},
+            {"i": 2, "s": 20, "e": 24, "c": "material", "q": 9,
+             "t": "羊毛面料柔软亲肤"},
+            {"i": 3, "s": 30, "e": 34, "c": "material", "q": 9,
+             "t": "羊绒材质摸起来很软"},
+        ]
+        plan = {"main_product": "毛衣", "picks": [{
+            "src": 1, "start": 0, "end": 4, "text": candidates[0]["t"],
+            "role": "proof", "module": "hook_A", "_candidate_id": 0,
+        }]}
+        repaired, report = JobRunner._repair_plan_locally(
+            plan, candidates,
+            {"min_total": 16, "max_total": 20, "min_segments": 4, "max_segments": 8},
+            {"products": ["毛衣"]},
+        )
+        texts = [item["text"] for item in repaired["picks"]]
+        self.assertNotIn("删掉来整个先删掉好", texts)
+        self.assertEqual(sum("羊毛" in text or "羊绒" in text for text in texts), 1)
+        self.assertLess(report["duration"], 16)
 
     def test_feedback_rules_are_injected_only_into_matching_scope(self):
         with tempfile.TemporaryDirectory() as directory:

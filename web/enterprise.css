@@ -168,6 +168,12 @@ body {
 .button.ghost:hover { border-color: #3f6075; background: #0e1b27; }
 .button.danger { border-color: rgba(255, 107, 122, .42); background: rgba(255, 107, 122, .06); }
 .button.small { min-height: 34px; font-size: 11px; }
+.button.small svg { width: 14px; height: 14px; }
+.folder-path {
+  max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: #77aeea; font: 10px var(--mono); opacity: .85; align-self: center;
+}
+#openDeliverableFolder svg { width: 14px; height: 14px; }
 .button:disabled { cursor: not-allowed; opacity: .45; box-shadow: none; }
 .icon-button { border-radius: 4px; }
 .icon-button:hover { background: #0e1a25; }
@@ -478,3 +484,7 @@ input[readonly], input:disabled { background: #081018; color: #708797; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+.job-row-actions{display:flex;gap:8px;align-items:center;justify-content:flex-end}
+.text-danger{color:var(--red) !important}
+.text-danger:hover{color:#ff949f !important}

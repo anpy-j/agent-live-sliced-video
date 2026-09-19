@@ -57,7 +57,7 @@ HARD_REGEX = [
 REVIEW_REGEX = [r"多少\s*钱", r"多钱", r"几\s*折"]
 
 # 副商品判定的默认词表（女装场景）。换类目时用配置覆盖。
-SECONDARY_PRODUCTS = "牛仔裤|裤子|半裙|裙子|外套|衬衫|打底衫|鞋子|包包"
+SECONDARY_PRODUCTS = "牛仔裤|裤子|半裙|裙子|外套|衬衫|打底(?:衫)?|内搭|鞋子|包包"
 SECONDARY_ATTRIBUTES = "中腰|低腰|矮腰|高腰|裤长|弹力|尺码|版型|面料|材质|颜色"
 
 DEFAULT_PROFILE_NAME = "douyin-strict.json"

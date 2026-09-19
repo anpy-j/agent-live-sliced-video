@@ -8,6 +8,10 @@ import argparse
 import json
 import os
 import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from ffmpeg_graph import filter_complex_args  # noqa: E402
 
 
 def run(command):
@@ -169,12 +173,17 @@ def main():
                        "-realtime", "true"] if args.video_codec == "h264_videotoolbox"
                       else ["-c:v", "libx264", "-crf", str(args.crf),
                             "-preset", args.preset])
-    command += ["-filter_complex", ";".join(filters), "-map", "[vcat]", "-map", "[aout]",
+    filter_args, filter_script = filter_complex_args(filters)
+    command += [*filter_args, "-map", "[vcat]", "-map", "[aout]",
                 *video_encoding,
                 "-pix_fmt", "yuv420p", "-r", f"{fps:.6f}", "-c:a", "aac",
                 "-b:a", args.audio_bitrate, "-ar", "48000", "-ac", "2",
                 "-movflags", "+faststart", "-shortest", partial_output]
-    run(command)
+    try:
+        run(command)
+    finally:
+        if os.path.exists(filter_script):
+            os.unlink(filter_script)
     os.replace(partial_output, final_output)
     print(f"dual render: {len(audio_inputs)} audio blocks, {len(video_inputs)} visual clips "
           f"-> {args.output}")

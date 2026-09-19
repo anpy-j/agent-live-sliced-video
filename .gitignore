@@ -2,10 +2,13 @@
 __pycache__/
 *.py[cod]
 .venv/
+*.egg-info/
 data/*.db
 data/*.db-*
 data/*.lock
+data/*.log
 data/runtime.json
 data/skill-history/
 workspaces/*
 !workspaces/.gitkeep
+package-lock.json

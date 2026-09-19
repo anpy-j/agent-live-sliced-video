@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -97,6 +98,41 @@ PLAN_PATCH_SCHEMA["properties"]["remove_candidate_ids"] = {
 }
 PLAN_PATCH_SCHEMA["required"].append("remove_candidate_ids")
 
+SEMANTIC_AUDIT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "main_product": {"type": "string", "minLength": 1},
+        "picks": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 80,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "candidate_id": {"type": "integer", "minimum": 0},
+                    "verdict": {"type": "string", "enum": ["keep", "reject"]},
+                    "standalone": {"type": "boolean"},
+                    "main_product_relevant": {"type": "boolean"},
+                    "content_type": {"type": "string", "enum": [
+                        "selling_point", "fit", "material", "color", "styling",
+                        "scene", "proof", "personality", "story", "reaction",
+                        "stage_chatter", "inventory_logistics", "secondary_product",
+                        "repetition", "fragment", "garbled", "low_information",
+                    ]},
+                    "selling_value": {"type": "integer", "minimum": 0, "maximum": 100},
+                    "reason": {"type": "string", "minLength": 1},
+                },
+                "required": ["candidate_id", "verdict", "standalone",
+                             "main_product_relevant", "content_type",
+                             "selling_value", "reason"],
+            },
+        },
+    },
+    "required": ["main_product", "picks"],
+}
+
 VISUAL_PLAN_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -174,12 +210,39 @@ class CliProvider:
         if not self.info()["available"]:
             raise RuntimeError(f"{self.display_name} 不可用: {self.executable}")
 
+    @staticmethod
+    def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
+        """Terminate the exact provider process and descendants before closing pipes."""
+        if process.poll() is not None:
+            return
+        if sys.platform == "win32":
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    capture_output=True, text=True, timeout=15, check=False,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            except (OSError, subprocess.SubprocessError):
+                pass
+        else:
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except (OSError, ProcessLookupError):
+                pass
+        if process.poll() is None:
+            try:
+                process.kill()
+            except (OSError, ProcessLookupError):
+                pass
+
     def _complete(self, command: list[str], *, cwd: Path,
                   on_process: Callable[[subprocess.Popen[str]], None] | None,
                   timeout: int, started: float,
-                  env_overrides: dict[str, str] | None = None) -> tuple[str, str, float]:
+                  env_overrides: dict[str, str] | None = None,
+                  stdin_text: str | None = None) -> tuple[str, str, float]:
         process = subprocess.Popen(
             command, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            stdin=subprocess.PIPE if stdin_text is not None else None,
             text=True, encoding="utf-8", errors="replace",
             env={**os.environ, "NO_COLOR": "1", "TERM": "xterm", **(env_overrides or {})},
             start_new_session=sys.platform != "win32",
@@ -187,10 +250,21 @@ class CliProvider:
         if on_process:
             on_process(process)
         try:
-            stdout, stderr = process.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            stdout, stderr = process.communicate()
+            stdout, stderr = process.communicate(input=stdin_text, timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            self._terminate_process_tree(process)
+            try:
+                tail_stdout, tail_stderr = process.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                tail_stdout = tail_stderr = ""
+                for stream in (process.stdin, process.stdout, process.stderr):
+                    if stream:
+                        try:
+                            stream.close()
+                        except OSError:
+                            pass
+            stdout = f"{exc.output or ''}{tail_stdout or ''}"
+            stderr = f"{exc.stderr or ''}{tail_stderr or ''}"
             raise ProviderResponseError(
                 f"{self.display_name} 编排超过 {timeout // 60} 分钟，已停止",
                 {"stdout": (stdout or "")[-100000:], "stderr": (stderr or "")[-20000:],
@@ -368,11 +442,12 @@ class WorkBuddyCli(CliProvider):
             "--model", model, "--max-turns", "4", "--tools", "Read,StructuredOutput",
             "--add-dir", str(Path(cwd).resolve()),
             "--permission-mode", "dontAsk", "--no-session-persistence",
-            f"{prompt}\n\n请使用 Read 查看以下图片：\n{image_paths}",
         ]
+        stdin_text = f"{prompt}\n\n请使用 Read 查看以下图片：\n{image_paths}"
         started = time.monotonic()
         stdout, stderr, seconds = self._complete(
-            command, cwd=cwd, on_process=on_process, timeout=timeout, started=started)
+            command, cwd=cwd, on_process=on_process, timeout=timeout, started=started,
+            stdin_text=stdin_text)
         envelope = self._parse_json(stdout)
         plan = self._find_visual_plan(envelope)
         if not plan:
@@ -394,11 +469,12 @@ class WorkBuddyCli(CliProvider):
             str(self.executable), "-p", "--output-format", "json",
             "--json-schema", json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
             "--model", model, "--max-turns", "1", "--tools", "StructuredOutput",
-            "--permission-mode", "dontAsk", "--no-session-persistence", prompt,
+            "--permission-mode", "dontAsk", "--no-session-persistence",
         ]
         started = time.monotonic()
         stdout, stderr, seconds = self._complete(
-            command, cwd=cwd, on_process=on_process, timeout=timeout, started=started)
+            command, cwd=cwd, on_process=on_process, timeout=timeout, started=started,
+            stdin_text=prompt)
         envelope = self._parse_json(stdout)
         plan = self._find_plan(envelope)
         if not plan:
@@ -807,15 +883,16 @@ class MulticaCli(CliProvider):
             pass
 
     def generate_plan(self, *, model: str, prompt: str, cwd: Path,
+                      schema: dict[str, Any] = PLAN_SCHEMA,
                       on_process: Callable[[subprocess.Popen[str]], None] | None = None,
                       should_cancel: Callable[[], bool] | None = None,
                       timeout: int = 360) -> dict[str, Any]:
         self._ensure_available()
         self.validate_model(model)
-        schema = json.dumps(PLAN_SCHEMA, ensure_ascii=False, separators=(",", ":"))
+        schema_json = json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
         constrained_prompt = (
             f"{prompt}\n\n这是一次只读编排任务，不要修改文件、创建代码或调用外部工具。"
-            f"最终消息只输出 JSON，不要 Markdown，并且必须符合此 JSON Schema：{schema}"
+            f"最终消息只输出 JSON，不要 Markdown，并且必须符合此 JSON Schema：{schema_json}"
         )
         started = time.monotonic()
         created, create_stderr = self._run_json(

@@ -52,7 +52,13 @@
             <button class="button ghost small" type="button" id="pickSourceButton">浏览</button>
           </div>
           <label class="field">成片名称<input name="title" required placeholder="也是最终生成的 MP4 文件名"><small>最终输出为“成片名称.mp4”。</small></label>
-          <label class="field">时间戳字幕（可选）<input name="subtitle_path" placeholder="/path/to/subtitles.srt"><small>支持 SRT、VTT、ASS/SSA 和带时间码 TXT；有效时直接复用，不运行全片 Whisper。</small></label>
+          <label class="field">时间戳字幕（可选）
+            <div class="input-with-action">
+              <input name="subtitle_path" placeholder="选择字幕文件或粘贴绝对路径 (/path/to/subtitles.srt)">
+              <button class="button ghost small" type="button" id="pickSubtitleButton">浏览</button>
+            </div>
+            <small>支持从文件夹选择 SRT、VTT、ASS/SSA 或带时间码 TXT；有效时直接复用，不运行全片 Whisper。</small>
+          </label>
         </section>
         <section class="form-section">
           <header class="section-head"><i>2</i><div><b>内容信息</b><small>告诉 Agent 讲什么、怎么剪</small></div></header>
@@ -70,6 +76,17 @@
             <option value="story">故事 / 反应</option>
             <option value="visual">视觉优先</option>
           </select><small>决定叙事重点，不再强制每条视频都按“钩子—证明—购买收口”编排。</small></label>
+          <label class="field">目标成片时长<select name="target_duration" id="targetDuration">
+            <option value="auto" selected>智能判断（候选充足时优先 3–4 分钟）</option>
+            <option value="70-120">70–120 秒</option>
+            <option value="120-180">120–180 秒</option>
+            <option value="180-240">180–240 秒</option>
+            <option value="custom">自定义</option>
+          </select><small>这是尽量达到的编辑目标；素材不足时会采用最佳可用方案继续执行。</small></label>
+          <div class="form-grid" id="customDurationFields" hidden>
+            <label class="field">最短秒数<input name="target_min_seconds" type="number" min="30" max="600" value="180"></label>
+            <label class="field">最长秒数<input name="target_max_seconds" type="number" min="30" max="600" value="240"></label>
+          </div>
           <label class="field">商品<textarea name="products" rows="3" required placeholder="例如：针织上衣&#10;阔腿裤&#10;半身裙"></textarea><small>必填，每行一个商品。成片会按商品优先分块，同一商品的内容集中讲。</small></label>
           <div class="form-grid">
             <label class="field">面料（可选）<input name="materials" placeholder="例如：羊毛，醋酸"><small>可不填，由 Agent 从口播判断。</small></label>

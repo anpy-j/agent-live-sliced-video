@@ -77,6 +77,8 @@ class Store:
                   subtitle_path TEXT,
                   delivery_mode TEXT NOT NULL DEFAULT 'merged',
                   creative_strategy TEXT NOT NULL DEFAULT 'auto',
+                  target_min_seconds INTEGER NOT NULL DEFAULT 0,
+                  target_max_seconds INTEGER NOT NULL DEFAULT 0,
                   token_input INTEGER NOT NULL DEFAULT 0,
                   token_output INTEGER NOT NULL DEFAULT 0
                 );
@@ -145,6 +147,10 @@ class Store:
                 con.execute("ALTER TABLE jobs ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'merged'")
             if "creative_strategy" not in columns:
                 con.execute("ALTER TABLE jobs ADD COLUMN creative_strategy TEXT NOT NULL DEFAULT 'auto'")
+            if "target_min_seconds" not in columns:
+                con.execute("ALTER TABLE jobs ADD COLUMN target_min_seconds INTEGER NOT NULL DEFAULT 0")
+            if "target_max_seconds" not in columns:
+                con.execute("ALTER TABLE jobs ADD COLUMN target_max_seconds INTEGER NOT NULL DEFAULT 0")
             con.execute("UPDATE jobs SET current_stage='validation' "
                         "WHERE current_stage IN ('rough_cut','pre_render_review')")
             con.execute("UPDATE events SET stage_id='validation' "
@@ -170,16 +176,17 @@ class Store:
                    visual_model_name: str | None = None, products: list[str] | None = None,
                    materials: list[str] | None = None, colors: list[str] | None = None,
                    subtitle_path: str | None = None,
-                   delivery_mode: str = "merged", creative_strategy: str = "auto") -> str:
+                   delivery_mode: str = "merged", creative_strategy: str = "auto",
+                   target_min_seconds: int = 0, target_max_seconds: int = 0) -> str:
         job_id = f"job_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
         now = utc_now()
         with self.connect() as con:
             con.execute(
-                "INSERT INTO jobs(id,title,source_path,brief,status,current_stage,progress,mode,created_at,updated_at,workspace,model_provider,model_name,visual_model_provider,visual_model_name,products_json,materials_json,colors_json,subtitle_path,delivery_mode,creative_strategy) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO jobs(id,title,source_path,brief,status,current_stage,progress,mode,created_at,updated_at,workspace,model_provider,model_name,visual_model_provider,visual_model_name,products_json,materials_json,colors_json,subtitle_path,delivery_mode,creative_strategy,target_min_seconds,target_max_seconds) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (job_id, title, source_path, brief, "queued", "material_index", 0, mode, now, now,
                  workspace, model_provider, model_name, visual_model_provider, visual_model_name,
                  _json(products or []), _json(materials or []), _json(colors or []),
-                 subtitle_path, delivery_mode, creative_strategy),
+                 subtitle_path, delivery_mode, creative_strategy, target_min_seconds, target_max_seconds),
             )
             con.executemany(
                 "INSERT INTO stages(job_id,stage_id,name,position) VALUES(?,?,?,?)",
@@ -191,7 +198,9 @@ class Store:
                         "visual_model_name": visual_model_name, "products": products or [],
                         "materials": materials or [], "colors": colors or [],
                         "subtitle_path": subtitle_path, "delivery_mode": delivery_mode,
-                        "creative_strategy": creative_strategy})
+                        "creative_strategy": creative_strategy,
+                        "target_min_seconds": target_min_seconds,
+                        "target_max_seconds": target_max_seconds})
         return job_id
 
     def list_jobs(self, limit: int = 100) -> list[dict[str, Any]]:
@@ -202,7 +211,8 @@ class Store:
     def list_recoverable_jobs(self) -> list[dict[str, Any]]:
         with self.connect() as con:
             rows = con.execute(
-                "SELECT * FROM jobs WHERE status IN ('queued','running','waiting_input') ORDER BY created_at"
+                "SELECT * FROM jobs WHERE status IN "
+                "('queued','running','waiting_input','failed') ORDER BY created_at"
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -243,6 +253,28 @@ class Store:
         with self.connect() as con:
             con.execute("UPDATE jobs SET updated_at=? WHERE id=?", (utc_now(), job_id))
 
+    def delete_job(self, job_id: str) -> bool:
+        with self.connect() as con:
+            cur = con.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+            return cur.rowcount > 0
+
+    def reset_job(self, job_id: str) -> None:
+        now = utc_now()
+        with self.connect() as con:
+            con.execute(
+                "UPDATE jobs SET status='queued', current_stage='material_index', progress=0, "
+                "error=NULL, started_at=NULL, finished_at=NULL, updated_at=?, engine_state=NULL, "
+                "token_input=0, token_output=0 WHERE id=?",
+                (now, job_id),
+            )
+            con.execute(
+                "UPDATE stages SET status='pending', progress=0, message='', started_at=NULL, "
+                "finished_at=NULL, result_json=NULL, error=NULL WHERE job_id=?",
+                (job_id,),
+            )
+            con.execute("DELETE FROM artifacts WHERE job_id=?", (job_id,))
+        self.add_event(job_id, None, "info", "job_restarted", "任务已重置并重新开始执行")
+
     def update_stage(self, job_id: str, stage_id: str, **fields: Any) -> None:
         if not fields:
             return
@@ -275,13 +307,14 @@ class Store:
         self.update_job(job_id, status="waiting_input", current_stage=stage_id)
         self.add_event(job_id, stage_id, "warning", "input_required", message, result)
 
-    def stage_fail(self, job_id: str, stage_id: str, error: str,
-                   result: dict[str, Any] | None = None) -> None:
-        self.update_stage(job_id, stage_id, status="failed", message="执行失败", error=error,
-                          finished_at=utc_now(), result=result)
-        self.update_job(job_id, status="failed", current_stage=stage_id, error=error,
-                        finished_at=utc_now())
-        self.add_event(job_id, stage_id, "error", "stage_failed", error, result)
+    def stage_recover(self, job_id: str, stage_id: str, message: str,
+                      result: dict[str, Any] | None = None) -> None:
+        """Record a recoverable problem without creating a terminal failure state."""
+        self.update_stage(job_id, stage_id, status="running", message=message, error=None,
+                          finished_at=None, result=result)
+        self.update_job(job_id, status="running", current_stage=stage_id, error=None,
+                        finished_at=None)
+        self.add_event(job_id, stage_id, "warning", "stage_recovering", message, result)
 
     def add_event(self, job_id: str, stage_id: str | None, level: str, kind: str,
                   message: str, payload: Any = None) -> None:
