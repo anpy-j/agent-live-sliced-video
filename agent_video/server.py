@@ -119,6 +119,7 @@ class Application:
         creative_strategy = str(payload.get("creative_strategy") or "auto")
         if creative_strategy not in {"auto", "selling", "tryon", "personality", "story", "visual"}:
             raise ValueError("creative_strategy 必须是 auto、selling、tryon、personality、story 或 visual")
+        target_min_seconds, target_max_seconds = self._parse_target_duration(payload)
         default_selection = str(self.store.get_setting("ai_default_selection", "workbuddy:auto"))
         ai_model = str(payload.get("text_ai_model") or payload.get("ai_model") or default_selection)
         model_provider, model_name = self.runner.resolve_ai_selection(ai_model)
@@ -136,7 +137,9 @@ class Application:
                                        visual_model_name=visual_model_name, products=products,
                                        materials=materials, colors=colors,
                                        subtitle_path=subtitle_path, delivery_mode=delivery_mode,
-                                       creative_strategy=creative_strategy)
+                                       creative_strategy=creative_strategy,
+                                       target_min_seconds=target_min_seconds,
+                                       target_max_seconds=target_max_seconds)
         edit_name = f"{job_id}-{self._path_slug(title, 48)}"
         workspace = source_workspace / "edits" / edit_name
         workspace.mkdir(parents=True, exist_ok=True)
@@ -150,8 +153,7 @@ class Application:
         return (slug or "untitled")[:limit]
 
     def _source_workspace(self, source: Path) -> Path:
-        stat = source.stat()
-        identity = {"path": str(source), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+        identity = self._source_identity(source)
         digest = hashlib.sha256(json.dumps(
             identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:12]
         root = self.workspace_root / "sources" / f"{self._path_slug(source.stem)}-{digest}"
@@ -165,6 +167,38 @@ class Application:
         }, ensure_ascii=False, indent=2), encoding="utf-8")
         temporary.replace(manifest)
         return root
+
+    @staticmethod
+    def _source_identity(source: Path) -> dict[str, Any]:
+        """Use content bytes as well as metadata so replaced media cannot reuse stale indexes."""
+        stat = source.stat()
+        digest = hashlib.sha256()
+        sample = 1024 * 1024
+        with source.open("rb") as handle:
+            digest.update(handle.read(sample))
+            if stat.st_size > sample:
+                handle.seek(max(0, stat.st_size - sample))
+                digest.update(handle.read(sample))
+        return {"path": str(source.resolve()), "size": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns, "edge_sha256": digest.hexdigest()}
+
+    @staticmethod
+    def _parse_target_duration(payload: dict[str, Any]) -> tuple[int, int]:
+        selection = str(payload.get("target_duration") or "auto").strip()
+        presets = {"auto": (0, 0), "70-120": (70, 120),
+                   "120-180": (120, 180), "180-240": (180, 240)}
+        if selection in presets:
+            return presets[selection]
+        if selection != "custom":
+            raise ValueError("target_duration 无效")
+        try:
+            minimum = int(payload.get("target_min_seconds"))
+            maximum = int(payload.get("target_max_seconds"))
+        except (TypeError, ValueError):
+            raise ValueError("自定义时长必须填写整数秒数") from None
+        if not 30 <= minimum <= maximum <= 600:
+            raise ValueError("自定义时长必须满足 30 ≤ 最短秒数 ≤ 最长秒数 ≤ 600")
+        return minimum, maximum
 
     @staticmethod
     def _parse_terms(value: Any) -> list[str]:
@@ -190,10 +224,24 @@ class Application:
         return self.pick_file(kind="video")
 
     def deliverable_info(self, job: dict[str, Any]) -> dict[str, Any]:
-        """成片输出目录：<workspace>/deliverables（合并成片与分段成片都在这里）。"""
+        """成片输出目录与交付门禁状态。"""
         workspace = Path(str(job.get("workspace") or ""))
         folder = workspace / "deliverables"
-        return {"folder": str(folder), "exists": folder.is_dir()}
+        summary_file = workspace / "final-render" / "delivery_summary.json"
+        summary: dict[str, Any] = {}
+        if summary_file.is_file():
+            try:
+                summary = json.loads(summary_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        return {
+            "folder": str(folder),
+            "exists": folder.is_dir(),
+            "publish_ready": bool(summary.get("publish_ready", False)),
+            "degraded": bool(summary.get("degraded", False)),
+            "review_reason": summary.get("review_reason"),
+            "deliverables": summary.get("deliverables") or [],
+        }
 
     def open_deliverable_folder(self, job_id: str) -> dict[str, Any]:
         """在系统文件管理器中打开任务成片文件夹。

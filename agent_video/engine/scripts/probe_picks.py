@@ -81,6 +81,9 @@ def main():
         start, end = float(c["start"]), float(c["end"])
         picks.append({"src": 1, "start": start, "end": end,
                       "role": c.get("role") or "proof", "module": "body",
+                      "atom_id": c.get("atom_id"),
+                      "required_atom_ids": c.get("required_atom_ids"),
+                      "long_complete_utterance": bool(c.get("long_complete_utterance")),
                       "text": (c.get("text") or "").strip() or script_for(start, end)})
 
     scratch = workdir / "_probe"

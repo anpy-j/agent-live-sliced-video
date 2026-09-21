@@ -62,7 +62,7 @@ PLAN_SCHEMA: dict[str, Any] = {
             "selling", "tryon", "personality", "story", "visual"]},
         "picks": {
             "type": "array",
-            "minItems": 2,
+            "minItems": 1,
             "maxItems": 64,
             "items": {
                 "type": "object",
@@ -74,7 +74,7 @@ PLAN_SCHEMA: dict[str, Any] = {
                         "color", "styling", "scene", "demo", "close", "bridge",
                         "personality", "story", "reaction", "visual",
                     ]},
-                    "module": {"type": "string", "enum": ["hook_A", "body"]},
+                    "module": {"type": "string", "enum": ["hook_A", "hook_B", "hook_C", "body"]},
                     "product": {"type": "string", "minLength": 1},
                     "color": {"type": "string"},
                 },
@@ -114,6 +114,16 @@ SEMANTIC_AUDIT_SCHEMA: dict[str, Any] = {
                     "candidate_id": {"type": "integer", "minimum": 0},
                     "verdict": {"type": "string", "enum": ["keep", "reject"]},
                     "standalone": {"type": "boolean"},
+                    "subject_explicit": {"type": "boolean"},
+                    "referent": {"type": "string"},
+                    "requires_previous": {"type": "boolean"},
+                    "requires_next": {"type": "boolean"},
+                    "opening_suitability": {"type": "integer", "minimum": 0, "maximum": 100},
+                    "information_gain": {"type": "integer", "minimum": 0, "maximum": 100},
+                    "content_function": {"type": "string", "enum": [
+                        "opening", "benefit", "evidence", "demonstration", "context",
+                        "transition", "personality", "story", "ending", "discard",
+                    ]},
                     "main_product_relevant": {"type": "boolean"},
                     "content_type": {"type": "string", "enum": [
                         "selling_point", "fit", "material", "color", "styling",
@@ -126,7 +136,9 @@ SEMANTIC_AUDIT_SCHEMA: dict[str, Any] = {
                     "reason": {"type": "string", "minLength": 1},
                 },
                 "required": ["candidate_id", "verdict", "standalone",
-                             "main_product_relevant", "content_type",
+                             "subject_explicit", "referent", "requires_previous",
+                             "requires_next", "opening_suitability", "information_gain",
+                             "content_function", "main_product_relevant", "content_type",
                              "selling_value", "reason"],
             },
         },
@@ -243,7 +255,7 @@ class CliProvider:
                   stdin_text: str | None = None) -> tuple[str, str, float]:
         process = subprocess.Popen(
             command, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            stdin=subprocess.PIPE if stdin_text is not None else None,
+            stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
             text=True, encoding="utf-8", errors="replace",
             env={**os.environ, "NO_COLOR": "1", "TERM": "xterm", **(env_overrides or {})},
             start_new_session=sys.platform != "win32",
@@ -272,7 +284,21 @@ class CliProvider:
                  "timeout_seconds": timeout, "returncode": process.returncode},
             ) from None
         if process.returncode:
-            tail = (stderr or stdout).strip()[-1600:]
+            error_message = ""
+            if stdout:
+                for line in reversed(stdout.splitlines()):
+                    try:
+                        ev = json.loads(line)
+                        if isinstance(ev, dict):
+                            msg = ev.get("message")
+                            if not msg and isinstance(ev.get("error"), dict):
+                                msg = ev["error"].get("message")
+                            if msg:
+                                error_message = str(msg)
+                                break
+                    except Exception:
+                        continue
+            tail = error_message or (stderr or stdout).strip()[-1600:]
             raise ProviderResponseError(
                 f"{self.display_name} 编排失败：{tail or f'退出码 {process.returncode}'}",
                 {"stdout": (stdout or "")[-100000:], "stderr": (stderr or "")[-20000:],
@@ -469,7 +495,7 @@ class WorkBuddyCli(CliProvider):
         command = [
             str(self.executable), "-p", "--output-format", "json",
             "--json-schema", json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
-            "--model", model, "--max-turns", "1", "--tools", "StructuredOutput",
+            "--model", model, "--max-turns", "4", "--tools", "StructuredOutput",
             "--permission-mode", "dontAsk", "--no-session-persistence",
         ]
         started = time.monotonic()
@@ -781,7 +807,7 @@ class MulticaCli(CliProvider):
                   on_process: Callable[[subprocess.Popen[str]], None] | None = None) -> tuple[Any, str]:
         command = [*self._command_prefix(), *args, "--output", "json"]
         process = subprocess.Popen(
-            command, cwd=str(cwd), stdin=subprocess.PIPE if input_text is not None else None,
+            command, cwd=str(cwd), stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
             errors="replace", env={**os.environ, "NO_COLOR": "1", "TERM": "xterm"},
         )

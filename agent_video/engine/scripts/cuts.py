@@ -13,7 +13,7 @@ picks.json:
 
 三种结局全部自动决定，不向用户提问：
   char/snap  对齐成功           -> 直接用，need_manual=false
-  relaxed    边界不可信         -> 放宽余量（首 0.4s / 尾 0.6s），need_manual=true
+  auto_expand 字级匹配不足    -> 按词边界/静音自动扩充，仍不安全则由后续换候选
   skipped    归属存疑/带入违禁词 -> 整句淘汰，不进成片
 """
 import argparse
@@ -670,7 +670,13 @@ def main():
                              "mode": mode, "need_manual": False,
                              "manual_approved": bool(r.get("manual_approved")),
                              "score": score, "text": txt, "role": r.get("role"),
-                             "module": r.get("module", "body")})
+                             "module": r.get("module", "body"),
+                             "atom_id": r.get("atom_id"),
+                             "required_atom_ids": r.get("required_atom_ids"),
+                             "long_complete_utterance": bool(r.get("long_complete_utterance")),
+                             "safe_standalone": bool(r.get("safe_standalone", True)),
+                             "product": r.get("product"), "color": r.get("color"),
+                             "_candidate_id": r.get("_candidate_id") or r.get("candidate_id")})
                 continue
 
         if cores is None:
@@ -685,7 +691,13 @@ def main():
                          "raw_s": raw_s, "raw_e": raw_e,
                          "need_manual": False, "score": 0.0, "text": r.get("text", ""),
                          "manual_approved": bool(r.get("manual_approved")),
-                         "role": r.get("role"), "module": r.get("module", "body")})
+                         "role": r.get("role"), "module": r.get("module", "body"),
+                         "atom_id": r.get("atom_id"),
+                         "required_atom_ids": r.get("required_atom_ids"),
+                         "long_complete_utterance": bool(r.get("long_complete_utterance")),
+                         "safe_standalone": bool(r.get("safe_standalone", True)),
+                         "product": r.get("product"), "color": r.get("color"),
+                         "_candidate_id": r.get("_candidate_id") or r.get("candidate_id")})
             continue
 
         rs, re_ = round(max(0.0, raw_s - PAD_HEAD), 3), round(raw_e + PAD_TAIL, 3)
@@ -712,11 +724,18 @@ def main():
             skipped.append({"src": src, "start": raw_s, "end": raw_e,
                             "text": r.get("text", ""), "why": hit})
             continue
-        rows.append({"src": src, "s": rs, "e": re_, "mode": "relaxed",
+        rows.append({"src": src, "s": rs, "e": re_, "mode": "auto_expand",
                      "raw_s": raw_s, "raw_e": raw_e,
-                     "need_manual": True, "score": 0.0, "text": r.get("text", ""),
+                     "need_manual": False, "boundary_confidence": "low",
+                     "score": 0.0, "text": r.get("text", ""),
                      "manual_approved": bool(r.get("manual_approved")),
-                     "role": r.get("role"), "module": r.get("module", "body")})
+                     "role": r.get("role"), "module": r.get("module", "body"),
+                     "atom_id": r.get("atom_id"),
+                     "required_atom_ids": r.get("required_atom_ids"),
+                     "long_complete_utterance": bool(r.get("long_complete_utterance")),
+                     "safe_standalone": bool(r.get("safe_standalone", True)),
+                     "product": r.get("product"), "color": r.get("color"),
+                     "_candidate_id": r.get("_candidate_id") or r.get("candidate_id")})
 
     # 全片去重：同一时间段只能入选一次（严禁重复文本）
     dedup, seen = [], []
@@ -779,6 +798,12 @@ def main():
     tl = []
     for b in blocks:
         o = offsets.get(b["src"], [0.0, ""])[0]
+        first_item = b["items"][0] if b.get("items") else {}
+        required_atoms = []
+        for it in b.get("items", []):
+            for aid in (it.get("required_atom_ids") or []):
+                if aid not in required_atoms:
+                    required_atoms.append(aid)
         tl.append({"src": b["src"], "gstart": round(b["s"], 3), "gend": round(b["e"], 3),
                    "start": round(b["s"] - o, 3), "end": round(b["e"] - o, 3),
                    "dur": round(b["e"] - b["s"], 3),
@@ -786,6 +811,12 @@ def main():
                    "manual_approved": b.get("manual_approved", False),
                    "mode": b.get("mode"),
                    "role": b.get("role"), "module": b.get("module", "body"),
+                   "atom_id": first_item.get("atom_id"),
+                   "required_atom_ids": required_atoms,
+                   "long_complete_utterance": any(bool(it.get("long_complete_utterance")) for it in b.get("items", [])),
+                   "safe_standalone": all(bool(it.get("safe_standalone", True)) for it in b.get("items", [])),
+                   "product": first_item.get("product"), "color": first_item.get("color"),
+                   "_candidate_id": first_item.get("_candidate_id"),
                    "text": " / ".join(x["text"] for x in b["items"])})
 
     banned = [x for x in tl if BAD_RE.search(x["text"])]

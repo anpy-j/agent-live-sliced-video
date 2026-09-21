@@ -156,6 +156,19 @@ def ranked_candidates(block: dict, candidates: list[dict], limit: int = 6) -> li
     ))[:limit]
 
 
+def visual_pieces(source: int, start: float, end: float, *, kind: str,
+                  crop_x: float, max_seconds: float = 3.0, **extra) -> list[dict]:
+    pieces = []
+    cursor = float(start)
+    while cursor < float(end) - 1e-6:
+        piece_end = min(float(end), cursor + max_seconds)
+        pieces.append({"src": int(source), "start": round(cursor, 3),
+                       "end": round(piece_end, 3), "kind": kind,
+                       "crop_x": crop_x, **extra})
+        cursor = piece_end
+    return pieces
+
+
 def prepare(source: Path, mapping_path: Path, output_dir: Path,
             interval: float, max_candidates: int,
             label_anchors_path: Path | None = None) -> dict:
@@ -232,6 +245,8 @@ def prepare(source: Path, mapping_path: Path, output_dir: Path,
         center = (start + end) / 2
         nearest = (min(label_anchors, key=lambda item: abs(float(item["time"]) - center))
                    if label_anchors else {})
+        if nearest and abs(float(nearest["time"]) - center) > 15.0:
+            nearest = {}
         candidates.append({"candidate_id": candidate_id, "start": round(start, 3),
                            "end": round(end, 3), "quality": metrics, "crop_x": crop_x,
                            "product": nearest.get("product", ""),
@@ -309,10 +324,9 @@ def apply(packet_path: Path, decisions_path: Path, mapping_path: Path,
             # Rebuild the synchronized A-roll baseline on every apply.  Otherwise a retry
             # with an empty/rejected decision can silently keep an older B-roll choice.
             audio = row.get("audio") or {}
-            row["video"] = [{"src": int(audio.get("src", 1)),
-                             "start": float(audio.get("start", 0)),
-                             "end": float(audio.get("end", 0)),
-                             "kind": "aroll", "crop_x": crop_x}]
+            row["video"] = visual_pieces(
+                int(audio.get("src", 1)), float(audio.get("start", 0)),
+                float(audio.get("end", 0)), kind="aroll", crop_x=crop_x)
         for change in changes:
             index = change["index"]
             if not 0 <= index < len(rows):
@@ -335,10 +349,10 @@ def apply(packet_path: Path, decisions_path: Path, mapping_path: Path,
                 continue
             used_candidate_ids.add(str(change["candidate_id"]))
             used_ranges.append((1, clip_start, clip_end))
-            rows[index]["video"] = [{"src": 1, "start": clip_start,
-                                     "end": round(clip_end, 3), "kind": "broll",
-                                     "candidate_id": change["candidate_id"],
-                                     "crop_x": float(candidate.get("crop_x", 0.5))}]
+            rows[index]["video"] = visual_pieces(
+                1, clip_start, clip_end, kind="broll",
+                candidate_id=change["candidate_id"],
+                crop_x=float(candidate.get("crop_x", 0.5)))
             accepted.append({"block_id": f"{module}:{index}",
                              "candidate_id": change["candidate_id"],
                              "reason": str(change.get("reason", "")),

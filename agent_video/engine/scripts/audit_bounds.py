@@ -64,7 +64,8 @@ def diagnose(coverage, similarity):
 
 
 def load_words(path):
-    return sorted(json.load(open(path, encoding="utf-8")), key=lambda row: row["s"])
+    with open(path, encoding="utf-8") as handle:
+        return sorted(json.load(handle), key=lambda row: row["s"])
 
 
 def parse_map(values):
@@ -99,13 +100,16 @@ def main():
     args = parser.parse_args()
     secondary_products = args.secondary_products or SECONDARY_PRODUCTS
     secondary_attributes = args.secondary_attributes or SECONDARY_ATTRIBUTES
-    timeline = json.load(open(args.timeline, encoding="utf-8"))
+    with open(args.timeline, encoding="utf-8") as handle:
+        timeline = json.load(handle)
     word_map = parse_map(args.word_map)
     if args.word_map_json:
-        manifest = json.load(open(args.word_map_json, encoding="utf-8"))
+        with open(args.word_map_json, encoding="utf-8") as handle:
+            manifest = json.load(handle)
         meta = manifest.get("_meta") or {}
         if args.require_binding:
-            timeline_hash = hashlib.sha256(open(args.timeline, "rb").read()).hexdigest()
+            with open(args.timeline, "rb") as handle:
+                timeline_hash = hashlib.sha256(handle.read()).hexdigest()
             if meta.get("timeline_sha256") != timeline_hash or \
                     int(meta.get("segments", -1)) != len(timeline):
                 raise SystemExit("Word map is stale or does not cover this timeline")

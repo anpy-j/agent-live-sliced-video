@@ -272,6 +272,8 @@ body {
   letter-spacing: .03em;
 }
 .status.completed, .status.succeeded { color: var(--green); }
+.status.review_required { color: var(--amber); }
+.status.blocked { color: var(--red); }
 .status:before { width: 5px; height: 5px; box-shadow: 0 0 8px currentColor; }
 .progress-line { height: 3px; border-radius: 0; background: #152837; }
 .progress-line i { border-radius: 0; background: linear-gradient(90deg, #1e94bc, var(--accent)); box-shadow: 0 0 8px rgba(57, 231, 255, .25); }

@@ -12,3 +12,9 @@ data/skill-history/
 workspaces/*
 !workspaces/.gitkeep
 package-lock.json
+
+# Multica agent runtime
+.agent_context/
+.agents/
+.multica/
+AGENTS.md

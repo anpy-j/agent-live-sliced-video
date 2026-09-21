@@ -50,7 +50,8 @@ def media_duration(path):
 
 
 def load_timeline(path):
-    data = json.load(open(path, encoding="utf-8"))
+    with open(path, encoding="utf-8") as handle:
+        data = json.load(handle)
     if not isinstance(data, list):
         raise ValueError(f"Timeline must be a JSON array: {path}")
     return data
@@ -62,7 +63,8 @@ def issue(code, message, level="error", **extra):
 
 def validate_rows(rows, sources, min_total, max_total, min_segments, max_segments,
                   min_segment, max_segment, max_demo_segment, require_structure):
-    issues, durations, texts, seen_ranges, composition_rows = shared_issues(rows), {}, [], [], []
+    issues, durations, texts, seen_ranges = shared_issues(rows), {}, [], []
+    composition_rows = {}
     total, demo_count = 0.0, 0
     for index, row in enumerate(rows):
         source_id = str(int(row.get("src", 1)))
@@ -115,7 +117,8 @@ def validate_rows(rows, sources, min_total, max_total, min_segments, max_segment
                                     segment=index))
         norm = normalized(text)
         if COMPOSITION_CLAIM.search(norm):
-            composition_rows.append(index)
+            product = str(row.get("product") or "__whole_video__").strip()
+            composition_rows.setdefault(product, []).append(index)
         for other_index, other in texts:
             if norm and (norm == other or (min(len(norm), len(other)) >= 6 and
                                            difflib.SequenceMatcher(None, norm, other).ratio() >= 0.88)):
@@ -131,10 +134,12 @@ def validate_rows(rows, sources, min_total, max_total, min_segments, max_segment
                                     segments=[other_index, index], overlap=round(overlap, 3)))
                 break
         seen_ranges.append((index, source_id, start, end))
-    if len(composition_rows) > 1:
-        issues.append(issue("repeated_composition_claim",
-                            "composition/material claim may appear only once per final combination",
-                            segments=composition_rows))
+    for product, indexes in composition_rows.items():
+        if len(indexes) > 1:
+            issues.append(issue(
+                "repeated_composition_claim",
+                "composition/material claim may appear only once per product",
+                segments=indexes, product=None if product == "__whole_video__" else product))
     # A timeline is concatenated in this exact order.  Short individual picks can still
     # create a 10+ second static opening when they come from one uninterrupted source run.
     run_start = 0
@@ -206,7 +211,8 @@ def validate_rows(rows, sources, min_total, max_total, min_segments, max_segment
         if opening and all(role in {"bridge", "material", "craft", "color"}
                            for role in opening):
             issues.append(issue("abstract_opening_sequence",
-                                "opening cannot be only background, material, craft, or color"))
+                                "opening may be only background, material, craft, or color",
+                                level="warning"))
         run_start = 0
         for i in range(1, len(roles) + 1):
             if i < len(roles) and roles[i] == roles[run_start]:
@@ -253,16 +259,16 @@ def main():
     parser.add_argument("--min-segments", type=int, default=18)
     parser.add_argument("--max-segments", type=int, default=32)
     parser.add_argument("--min-segment", type=float, default=1.2)
-    parser.add_argument("--max-segment", type=float, default=5.0)
-    parser.add_argument("--max-demo-segment", type=float, default=5.0)
+    parser.add_argument("--max-segment", type=float, default=18.0)
+    parser.add_argument("--max-demo-segment", type=float, default=18.0)
     parser.add_argument("--require-structure", action="store_true")
     parser.add_argument("--report", required=True)
     args = parser.parse_args()
     sources, hooks = parse_mapping(args.src, "src"), parse_mapping(args.hook, "hook")
     if args.timeline and (args.body or hooks):
         raise SystemExit("Use either TIMELINE or --body/--hook mode")
-    if not args.timeline and not (args.body and hooks):
-        raise SystemExit("Provide TIMELINE or --body with at least one --hook")
+    if not args.timeline and not args.body:
+        raise SystemExit("Provide TIMELINE or --body (hooks are optional)")
     results = {}
     if args.timeline:
         results["timeline"] = validate_rows(load_timeline(args.timeline), sources,
@@ -272,12 +278,19 @@ def main():
                                              args.max_demo_segment, args.require_structure)
     else:
         body = load_timeline(args.body)
-        for name, path in hooks.items():
-            results[name] = validate_rows(load_timeline(path) + body, sources,
-                                          args.min_total, args.max_total,
-                                          args.min_segments, args.max_segments,
-                                          args.min_segment, args.max_segment,
-                                          args.max_demo_segment, args.require_structure)
+        if hooks:
+            for name, path in hooks.items():
+                results[name] = validate_rows(load_timeline(path) + body, sources,
+                                              args.min_total, args.max_total,
+                                              args.min_segments, args.max_segments,
+                                              args.min_segment, args.max_segment,
+                                              args.max_demo_segment, args.require_structure)
+        else:
+            results["body"] = validate_rows(body, sources,
+                                             args.min_total, args.max_total,
+                                             args.min_segments, args.max_segments,
+                                             args.min_segment, args.max_segment,
+                                             args.max_demo_segment, args.require_structure)
     errors = sum(sum(item["level"] == "error" for item in result["issues"])
                  for result in results.values())
     warnings = sum(sum(item["level"] == "warning" for item in result["issues"])

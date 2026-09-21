@@ -30,7 +30,7 @@ VOCAB_PROFILE_ENV = "DOUYIN_VOCAB_PROFILE"
 
 # 单段时长上限（与 validate_timeline.py 对齐）。超过这个值的
 # 选段下游一定会被门禁拦下，而且还可能让 cuts 的局部窗口退化，所以在入口就拦。
-MAX_PICK_SECONDS = 5.0
+MAX_PICK_SECONDS = 18.0
 ALLOWED_ROLES = {"hook", "result", "pain", "proof", "fit", "material", "craft",
                  "color", "styling", "scene", "demo", "close", "bridge",
                  "personality", "story", "reaction", "visual"}
@@ -38,6 +38,7 @@ ALLOWED_HOOKS = {"hook_A", "hook_B", "hook_C"}
 
 # 失败时去哪个报告取问题清单（步骤 -> 报告文件）。
 STEP_REPORTS = {"validate": "validation.json", "audit": "bounds_report.json",
+                "audio_acceptance": "audio_acceptance.json",
                 "validate_video_mapping_body": "dual_body_report.json",
                 "qc_body": "qc/body/qc_report.json"}
 
@@ -165,7 +166,7 @@ def normalize_picks(path, media, output, max_pick_seconds=MAX_PICK_SECONDS):
 
     - `src` 只在缺失时补 1。原实现无条件把 `src` 改写成 1，多源 picks 传进来会被
       静默改成单源、切点全错却不报错；现在显式给出别的源直接拒绝。
-    - 单段长度在入口先查一遍（统一上限 5s，与门禁一致）。
+    - 单个完整口播单元在入口先查一遍（完整声音硬上限 18s，与门禁一致）。
       超长选段下游必然失败，而且会让 cuts 的局部窗口退化，在这里失败能省掉
       整条渲染与一次全片转写。
     """
@@ -209,16 +210,16 @@ def normalize_picks(path, media, output, max_pick_seconds=MAX_PICK_SECONDS):
         normalized.append(row)
     if too_long:
         raise RuntimeError(
-            f"picks.json 有 {len(too_long)} 条选段超过 {max_pick_seconds:.1f}s（"
+            f"picks.json 有 {len(too_long)} 条口播单元超过 {max_pick_seconds:.1f}s（"
             + "、".join(too_long[:6])
-            + "）。所有片段必须控制在 1.5-5.0s；请换成句内完整短句后再写 picks.json")
+            + "）。完整口播必须控制在 1.2-18.0s；超过 10s 仅允许无法安全拆分的完整声音单元")
     if not normalized:
         raise RuntimeError("picks.json contains no picks")
     modules = {row["module"] for row in normalized}
     hooks = sorted(name for name in modules if name.startswith("hook_"))
     unknown = sorted(modules - {"body", *hooks})
-    if "body" not in modules or not 1 <= len(hooks) <= 3 or unknown:
-        raise RuntimeError("picks.json requires body plus 1-3 hook_* modules")
+    if "body" not in modules or len(hooks) > 3 or unknown:
+        raise RuntimeError("picks.json requires body and allows up to 3 optional hook_* modules")
     payload = {"offsets": {"1": [0.0, str(Path(media).resolve())]}, "picks": normalized}
     if data.get("words"):
         payload["words"] = data["words"]
@@ -234,8 +235,8 @@ def split_modules(timeline, outdir):
     if not groups.get("body"):
         raise RuntimeError("aligned timeline has no body segments")
     hooks = sorted(name for name in groups if name.startswith("hook_"))
-    if not 1 <= len(hooks) <= 3:
-        raise RuntimeError("aligned timeline must contain 1-3 hook modules")
+    if len(hooks) > 3:
+        raise RuntimeError("aligned timeline allows at most 3 hook modules")
     paths = {"body": str(Path(outdir) / "body.json")}
     write_json(paths["body"], groups["body"])
     for name in hooks:
@@ -246,6 +247,19 @@ def split_modules(timeline, outdir):
 
 def timeline_duration(path):
     return round(sum(float(row["end"]) - float(row["start"]) for row in read_json(path)), 2)
+
+
+def visual_pieces(audio, max_seconds=3.0):
+    """Split synchronized picture rhythm without introducing an audio edit."""
+    source = int(audio.get("src", 1))
+    cursor, end = float(audio["start"]), float(audio["end"])
+    pieces = []
+    while cursor < end - 1e-6:
+        piece_end = min(end, cursor + max_seconds)
+        pieces.append({"src": source, "start": round(cursor, 3),
+                       "end": round(piece_end, 3), "kind": "aroll"})
+        cursor = piece_end
+    return pieces
 
 
 def add_render_options(command, args):
@@ -344,12 +358,15 @@ def report_issues(path, limit=10):
                     continue
                 items.append({"where": name, "code": issue.get("code"),
                               "detail": issue.get("message") or issue.get("segments"),
-                              "segment": issue.get("segment")})
+                              "segment": issue.get("segment"),
+                              "segments": issue.get("segments")})
     elif isinstance(data, dict):
         for issue in (data.get("issues") or []):
             items.append({"segment": issue.get("segment"),
+                          "segments": issue.get("segments"),
                           "code": issue.get("type") or issue.get("code"),
-                          "detail": issue.get("match") or issue.get("diagnosis")
+                          "detail": issue.get("detail") or issue.get("message")
+                                    or issue.get("match") or issue.get("diagnosis")
                                     or issue.get("seconds") or issue.get("token"),
                           "actual": issue.get("actual"),
                           "expected": issue.get("expected")})
@@ -382,13 +399,12 @@ def selection_state(workdir, media, duration, limits, picks_path):
             "candidate_schema": {"i": "candidate id", "s": "start seconds",
                                  "e": "end seconds", "c": "category",
                                  "t": "spoken text", "r": "optional review terms"},
-            "hooks": "1-3 unranked modules named hook_A..hook_C",
-            "body": "common body; every hook+body combination must land at 70-120 seconds unless the user explicitly requests shorter",
+            "hooks": "optional; use hook_A only when the material has a genuinely stronger standalone opening",
+            "body": "required common body; a body-only natural edit is valid",
             # 段数是「钩子 + 正文」并集，钩子也占额度；写多了会被 cuts 合并/剔除，
             # 写少了直接 too_few_segments 打回，所以给出可落地的区间而不是理论值。
-            "segments": "18-32 complete spoken segments for EVERY hook+body combination "
-                        "(hook segments are counted too, so body alone must stay 17-31)",
-            "segment_seconds": "1.5-7.0s per segment; one indivisible demo may reach 8.0s",
+            "segments": "target segment count is supplied by the job-specific editing constraints",
+            "segment_seconds": "1.2-18.0s per complete spoken unit; >10s only when no safe speech split exists; visual shots cut shorter independently",
             "cut_effects": "cuts.py merges adjacent same-role picks (<=0.45s apart), drops "
                            "overlapping/duplicated picks and any segment hitting a banned word, "
                            "so pick 2-4 segments more than the target floor",
@@ -616,6 +632,18 @@ def main():
                                       "steps": runner.steps})
             print(f"pipeline: stopped_after_audit; summary={summary_path}")
             return
+        # This 16 kHz / 32 kbps preview is generated before any HD video encode.  Its
+        # report replays the locked source ASR at every head, tail, and concatenation
+        # point; a failure returns to automatic candidate repair instead of waiting for
+        # a human ``need_manual`` decision.
+        runner.run("audio_acceptance", [
+            sys.executable, SCRIPTS / "audio_acceptance.py", timeline, media,
+            selected_words / "word_map.json",
+            "--preview", workdir / "audio_preview.m4a",
+            "--report", workdir / "audio_acceptance.json",
+            "--backend", args.backend,
+            *(["--model", args.model] if args.model else []),
+        ])
         dual_dir = workdir / "dual_timelines"
         dual_dir.mkdir(parents=True, exist_ok=True)
         dual_timelines = {}
@@ -624,9 +652,7 @@ def main():
             dual_rows = [{
                 "section": section,
                 "audio": row,
-                "video": [{"src": int(row.get("src", 1)),
-                           "start": float(row["start"]), "end": float(row["end"]),
-                           "kind": "aroll"}],
+                "video": visual_pieces(row),
             } for row in read_json(path)]
             target = dual_dir / f"{name}.json"
             write_json(target, dual_rows)
@@ -654,6 +680,8 @@ def main():
                 "state": "ready_to_render", "publish_ready": False,
                 "source": str(media), "mode": limits["mode"],
                 "segments": landing_counts(workdir),
+                "audio_acceptance": str((workdir / "audio_acceptance.json").resolve()),
+                "audio_preview": str((workdir / "audio_preview.m4a").resolve()),
                 "dual_timelines": dual_timelines,
                 "steps": runner.steps,
             }

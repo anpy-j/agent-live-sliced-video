@@ -4,15 +4,26 @@ import argparse
 import bisect
 import difflib
 import json
+import re
 
 try:
-    from .textnorm import content_rejection
+    from .dependency_graph import resolve_dependency_closure
+    from .textnorm import (content_rejection, context_dependent_start,
+                           incomplete_ending)
 except ImportError:  # Script entry point: its directory is already on sys.path.
-    from textnorm import content_rejection
+    from dependency_graph import resolve_dependency_closure
+    from textnorm import (content_rejection, context_dependent_start,
+                          incomplete_ending)
 
 # 常规片段下限；验收硬门槛是 1.2 秒。
 MIN_SPEECH = 1.5
 MAX_SPEECH = 5.0
+MAX_COMPLETE_SPEECH = 18.0
+
+LEADING_REFERENCE_RE = re.compile(
+    r"^(?:(?:这|那)(?:个|种|样|条|套|双|件|款)|这些|那些|它|它们|"
+    r"穿上以后|腰部这里|它整个就是|你看这个)"
+)
 
 CATEGORIES = {
     "hook": ("一定", "千万", "注意", "告诉你", "说实话", "真的",
@@ -91,6 +102,167 @@ def quality(row):
     return score
 
 
+def dependency_metadata(rows):
+    """Attach stable speech-unit identity and immediate source context.
+
+    Candidate text is never rewritten.  Context fields are review-only and dependency
+    flags make it impossible for a planner to silently promote a fragment to a
+    standalone clip.
+    """
+    result = []
+    for index, source in enumerate(rows):
+        row = dict(source)
+        text = str(row.get("text") or "").strip()
+        previous = rows[index - 1] if index else None
+        following = rows[index + 1] if index + 1 < len(rows) else None
+        requires_previous = bool(context_dependent_start(text) or
+                                 LEADING_REFERENCE_RE.match(text))
+        requires_next = bool(incomplete_ending(text))
+        utterance_id = str(row.get("utterance_id") or f"utterance-{index:06d}")
+        duration = float(row.get("end", 0)) - float(row.get("start", 0))
+        is_long = duration > MAX_SPEECH
+        row.update({
+            "utterance_id": utterance_id,
+            "atom_id": str(row.get("atom_id") or f"{utterance_id}:0"),
+            "previous_text": str((previous or {}).get("text") or ""),
+            "current_text": text,
+            "next_text": str((following or {}).get("text") or ""),
+            "requires_previous": requires_previous,
+            "requires_next": requires_next,
+            "safe_standalone": not (requires_previous or requires_next),
+            "required_atom_ids": ([str((previous or {}).get("atom_id") or
+                                        f"utterance-{index - 1:06d}:0")]
+                                  if requires_previous and previous else []) +
+                                 ([str((following or {}).get("atom_id") or
+                                        f"utterance-{index + 1:06d}:0")]
+                                  if requires_next and following else []),
+        })
+        if is_long:
+            row["long_complete_utterance"] = True
+        result.append(row)
+    return result
+
+
+def dependency_aware_deduplicate(rows, threshold=0.90):
+    """Deduplicate complete candidate groups without orphaning a live dependant."""
+    rows = [dict(row, _graph_id=index) for index, row in enumerate(rows)]
+    referenced = {str(atom) for row in rows
+                  for atom in (row.get("required_atom_ids") or [])}
+    selected: list[dict] = []
+    norms: list[str] = []
+    for row in sorted(rows, key=lambda item: (-quality(item), float(item.get("start", 0)))):
+        current = normalize(row.get("text", ""))
+        if not current:
+            continue
+        duplicate = next((index for index, old in enumerate(norms)
+                          if current == old or (min(len(current), len(old)) >= 8 and
+                          difflib.SequenceMatcher(None, current, old).ratio() >= threshold)), None)
+        if duplicate is None:
+            selected.append(row)
+            norms.append(current)
+            continue
+        old = selected[duplicate]
+        current_protected = str(row.get("atom_id")) in referenced
+        old_protected = str(old.get("atom_id")) in referenced
+        # If both source atoms are live dependencies, they are not interchangeable:
+        # keep both exact neighbours.  If only one is referenced, it wins even when
+        # the other isolated sentence has a slightly better keyword score.
+        if current_protected and old_protected:
+            selected.append(row)
+            norms.append(current)
+        elif current_protected and not old_protected:
+            selected[duplicate] = row
+            norms[duplicate] = current
+    selected_ids = {int(row["_graph_id"]) for row in selected}
+    resolution = resolve_dependency_closure(rows, selected_ids, id_key="_graph_id")
+    result = [row for row in rows if int(row["_graph_id"]) in resolution.valid_ids]
+    for row in result:
+        row.pop("_graph_id", None)
+    return result
+
+
+def should_merge_speech_units(left: dict, right: dict,
+                              min_duration: float = 1.5,
+                              max_duration: float = 18.0,
+                              max_gap: float = 0.40) -> bool:
+    gap = float(right.get("start", 0)) - float(left.get("end", 0))
+    total_dur = float(right.get("end", 0)) - float(left.get("start", 0))
+    if gap < -0.05 or gap > max_gap or total_dur > max_duration:
+        return False
+    dur_left = float(left.get("end", 0)) - float(left.get("start", 0))
+    dur_right = float(right.get("end", 0)) - float(right.get("start", 0))
+    text_left = str(left.get("text") or "").strip()
+    text_right = str(right.get("text") or "").strip()
+
+    rej_left = content_rejection(text_left)
+    rej_right = content_rejection(text_right)
+    if rej_left not in {None, "context_dependent_start", "incomplete_sentence"}:
+        return False
+    if rej_right not in {None, "context_dependent_start", "incomplete_sentence"}:
+        return False
+
+    if dur_left < min_duration or dur_right < min_duration:
+        return True
+    if incomplete_ending(text_left) is not None:
+        return True
+    if context_dependent_start(text_right) is not None or LEADING_REFERENCE_RE.match(text_right):
+        return True
+    if text_left[-1:] not in "。！？!?" and total_dur <= 10.0 and gap <= 0.25:
+        return True
+    return False
+
+
+def merge_text_parts(text_a: str, text_b: str) -> str:
+    text_a = text_a.rstrip(" ，,")
+    text_b = text_b.lstrip(" ，,")
+    if not text_a:
+        return text_b
+    if not text_b:
+        return text_a
+    if text_a[-1] in "，,。！？!?；;：:" or text_b[0] in "，,。！？!?；;：:":
+        return text_a + text_b
+    return text_a + "，" + text_b
+
+
+def merge_short_units(rows: list[dict], min_duration: float = 1.5,
+                      max_duration: float = 18.0, max_gap: float = 0.40) -> list[dict]:
+    """Merge short fragments (<1.5s), dependent clauses, and continuations into natural speech units."""
+    if not rows:
+        return []
+    sorted_rows = sorted(rows, key=lambda item: float(item.get("start", 0)))
+    merged: list[dict] = []
+    for item in sorted_rows:
+        row = dict(item)
+        if not merged:
+            merged.append(row)
+            continue
+        prev = merged[-1]
+        if should_merge_speech_units(prev, row, min_duration, max_duration, max_gap):
+            prev["end"] = max(float(prev.get("end", 0)), float(row.get("end", 0)))
+            prev["text"] = merge_text_parts(str(prev.get("text") or ""), str(row.get("text") or ""))
+            if row.get("review_terms"):
+                existing = prev.get("review_terms") or []
+                prev["review_terms"] = sorted(set(existing) | set(row["review_terms"]))
+        else:
+            merged.append(row)
+
+    result: list[dict] = []
+    for row in merged:
+        if result:
+            prev = result[-1]
+            gap = float(row.get("start", 0)) - float(prev.get("end", 0))
+            total_dur = float(row.get("end", 0)) - float(prev.get("start", 0))
+            dur_row = float(row.get("end", 0)) - float(row.get("start", 0))
+            if (dur_row < min_duration and -0.05 <= gap <= max_gap and total_dur <= max_duration
+                    and content_rejection(str(row.get("text") or "")) in {None, "context_dependent_start", "incomplete_sentence"}
+                    and content_rejection(str(prev.get("text") or "")) in {None, "context_dependent_start", "incomplete_sentence"}):
+                prev["end"] = max(float(prev.get("end", 0)), float(row.get("end", 0)))
+                prev["text"] = merge_text_parts(str(prev.get("text") or ""), str(row.get("text") or ""))
+                continue
+        result.append(row)
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("input")
@@ -107,25 +279,23 @@ def main():
     parser.add_argument("--compact", action="store_true",
                         help="输出供模型读取的短键紧凑 JSON")
     args = parser.parse_args()
-    rows = json.load(open(args.input, encoding="utf-8"))
-    # 只把可直接进入编排的剪辑原子暴露给 AI。过短片段无法可靠对齐，过长片段
-    # 即使被选中也会在后续门禁失败；在候选阶段剔除比渲染前才报错更省时间。
-    rows = [row for row in rows if MIN_SPEECH <=
-            float(row.get("end", 0)) - float(row.get("start", 0)) <= MAX_SPEECH
-            and not content_rejection(str(row.get("text", "")))]
-    ranked = sorted(rows, key=lambda row: (-quality(row), float(row.get("start", 0))))
-    kept, norms = [], []
-    for row in ranked:
-        norm = normalize(row.get("text", ""))
-        if not norm or any(norm == old or (min(len(norm), len(old)) >= 8 and
-                           difflib.SequenceMatcher(None, norm, old).ratio() >= args.near_duplicate)
-                           for old in norms):
-            continue
+    with open(args.input, encoding="utf-8") as handle:
+        rows = json.load(handle)
+    # 前置短句智能合并：依据间隙 (<0.4s)、停顿、标点和语义依赖，将 <1.5s 的
+    # 短促转折或修饰句前置合并为 1.5–18 秒的自然声音单元，避免 60% 可用上下文在
+    # 筛选前被简单物理丢弃。
+    rows = merge_short_units(rows, min_duration=MIN_SPEECH, max_duration=MAX_COMPLETE_SPEECH, max_gap=0.40)
+    rows = dependency_metadata(rows)
+    rows = [row for row in rows if 1.2 <=
+            float(row.get("end", 0)) - float(row.get("start", 0)) <= MAX_COMPLETE_SPEECH
+            and content_rejection(str(row.get("text", ""))) in
+            {None, "context_dependent_start", "incomplete_sentence"}]
+    kept = dependency_aware_deduplicate(rows, args.near_duplicate)
+    for row in kept:
         item = dict(row)
         item["category"] = category(item.get("text", ""))
         item["quality_hint"] = quality(item)
-        kept.append(item)
-        norms.append(norm)
+        row.update(item)
     buckets = {name: [] for name in list(CATEGORIES) + ["other"]}
     for row in kept:
         buckets[row["category"]].append(row)
@@ -162,7 +332,18 @@ def main():
             item = {"i": index, "s": round(float(row.get("start", 0)), 3),
                     "e": round(float(row.get("end", 0)), 3),
                     "c": row.get("category", "other"), "t": row.get("text", ""),
-                    "q": int(row.get("quality_hint", 0))}
+                    "q": int(row.get("quality_hint", 0)),
+                    "utterance_id": row["utterance_id"],
+                    "atom_id": row["atom_id"],
+                    "previous_text": row["previous_text"],
+                    "current_text": row["current_text"],
+                    "next_text": row["next_text"],
+                    "requires_previous": row["requires_previous"],
+                    "requires_next": row["requires_next"],
+                    "safe_standalone": row["safe_standalone"],
+                    "required_atom_ids": row["required_atom_ids"]}
+            if row.get("long_complete_utterance"):
+                item["long_complete_utterance"] = True
             if row.get("review_terms"):
                 item["r"] = row["review_terms"]
             payload.append(item)

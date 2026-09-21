@@ -93,7 +93,7 @@ def vocab_identity():
 
 
 def cache_key(media, subtitle, asr_config, no_words):
-    return {"version": 5, "media": fingerprint(media),
+    return {"version": 6, "media": fingerprint(media),
             "subtitle": fingerprint(subtitle) if subtitle else None,
             "mode": "subtitle" if subtitle else "whisper", "asr": asr_config,
             "no_words": bool(no_words), "vocab": vocab_identity()}
@@ -278,7 +278,7 @@ def words_from_subtitles(blocks):
 
 
 def merge_blocks(blocks, max_gap=0.55, max_dur=6.5, max_blocks=3,
-                 hard_max_dur=10.0, hard_max_blocks=6):
+                 hard_max_dur=18.0, hard_max_blocks=8):
     """一个字幕块不等于一句完整话：按语义/停顿合并到句尾完整为止。
     通常间隔 ≤0.55s、累计 ≤6.5s、最多 3 块；明显承接块可扩到硬上限，
     避免把一句话切成两个无法独立理解的片段。"""
@@ -317,6 +317,56 @@ def merge_blocks(blocks, max_gap=0.55, max_dur=6.5, max_blocks=3,
     return out
 
 
+def safe_split_utterance(sentence, words, max_duration=10.0, min_duration=1.2,
+                         hard_max_duration=18.0):
+    """Split at safe boundaries; retain a complete unsplittable unit up to 18s."""
+    start, end = float(sentence["start"]), float(sentence["end"])
+    if end - start <= max_duration + 1e-6:
+        return [dict(sentence)]
+    tokens = [word for word in words
+              if not word.get("boundary_only")
+              and float(word.get("e", 0)) > start
+              and float(word.get("s", 0)) < end]
+    if len(tokens) < 2:
+        return [dict(sentence)]
+    groups, cursor = [], 0
+    while cursor < len(tokens):
+        group_start = max(start, float(tokens[cursor]["s"]))
+        if end - group_start <= max_duration + 1e-6:
+            boundary = len(tokens)
+        else:
+            safe = []
+            for index in range(cursor, len(tokens) - 1):
+                token_end = float(tokens[index]["e"])
+                left_text = "".join(str(item.get("w") or "")
+                                    for item in tokens[cursor:index + 1]).strip()
+                right_text = "".join(str(item.get("w") or "")
+                                     for item in tokens[index + 1:]).strip()
+                if token_end - group_start > max_duration + 1e-6:
+                    break
+                if (token_end - group_start >= min_duration
+                        and left_text[-1:] in FINAL_PUNCT
+                        and incomplete_ending(left_text) is None
+                        and context_dependent_start(right_text) is None):
+                    safe.append(index + 1)
+            if not safe:
+                return [dict(sentence)]
+            boundary = safe[-1]
+        part = tokens[cursor:boundary]
+        part_text = "".join(str(item.get("w") or "") for item in part).strip()
+        part_start = max(start, float(part[0]["s"]))
+        part_end = min(end, float(part[-1]["e"]))
+        if (part_end - part_start < min_duration or not part_text
+                or incomplete_ending(part_text) is not None):
+            return [dict(sentence)]
+        groups.append({"start": round(part_start, 3), "end": round(part_end, 3),
+                       "text": simp(part_text), "split_from_long_utterance": True})
+        cursor = boundary
+    return groups if len(groups) > 1 and all(
+        float(item["end"]) - float(item["start"]) <= max_duration + 1e-6
+        for item in groups) else [dict(sentence)]
+
+
 def whisper_full(wav, transcriber, want_words=True):
     segs = transcriber.transcribe(wav, language="zh", word_timestamps=want_words,
                                   initial_prompt=PROMPT_ZH, beam_size=5)
@@ -339,14 +389,16 @@ def is_cjk(c):
 
 def usable(s):
     t = s["text"]
-    if len(t) < 5:
+    if len(t) < 2:
         return False
     han = sum(1 for c in t if is_cjk(c))
     if han / max(1, len(t)) < 0.5:
         return False
     if BAD_RE.search(t):
         return False
-    if content_rejection(t):
+    # Keep exact adjacent context atoms for later dependency binding.  Production
+    # chatter, malformed ASR and other deterministic garbage still stop here.
+    if content_rejection(t) not in {None, "context_dependent_start", "incomplete_sentence"}:
         return False
     if s["end"] - s["start"] < 0.5:
         return False
@@ -399,7 +451,7 @@ def main():
         wav = (os.path.join(workdir, "audio16k.wav") if subtitle
                else extract_audio(media, workdir))
 
-        transcript_key = {"version": 3, "media": fingerprint(media),
+        transcript_key = {"version": 4, "media": fingerprint(media),
                           "subtitle": fingerprint(subtitle) if subtitle else None,
                           "mode": "subtitle" if subtitle else "whisper", "asr": asr_config,
                           "no_words": bool(a.no_words)}
@@ -427,6 +479,10 @@ def main():
                 mode = f"Whisper {transcriber.backend} 模式（{len(sentences)} 句）"
                 if words:
                     dump_json(os.path.join(workdir, "words.json"), words)
+            split_sentences = []
+            for sentence in sentences:
+                split_sentences.extend(safe_split_utterance(sentence, words))
+            sentences = split_sentences
             dump_json(os.path.join(workdir, "sentences.json"), sentences)
             with open(os.path.join(workdir, "transcript_manifest.json"), "w",
                       encoding="utf-8") as handle:

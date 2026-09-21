@@ -124,14 +124,20 @@ def main():
         input_index += 1
 
         remaining = audio_duration
-        for piece_index, piece in enumerate(block.get("video") or []):
+        video_pieces = list(block.get("video") or [])
+        for piece_index, piece in enumerate(video_pieces):
             if remaining <= 0.001:
                 break
             video_src = int(piece.get("src", -1))
             if video_src not in sources:
                 raise SystemExit(f"Block {block_index}: missing video source {video_src}")
             start, end = float(piece["start"]), float(piece["end"])
-            use_duration = min(end - start, remaining)
+            piece_dur = end - start
+            is_last = (piece_index == len(video_pieces) - 1)
+            if is_last and 0.001 < remaining - piece_dur <= 0.08:
+                use_duration = remaining
+            else:
+                use_duration = min(piece_dur, remaining)
             if use_duration <= 0:
                 raise SystemExit(f"Block {block_index} piece {piece_index}: invalid duration")
             command += ["-ss", f"{start:.6f}", "-t", f"{use_duration:.6f}",
