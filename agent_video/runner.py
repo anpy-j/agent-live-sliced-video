@@ -35,8 +35,9 @@ MAX_PICK_SECONDS = 18.0
 MAX_CONTINUOUS_SOURCE_SECONDS = 10.0
 MAX_ROLE_CLUSTER_SECONDS = 8.0
 CONTIGUOUS_GAP_SECONDS = 0.75
-# 语义审核分批大小：每批 30–40 句，既避免单次调用超时，也保证逐条覆盖校验仍然精确。
-SEMANTIC_AUDIT_BATCH_SIZE = 35
+# WorkBuddy 在 35 条长上下文候选上仍可能跑满 15 分钟硬超时。更小的批次
+# 减少单次结构化输出负担；总候选仍全部审核，不牺牲覆盖率。
+SEMANTIC_AUDIT_BATCH_SIZE = 20
 # 模型偶尔漏判个别候选；先对漏判项定向重试，仍缺失时按「不采用」收口，
 # 而不是因单条格式瑕疵把整个任务判死。
 SEMANTIC_AUDIT_RETRY_LIMIT = 2
@@ -890,7 +891,7 @@ class JobRunner:
             return cached, {"cached": True, "seconds": 0.0,
                             "usage": {"input_tokens": 0, "output_tokens": 0}}
 
-        # 候选池不再有 80 条上限，因此审核按 30–40 句一批分批调用，合并全部
+        # 候选池不再有 80 条上限，因此审核按小批分批调用，合并全部
         # keep 结果后再进入编排。每批独立做逐条覆盖校验，避免大批次被截断。
         batches = [candidates[index:index + SEMANTIC_AUDIT_BATCH_SIZE]
                    for index in range(0, len(candidates), SEMANTIC_AUDIT_BATCH_SIZE)]
