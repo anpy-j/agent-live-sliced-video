@@ -7,6 +7,7 @@ data/*.db
 data/*.db-*
 data/*.lock
 data/*.log
+data/*.pid
 data/runtime.json
 data/skill-history/
 workspaces/*

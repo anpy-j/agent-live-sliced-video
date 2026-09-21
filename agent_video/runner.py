@@ -238,6 +238,7 @@ class JobRunner:
             "process_active": bool(process and process.poll() is None),
             "process_id": process.pid if process and process.poll() is None else None,
         }
+        return kept
 
     def _heartbeat(self, job_id: str, stop: threading.Event) -> None:
         """Keep the job visibly alive while a CLI is silent or buffering output."""
