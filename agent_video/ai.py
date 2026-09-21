@@ -12,6 +12,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 
+# 单次 AI 编排/语义审核调用的上限。WorkBuddy 在素材较大、并发较高时单批可能
+# 远超 6 分钟；6 分钟的旧上限会把正常但较慢的调用误判为失败，导致任务被阻塞。
+DEFAULT_AI_TIMEOUT_SECONDS = 900
+
 WORKBUDDY_MODELS = [
     ("auto", "自动选择"),
     ("glm-5v-turbo", "GLM 5V Turbo"),
@@ -212,7 +216,7 @@ class CliProvider:
 
     def generate_visual_plan(self, *, model: str, prompt: str, images: list[Path], cwd: Path,
                              on_process: Callable[[subprocess.Popen[str]], None] | None = None,
-                             timeout: int = 360) -> dict[str, Any]:
+                             timeout: int = DEFAULT_AI_TIMEOUT_SECONDS) -> dict[str, Any]:
         raise ValueError(f"{self.display_name} 暂不支持多模态混剪")
 
     def validate_model(self, model: str) -> None:
@@ -458,7 +462,7 @@ class WorkBuddyCli(CliProvider):
 
     def generate_visual_plan(self, *, model: str, prompt: str, images: list[Path], cwd: Path,
                              on_process: Callable[[subprocess.Popen[str]], None] | None = None,
-                             timeout: int = 360) -> dict[str, Any]:
+                             timeout: int = DEFAULT_AI_TIMEOUT_SECONDS) -> dict[str, Any]:
         self._ensure_available()
         self.validate_vision_model(model)
         image_paths = "\n".join(f"- {path.resolve()}" for path in images)
@@ -489,7 +493,7 @@ class WorkBuddyCli(CliProvider):
     def generate_plan(self, *, model: str, prompt: str, cwd: Path,
                       schema: dict[str, Any] = PLAN_SCHEMA,
                       on_process: Callable[[subprocess.Popen[str]], None] | None = None,
-                      timeout: int = 360) -> dict[str, Any]:
+                      timeout: int = DEFAULT_AI_TIMEOUT_SECONDS) -> dict[str, Any]:
         self._ensure_available()
         self.validate_model(model)
         command = [
@@ -547,7 +551,7 @@ class AntigravityCli(CliProvider):
     def generate_plan(self, *, model: str, prompt: str, cwd: Path,
                       schema: dict[str, Any] = PLAN_SCHEMA,
                       on_process: Callable[[subprocess.Popen[str]], None] | None = None,
-                      timeout: int = 360) -> dict[str, Any]:
+                      timeout: int = DEFAULT_AI_TIMEOUT_SECONDS) -> dict[str, Any]:
         self._ensure_available()
         self.validate_model(model)
         command = [
@@ -579,7 +583,7 @@ class CodexCli(CliProvider):
 
     def generate_visual_plan(self, *, model: str, prompt: str, images: list[Path], cwd: Path,
                              on_process: Callable[[subprocess.Popen[str]], None] | None = None,
-                             timeout: int = 360) -> dict[str, Any]:
+                             timeout: int = DEFAULT_AI_TIMEOUT_SECONDS) -> dict[str, Any]:
         self._ensure_available()
         self.validate_vision_model(model)
         started = time.monotonic()
@@ -620,7 +624,7 @@ class CodexCli(CliProvider):
     def generate_plan(self, *, model: str, prompt: str, cwd: Path,
                       schema: dict[str, Any] = PLAN_SCHEMA,
                       on_process: Callable[[subprocess.Popen[str]], None] | None = None,
-                      timeout: int = 360) -> dict[str, Any]:
+                      timeout: int = DEFAULT_AI_TIMEOUT_SECONDS) -> dict[str, Any]:
         self._ensure_available()
         self.validate_model(model)
         started = time.monotonic()
@@ -728,7 +732,7 @@ class OpenCodeCli(CliProvider):
     def generate_plan(self, *, model: str, prompt: str, cwd: Path,
                       schema: dict[str, Any] = PLAN_SCHEMA,
                       on_process: Callable[[subprocess.Popen[str]], None] | None = None,
-                      timeout: int = 360) -> dict[str, Any]:
+                      timeout: int = DEFAULT_AI_TIMEOUT_SECONDS) -> dict[str, Any]:
         self._ensure_available()
         self.validate_model(model)
         schema_json = json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
@@ -913,7 +917,7 @@ class MulticaCli(CliProvider):
                       schema: dict[str, Any] = PLAN_SCHEMA,
                       on_process: Callable[[subprocess.Popen[str]], None] | None = None,
                       should_cancel: Callable[[], bool] | None = None,
-                      timeout: int = 360) -> dict[str, Any]:
+                      timeout: int = DEFAULT_AI_TIMEOUT_SECONDS) -> dict[str, Any]:
         self._ensure_available()
         self.validate_model(model)
         schema_json = json.dumps(schema, ensure_ascii=False, separators=(",", ":"))

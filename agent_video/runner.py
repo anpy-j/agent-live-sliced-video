@@ -37,6 +37,9 @@ MAX_ROLE_CLUSTER_SECONDS = 8.0
 CONTIGUOUS_GAP_SECONDS = 0.75
 # 语义审核分批大小：每批 30–40 句，既避免单次调用超时，也保证逐条覆盖校验仍然精确。
 SEMANTIC_AUDIT_BATCH_SIZE = 35
+# 模型偶尔漏判个别候选；先对漏判项定向重试，仍缺失时按「不采用」收口，
+# 而不是因单条格式瑕疵把整个任务判死。
+SEMANTIC_AUDIT_RETRY_LIMIT = 2
 SEMANTIC_AUDIT_POLICY_VERSION = 4
 DEPENDENCY_REJECTIONS = frozenset({"context_dependent_start", "incomplete_sentence"})
 
@@ -913,22 +916,55 @@ class JobRunner:
                 kwargs["should_cancel"] = lambda: (
                     (self.store.get_job(job["id"]) or {}).get("status") == "cancelled"
                 )
-            result = provider.generate_plan(**kwargs)
-            batch_decisions = list(result.get("plan", {}).get("picks") or [])
-            batch_main_products.append(str(result.get("plan", {}).get("main_product") or "").strip())
-            raw_batches.append(result.get("raw"))
             expected = {int(item.get("i", -1)) for item in batch}
-            returned = [int(item.get("candidate_id", -1)) for item in batch_decisions]
-            if len(returned) != len(set(returned)) or set(returned) != expected:
-                missing = sorted(expected - set(returned))
-                unknown = sorted(set(returned) - expected)
-                raise ValueError(
-                    f"AI 语义审核第 {batch_index}/{len(batches)} 批没有逐条覆盖候选："
-                    f"missing={missing[:8]}, unknown={unknown[:8]}")
+            covered_all: dict[int, dict[str, Any]] = {}
+            batch_product = ""
+            unresolved = list(batch)
+            for _audit_attempt in range(SEMANTIC_AUDIT_RETRY_LIMIT + 1):
+                if not unresolved:
+                    break
+                attempt_kwargs = dict(kwargs)
+                attempt_kwargs["prompt"] = self._semantic_audit_prompt(job, unresolved)
+                result = provider.generate_plan(**attempt_kwargs)
+                if not batch_product:
+                    batch_product = str(
+                        result.get("plan", {}).get("main_product") or "").strip()
+                raw_batches.append(result.get("raw"))
+                total_seconds += float(result.get("seconds") or 0)
+                for key in ("input_tokens", "output_tokens"):
+                    total_usage[key] += int((result.get("usage") or {}).get(key) or 0)
+                for item in result.get("plan", {}).get("picks") or []:
+                    try:
+                        candidate_id = int(item.get("candidate_id", -1))
+                    except (TypeError, ValueError):
+                        continue
+                    if candidate_id in expected and candidate_id not in covered_all:
+                        covered_all[candidate_id] = item
+                missing = sorted(expected - set(covered_all))
+                if not missing:
+                    break
+                unresolved = [item for item in batch
+                              if int(item.get("i", -1)) in set(missing)]
+            batch_decisions = list(covered_all.values())
+            batch_main_products.append(batch_product)
+            unresolved_ids = sorted(expected - set(covered_all))
+            if unresolved_ids:
+                self.store.add_event(
+                    job["id"], "edit_plan", "warning", "ai_semantic_audit_incomplete",
+                    f"第 {batch_index}/{len(batches)} 批仍有 {len(unresolved_ids)} 条未审核，"
+                    "已按不采用处理",
+                    {"batch": batch_index, "missing": unresolved_ids[:20]})
+                for missing_id in unresolved_ids:
+                    batch_decisions.append({
+                        "candidate_id": missing_id, "verdict": "reject",
+                        "standalone": False, "subject_explicit": False, "referent": "",
+                        "requires_previous": False, "requires_next": False,
+                        "opening_suitability": 0, "information_gain": 0,
+                        "content_function": "discard", "main_product_relevant": False,
+                        "content_type": "low_information", "selling_value": 0,
+                        "reason": "AI 未返回该候选判定，按不采用处理",
+                    })
             decisions.extend(batch_decisions)
-            total_seconds += float(result.get("seconds") or 0)
-            for key in ("input_tokens", "output_tokens"):
-                total_usage[key] += int((result.get("usage") or {}).get(key) or 0)
             if len(batches) > 1:
                 self.store.update_stage(
                     job["id"], "edit_plan", status="running",
@@ -1173,8 +1209,11 @@ class JobRunner:
                                     "application/json")
             self._validate_edit_plan(plan)
             self._validate_candidate_picks(plan, candidates)
-            issues = self._plan_preflight_issues(plan, limits)
-            attempts[0]["issues"] = issues
+            attempts[0]["issues"] = self._plan_preflight_issues(plan, limits)
+            issues = attempts[0]["issues"]
+            # 增量局部修复只允许「越修越好」：任何一轮返回不合法或仍被阻止的方案，
+            # 都回退到最近一次通过预检的方案，而不是把整个任务判死。
+            best_plan, best_issues = plan, issues
             refinement_issues = self._refinement_issues(issues)
             initially_used = {int(item.get("_candidate_id")) for item in plan.get("picks", [])
                               if item.get("_candidate_id") is not None}
@@ -1210,11 +1249,11 @@ class JobRunner:
                     plan = proposed
                 else:
                     plan = self._merge_incremental_plan(plan, proposed)
-                self._validate_edit_plan(plan)
-                self._validate_candidate_picks(plan, candidates)
-                refined_issues = self._plan_preflight_issues(plan, limits)
-                attempts[-1]["issues"] = refined_issues
-                second_round_issues = self._refinement_issues(refined_issues)
+                refined_issues, ready = self._assess_candidate_plan(
+                    plan, candidates, limits, attempts[-1])
+                if ready:
+                    best_plan, best_issues = plan, refined_issues
+                second_round_issues = self._refinement_issues(refined_issues) if ready else []
                 if second_round_issues and incremental_protocol:
                     used = {int(item.get("_candidate_id")) for item in plan.get("picks", [])
                             if item.get("_candidate_id") is not None}
@@ -1236,13 +1275,13 @@ class JobRunner:
                                      "usage": second.get("usage") or {}})
                     plan = self._merge_incremental_plan(
                         plan, self._hydrate_candidate_ids(second["plan"], remaining))
-                    self._validate_edit_plan(plan)
-                    self._validate_candidate_picks(plan, candidates)
-                    refined_issues = self._plan_preflight_issues(plan, limits)
-                    attempts[-1]["issues"] = refined_issues
+                    refined_issues, ready = self._assess_candidate_plan(
+                        plan, candidates, limits, attempts[-1])
+                    if ready:
+                        best_plan, best_issues = plan, refined_issues
                     result = second
-                blocking_issues = [item for item in refined_issues
-                                   if item.get("level", "error") == "error"]
+                plan, refined_issues = best_plan, best_issues
+                blocking_issues = self._blocking_plan_issues(refined_issues)
                 if blocking_issues:
                     raise PlanRefinementError("AI 局部修复后仍未通过编排预检：" +
                                               self._format_plan_issues(blocking_issues))
@@ -1911,6 +1950,27 @@ class JobRunner:
         return [item for item in issues
                 if item.get("level", "error") == "error"
                 or item.get("code") in useful_soft_codes]
+
+    def _assess_candidate_plan(
+            self, plan: dict[str, Any], candidates: list[dict[str, Any]],
+            limits: dict[str, int], record: dict[str, Any]
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Validate one candidate plan and record its issues on the attempt.
+
+        Returns the preflight issues plus whether the plan is emission-ready
+        (structurally valid and free of blocking issues).  A local repair round
+        that yields an invalid plan must never discard the last valid one.
+        """
+        try:
+            self._validate_edit_plan(plan)
+            self._validate_candidate_picks(plan, candidates)
+        except (TypeError, ValueError) as exc:
+            issues = [{"code": "invalid_plan", "level": "error", "detail": str(exc)}]
+            record["issues"] = issues
+            return issues, False
+        issues = self._plan_preflight_issues(plan, limits)
+        record["issues"] = issues
+        return issues, not self._blocking_plan_issues(issues)
 
     def _revision_feedback(self, job: dict[str, Any], scope: str) -> str:
         revision = self._read_json(
@@ -3168,33 +3228,35 @@ class JobRunner:
         except Exception:
             duration = max(1.0, duration)
 
-        if not target.is_file() or target.stat().st_size <= 0:
+        # 重跑同一任务时 deliverables/ 下可能残留上一次的旧成片。进入降级链意味着
+        # 常规渲染已经失败，该残留文件必然是过期产物；必须无条件重新生成，
+        # 否则会把旧成片当作本次结果重新登记，表现为“重跑后没有新成片”。
+        partial.unlink(missing_ok=True)
+        copy_command = [
+            "ffmpeg", "-y", "-v", "error", "-ss", "0", "-i", str(source),
+            "-t", f"{duration:.3f}", "-map", "0:v:0", "-map", "0:a?",
+            "-c", "copy", "-avoid_negative_ts", "make_zero", "-movflags", "+faststart",
+            str(partial),
+        ]
+        try:
+            self._run_delivery_step(job_id, "紧急快速剪辑", copy_command, steps, 0.85)
+        except (OSError, RuntimeError):
             partial.unlink(missing_ok=True)
-            copy_command = [
+            transcode_command = [
                 "ffmpeg", "-y", "-v", "error", "-ss", "0", "-i", str(source),
                 "-t", f"{duration:.3f}", "-map", "0:v:0", "-map", "0:a?",
-                "-c", "copy", "-avoid_negative_ts", "make_zero", "-movflags", "+faststart",
-                str(partial),
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(partial),
             ]
             try:
-                self._run_delivery_step(job_id, "紧急快速剪辑", copy_command, steps, 0.85)
+                self._run_delivery_step(
+                    job_id, "紧急兼容转码", transcode_command, steps, 0.9)
             except (OSError, RuntimeError):
                 partial.unlink(missing_ok=True)
-                transcode_command = [
-                    "ffmpeg", "-y", "-v", "error", "-ss", "0", "-i", str(source),
-                    "-t", f"{duration:.3f}", "-map", "0:v:0", "-map", "0:a?",
-                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                    "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(partial),
-                ]
-                try:
-                    self._run_delivery_step(
-                        job_id, "紧急兼容转码", transcode_command, steps, 0.9)
-                except (OSError, RuntimeError):
-                    partial.unlink(missing_ok=True)
-                    shutil.copy2(source, partial)
-                    steps.append({"name": "原素材保底交付", "ok": True,
-                                  "degraded": True})
-            partial.replace(target)
+                shutil.copy2(source, partial)
+                steps.append({"name": "原素材保底交付", "ok": True,
+                              "degraded": True})
+        partial.replace(target)
 
         self.store.add_artifact(job_id, "delivery", "video",
                                 f"自动降级成片 · {target.name}", target, "video/mp4")

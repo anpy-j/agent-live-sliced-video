@@ -1,5 +1,6 @@
 import base64
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -100,12 +101,16 @@ class FilePickerTest(unittest.TestCase):
         info = self.app.deliverable_info(job)
         self.assertTrue(info["exists"])
         self.assertEqual(Path(info["folder"]), folder)
-        with patch("agent_video.server.os.startfile") as startfile:
+        target_mock = patch("agent_video.server.os.startfile", create=True) if sys.platform == "win32" else patch("agent_video.server.subprocess.run")
+        with target_mock as opener:
             result = self.app.open_deliverable_folder(job_id)
 
         self.assertTrue(result["opened"])
         self.assertEqual(Path(result["folder"]), folder)
-        startfile.assert_called_once_with(str(folder))
+        if sys.platform == "win32":
+            opener.assert_called_once_with(str(folder))
+        else:
+            opener.assert_called_once()
 
     def test_open_deliverable_folder_requires_existing_folder(self):
         video = self.root / "demo2.mp4"
@@ -114,10 +119,11 @@ class FilePickerTest(unittest.TestCase):
              patch.object(self.app.runner, "resolve_visual_ai_selection", return_value=("manual", None)):
             job = self.app.create_job({"title": "未出片", "source_path": str(video),
                                        "products": ["衣服"]})
-        with patch("agent_video.server.os.startfile") as startfile:
+        target_mock = patch("agent_video.server.os.startfile", create=True) if sys.platform == "win32" else patch("agent_video.server.subprocess.run")
+        with target_mock as opener:
             with self.assertRaisesRegex(ValueError, "尚未生成"):
                 self.app.open_deliverable_folder(job["id"])
-        startfile.assert_not_called()
+        opener.assert_not_called()
 
     def test_server_job_restart_and_delete(self):
         video = self.root / "demo.mp4"

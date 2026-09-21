@@ -236,8 +236,10 @@ def validate_rows(rows, sources, min_total, max_total, min_segments, max_segment
                                 segments=missing_roles))
     average = total / len(rows) if rows else 0.0
     if average > 5.0:
+        # 短句合并后 1.5–18s 的自然口播单元会拉高平均段长，这是预期行为；
+        # 单段上限（max_segment）与总时长目标已负责质量约束，故平均段长只作提示。
         issues.append(issue("average_segment_too_long", f"average {average:.2f}s",
-                            duration=round(average, 3)))
+                            level="warning", duration=round(average, 3)))
     unique, seen = [], set()
     for item in issues:
         identity = (item.get("code"), tuple(item.get("segments") or []), item.get("segment"))

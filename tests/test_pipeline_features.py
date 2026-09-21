@@ -17,7 +17,8 @@ from agent_video.engine.scripts.visual_mix import (apply as apply_visual_mix,
                                                    ranked_candidates)
 from agent_video.engine.validation_policy import shared_issues
 from agent_video.rules import DirectivesManager
-from agent_video.runner import JobRunner, PlanRefinementError
+from agent_video.runner import (JobRunner, PlanRefinementError,
+                                SEMANTIC_AUDIT_RETRY_LIMIT)
 from agent_video.server import Application
 
 
@@ -470,6 +471,140 @@ class PipelineFeatureTest(unittest.TestCase):
                           PLAN_PATCH_SCHEMA)
             self.assertIn("remove_candidate_ids", PLAN_PATCH_SCHEMA["required"])
             self.assertEqual(store.get_job(job_id)["token_input"], 30)
+
+    def test_invalid_refinement_round_keeps_last_valid_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = Store(root / "db.sqlite")
+            runner = JobRunner(store, root)
+            workspace, engine = root / "job", root / "job" / "engine"
+            engine.mkdir(parents=True)
+            candidates = [
+                {"i": 0, "s": 0, "e": 3, "c": "other", "t": "候选零",
+                 "atom_id": "a0"},
+                {"i": 4, "s": 4, "e": 7, "c": "other", "t": "候选四",
+                 "atom_id": "a4"},
+                {"i": 1, "s": 8, "e": 11, "c": "other", "t": "候选一",
+                 "atom_id": "a1", "requires_previous": True,
+                 "required_atom_ids": ["a4"]},
+                {"i": 2, "s": 12, "e": 15, "c": "other", "t": "候选二",
+                 "atom_id": "a2"},
+                {"i": 3, "s": 16, "e": 19, "c": "other", "t": "候选三",
+                 "atom_id": "a3"},
+                {"i": 5, "s": 20, "e": 23, "c": "other", "t": "候选五",
+                 "atom_id": "a5"},
+                {"i": 6, "s": 24, "e": 27, "c": "other", "t": "候选六",
+                 "atom_id": "a6"},
+            ]
+            (engine / "candidate_digest.json").write_text(
+                json.dumps(candidates), encoding="utf-8")
+            job_id = store.create_job(title="回退", source_path="/tmp/source.mp4",
+                                      brief="", mode="fast", workspace=str(workspace),
+                                      products=["上衣"])
+            initial = {"main_product": "上衣", "picks": [
+                {"candidate_id": 0, "role": "hook", "module": "hook_A",
+                 "product": "上衣", "color": ""},
+                {"candidate_id": 4, "role": "scene", "module": "body",
+                 "product": "上衣", "color": ""},
+                {"candidate_id": 1, "role": "proof", "module": "body",
+                 "product": "上衣", "color": ""},
+                {"candidate_id": 2, "role": "styling", "module": "body",
+                 "product": "上衣", "color": ""},
+                {"candidate_id": 3, "role": "close", "module": "body",
+                 "product": "上衣", "color": ""}]}
+            round_one = {"main_product": "上衣", "remove_candidate_ids": [],
+                         "picks": []}
+            round_two = {"main_product": "上衣", "remove_candidate_ids": [4],
+                         "picks": []}
+            provider = Mock(display_name="Mock")
+            provider.generate_plan.side_effect = [
+                semantic_audit_response(candidates),
+                {"plan": initial, "raw": {"result": initial}, "seconds": 1,
+                 "usage": {"input_tokens": 10, "output_tokens": 2}},
+                {"plan": round_one, "raw": {"result": round_one}, "seconds": 1,
+                 "usage": {"input_tokens": 10, "output_tokens": 2}},
+                {"plan": round_two, "raw": {"result": round_two}, "seconds": 1,
+                 "usage": {"input_tokens": 10, "output_tokens": 2}},
+            ]
+            preflight = [
+                [{"code": "needs_patch", "level": "error"}],
+                [{"code": "soft_too_few_segments", "level": "warning"}],
+            ]
+            with patch.object(runner, "_plan_preflight_issues",
+                              side_effect=preflight), \
+                    patch.object(runner, "enqueue"):
+                runner._run_ai_plan_attempt(store.get_job(job_id), engine,
+                                            provider, "workbuddy", "auto")
+            self.assertEqual(provider.generate_plan.call_count, 4)
+            written = json.loads((engine / "picks.json").read_text(encoding="utf-8"))
+            selected = [pick.get("_candidate_id") for pick in written["picks"]]
+            self.assertIn(4, selected)
+            self.assertEqual(selected.index(1), selected.index(4) + 1)
+
+    @staticmethod
+    def _audit_decision(candidate_id):
+        return {"candidate_id": candidate_id, "verdict": "keep", "standalone": True,
+                "subject_explicit": True, "referent": "", "requires_previous": False,
+                "requires_next": False, "opening_suitability": 60, "information_gain": 60,
+                "content_function": "benefit", "main_product_relevant": True,
+                "content_type": "selling_point", "selling_value": 80, "reason": "测试"}
+
+    def test_semantic_audit_retries_uncovered_candidates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = Store(root / "db.sqlite")
+            runner = JobRunner(store, root)
+            engine = root / "job" / "engine"
+            engine.mkdir(parents=True)
+            candidates = [{"i": index, "s": index * 3.0, "e": index * 3.0 + 2.0,
+                           "c": "other", "t": f"候选{index}"} for index in range(3)]
+            job_id = store.create_job(title="审核", source_path="/tmp/source.mp4",
+                                      brief="", mode="fast",
+                                      workspace=str(engine.parent), products=["上衣"])
+            first = {"main_product": "上衣",
+                     "picks": [self._audit_decision(0), self._audit_decision(1)]}
+            second = {"main_product": "上衣", "picks": [self._audit_decision(2)]}
+            provider = Mock(display_name="Mock")
+            provider.generate_plan.side_effect = [
+                {"plan": first, "raw": {"result": first}, "seconds": 1,
+                 "usage": {"input_tokens": 5, "output_tokens": 1}},
+                {"plan": second, "raw": {"result": second}, "seconds": 1,
+                 "usage": {"input_tokens": 5, "output_tokens": 1}},
+            ]
+            runner._semantic_review_candidates(
+                store.get_job(job_id), engine, provider, "workbuddy", "auto", candidates)
+            self.assertEqual(provider.generate_plan.call_count, 2)
+            report = json.loads((engine / "semantic_audit.json").read_text(encoding="utf-8"))
+            audited = sorted(item["candidate_id"] for item in report["decisions"])
+            self.assertEqual(audited, [0, 1, 2])
+
+    def test_semantic_audit_missing_candidates_fail_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = Store(root / "db.sqlite")
+            runner = JobRunner(store, root)
+            engine = root / "job" / "engine"
+            engine.mkdir(parents=True)
+            candidates = [{"i": index, "s": index * 3.0, "e": index * 3.0 + 2.0,
+                           "c": "other", "t": f"候选{index}"} for index in range(5)]
+            job_id = store.create_job(title="审核", source_path="/tmp/source.mp4",
+                                      brief="", mode="fast",
+                                      workspace=str(engine.parent), products=["上衣"])
+            partial = {"main_product": "上衣", "picks": [self._audit_decision(0)]}
+            provider = Mock(display_name="Mock")
+            provider.generate_plan.side_effect = [
+                {"plan": partial, "raw": {"result": partial}, "seconds": 1,
+                 "usage": {"input_tokens": 5, "output_tokens": 1}}
+                for _ in range(SEMANTIC_AUDIT_RETRY_LIMIT + 1)]
+            runner._semantic_review_candidates(
+                store.get_job(job_id), engine, provider, "workbuddy", "auto", candidates)
+            self.assertEqual(provider.generate_plan.call_count,
+                             SEMANTIC_AUDIT_RETRY_LIMIT + 1)
+            report = json.loads((engine / "semantic_audit.json").read_text(encoding="utf-8"))
+            verdicts = {item["candidate_id"]: item["verdict"]
+                        for item in report["decisions"]}
+            for candidate_id in (1, 2, 3, 4):
+                self.assertEqual(verdicts[candidate_id], "reject")
 
     def test_visual_candidate_set_is_enforced(self):
         with tempfile.TemporaryDirectory() as directory:

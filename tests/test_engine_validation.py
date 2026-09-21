@@ -205,6 +205,19 @@ class EngineValidationTest(unittest.TestCase):
         self.assertTrue(overruns)
         self.assertTrue(all(item["level"] == "warning" for item in overruns))
 
+    @patch("agent_video.engine.scripts.validate_timeline.media_duration", return_value=1000)
+    def test_average_segment_length_is_warning_not_blocking_error(self, _duration):
+        rows = [
+            {"src": 1, "start": index * 6.0, "end": index * 6.0 + 6.0,
+             "text": f"完整口播单元{index}", "role": "proof"}
+            for index in range(5)
+        ]
+        result = validate_rows(rows, {"1": "source.mp4"}, 0, 120, 1, 32, 1.2, 18, 18, False)
+        average = [item for item in result["issues"]
+                   if item["code"] == "average_segment_too_long"]
+        self.assertTrue(average)
+        self.assertTrue(all(item["level"] == "warning" for item in average))
+
     def test_render_dual_keeps_crop_position_per_piece(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

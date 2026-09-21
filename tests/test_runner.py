@@ -707,6 +707,27 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(len(videos), 1)
         self.assertTrue(Path(videos[0]["path"]).is_file())
 
+    def test_emergency_cut_overwrites_stale_deliverable_from_previous_run(self):
+        source = self.root / "source.mp4"
+        source.write_bytes(b"source-video")
+        workspace = self.root / "job"
+        job_id = self.store.create_job(title="保底交付", source_path=str(source),
+                                       brief="", mode="fast", workspace=str(workspace))
+        stale = workspace / "deliverables" / "保底交付.mp4"
+        stale.parent.mkdir(parents=True, exist_ok=True)
+        stale.write_bytes(b"stale-video-from-this-morning")
+
+        def render_step(_job_id, _label, command, steps, _progress, stage="delivery"):
+            Path(command[-1]).write_bytes(b"fresh-fallback-video")
+            steps.append({"name": "fallback", "ok": True})
+
+        with patch.object(self.runner, "_probe",
+                          return_value={"format": {"duration": "120"}}), \
+                patch.object(self.runner, "_run_delivery_step", side_effect=render_step):
+            self.runner._complete_with_fallback(job_id, "synthetic interruption")
+
+        self.assertEqual(stale.read_bytes(), b"fresh-fallback-video")
+
     def test_validation_repair_removes_later_duplicate_and_moves_close_to_end(self):
         body = []
         for candidate_id in range(1, 20):
