@@ -788,6 +788,22 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(repaired_body[-1]["_candidate_id"], 2)
         self.assertEqual(repaired_body[-1]["role"], "close")
 
+    def test_validation_repair_with_unspecified_where_maps_global_timeline_including_hook(self):
+        plan = {"main_product": "上衣", "picks": [
+            {"src": 1, "start": 0.0, "end": 2.0, "text": "钩子", "role": "hook",
+             "module": "hook_A", "_candidate_id": 100},
+            {"src": 1, "start": 2.0, "end": 4.0, "text": "第一句正文", "role": "proof",
+             "module": "body", "_candidate_id": 1},
+            {"src": 1, "start": 4.0, "end": 6.0, "text": "问题口播", "role": "proof",
+             "module": "body", "_candidate_id": 2},
+        ]}
+        repaired, report = self.runner._repair_validation_plan(plan, [
+            {"code": "preview_asr_mismatch", "segment": 2, "detail": "相似度不足"},
+        ])
+        self.assertTrue(report["changed"])
+        self.assertEqual(report["removed_candidate_ids"], [2])
+        self.assertEqual([item["_candidate_id"] for item in repaired["picks"]], [100, 1])
+
     def test_prepare_render_repairs_supported_validation_errors_and_retries(self):
         workspace = self.root / "job"
         engine = workspace / "engine"

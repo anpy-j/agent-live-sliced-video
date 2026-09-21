@@ -362,6 +362,8 @@ def report_issues(path, limit=10):
                               "segments": issue.get("segments")})
     elif isinstance(data, dict):
         for issue in (data.get("issues") or []):
+            if issue.get("level", "error") != "error":
+                continue
             items.append({"segment": issue.get("segment"),
                           "segments": issue.get("segments"),
                           "code": issue.get("type") or issue.get("code"),

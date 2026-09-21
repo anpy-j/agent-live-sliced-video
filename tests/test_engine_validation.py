@@ -10,6 +10,7 @@ from agent_video.engine.scripts.audit_bounds import issue_level, main as audit_b
 from agent_video.engine.scripts.textnorm import content_rejection, incomplete_ending
 from agent_video.engine.scripts.validate_timeline import validate_rows
 from agent_video.engine.scripts.visual_mix import apply as apply_visual_mix
+from agent_video.engine.scripts.audio_acceptance import analyze_preview_asr
 from agent_video.engine.scripts import render_dual
 
 GRAPH_OPTIONS = ("-filter_complex_script", "-/filter_complex")
@@ -96,6 +97,21 @@ class EngineValidationTest(unittest.TestCase):
             self.assertFalse(result["ok"])
             types = [item["type"] for item in result["issues"]]
             self.assertIn("spoken_text_mismatch", types)
+
+    def test_audio_acceptance_number_variance_is_warning_not_blocking(self):
+        rows = [
+            {"src": 1, "start": 0.0, "end": 4.0,
+             "text": "全王我这个T差不多3050有了的销量"},
+        ]
+        preview_words = [
+            {"s": 0.0, "e": 4.0, "w": "全王我这个t差不多三十五十有了的销量"},
+        ]
+        result = analyze_preview_asr(rows, preview_words)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["issue_count"], 0)
+        codes = [item["code"] for item in result["issues"]]
+        self.assertIn("preview_number_variance", codes)
+        self.assertNotIn("preview_asr_mismatch", codes)
 
     def test_legacy_visual_review_pipeline_stays_removed(self):
         scripts = Path(__file__).parents[1] / "agent_video" / "engine" / "scripts"

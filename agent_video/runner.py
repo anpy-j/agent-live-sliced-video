@@ -2454,6 +2454,10 @@ class JobRunner:
                 hook_module = where
             elif where and where != "body":
                 hook_module = f"hook_{where}"
+            elif not where:
+                first_hook = next((str(r.get("module")) for r in rows
+                                   if str(r.get("module", "")).startswith("hook_")), "")
+                hook_module = first_hook
             else:
                 hook_module = ""
             hook_refs = [(index, row) for index, row in enumerate(rows)

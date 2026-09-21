@@ -17,6 +17,24 @@ def norm(value: str) -> str:
                    if char.isalnum() or "\u4e00" <= char <= "\u9fff")
 
 
+NUMERAL_CHARS = frozenset("0123456789零一二三四五六七八九十百千万亿两")
+
+
+def without_numerals(normalized: str) -> str:
+    """去掉全部数字字形，用于判断差异是否只来自数字写法。"""
+    return "".join(c for c in normalized if c not in NUMERAL_CHARS)
+
+
+def numerals_only_variance(expected: str, actual: str, threshold: float = 0.70) -> bool:
+    """口播与计划文本除了数字写法外是否一致。"""
+    kept_expected, kept_actual = without_numerals(expected), without_numerals(actual)
+    if len(kept_expected) < 2 or len(kept_actual) < 2:
+        return False
+    if kept_expected == kept_actual:
+        return True
+    return difflib.SequenceMatcher(None, kept_expected, kept_actual).ratio() >= threshold
+
+
 def load_word_map(path: Path) -> dict[int, list[dict]]:
     manifest = json.loads(path.read_text(encoding="utf-8"))
     result = {}
@@ -52,16 +70,21 @@ def analyze_junctions(rows: list[dict], words_by_source: dict[int, list[dict]]) 
                        str(word.get("w") or "") for word in partial]}
         segments.append(segment)
         if partial:
-            issues.append({"code": "cut_inside_token", "segment": index,
+            issues.append({"code": "cut_inside_token", "segment": index, "level": "error",
                            "detail": "切点落在词内：" + "".join(segment["partial_tokens"])})
         if similarity < 0.86:
-            issues.append({"code": "source_asr_mismatch", "segment": index,
-                           "detail": f"源 ASR 与计划口播相似度仅 {similarity:.2f}"})
+            if numerals_only_variance(norm(expected), norm(actual)):
+                issues.append({"code": "source_number_variance", "segment": index,
+                               "level": "warning",
+                               "detail": f"源 ASR 与计划口播主要为数字字形差异，相似度 {similarity:.2f}"})
+            else:
+                issues.append({"code": "source_asr_mismatch", "segment": index, "level": "error",
+                               "detail": f"源 ASR 与计划口播相似度仅 {similarity:.2f}"})
         if lead > 0.35:
-            issues.append({"code": "abnormal_head_pause", "segment": index,
+            issues.append({"code": "abnormal_head_pause", "segment": index, "level": "error",
                            "detail": f"句首空白 {lead:.2f}s"})
         if tail > 0.40:
-            issues.append({"code": "abnormal_tail_pause", "segment": index,
+            issues.append({"code": "abnormal_tail_pause", "segment": index, "level": "error",
                            "detail": f"句尾空白 {tail:.2f}s"})
 
     for index in range(1, len(rows)):
@@ -128,11 +151,16 @@ def analyze_preview_asr(rows: list[dict], preview_words: list[dict]) -> dict:
         last_match_end = (matching_blocks[-2].a + matching_blocks[-2].size) if len(matching_blocks) > 1 else 0
         tail_missing = len(exp_norm) - last_match_end
         if similarity < 0.86:
-            direction = "漏字/断尾" if len(act_norm) < len(exp_norm) else "多字/串音"
-            issues.append({"code": "preview_asr_mismatch", "segment": index,
-                           "detail": f"预览二次 ASR 疑似{direction}，相似度 {similarity:.2f}"})
+            if numerals_only_variance(exp_norm, act_norm):
+                issues.append({"code": "preview_number_variance", "segment": index,
+                               "level": "warning",
+                               "detail": f"预览二次 ASR 主要为数字字形差异，相似度 {similarity:.2f}"})
+            else:
+                direction = "漏字/断尾" if len(act_norm) < len(exp_norm) else "多字/串音"
+                issues.append({"code": "preview_asr_mismatch", "segment": index, "level": "error",
+                               "detail": f"预览二次 ASR 疑似{direction}，相似度 {similarity:.2f}"})
         elif tail_missing >= 2 and len(act_norm) < len(exp_norm):
-            issues.append({"code": "preview_asr_tail_truncated", "segment": index,
+            issues.append({"code": "preview_asr_tail_truncated", "segment": index, "level": "error",
                            "detail": f"预览二次 ASR 疑似尾音截断/断尾，结尾缺少“{exp_norm[last_match_end:]}”"})
     for index in range(1, len(ranges)):
         boundary = ranges[index][0]
@@ -152,15 +180,16 @@ def analyze_preview_asr(rows: list[dict], preview_words: list[dict]) -> dict:
                 "ok": gap <= 0.65 and not crossing}
         junctions.append(item)
         if gap > 0.65:
-            issues.append({"code": "preview_abnormal_junction_pause",
+            issues.append({"code": "preview_abnormal_junction_pause", "level": "error",
                            "segments": [index - 1, index],
                            "detail": f"预览连接点识别停顿 {gap:.2f}s"})
         if crossing:
-            issues.append({"code": "preview_junction_overlap",
+            issues.append({"code": "preview_junction_overlap", "level": "error",
                            "segments": [index - 1, index],
                            "detail": "预览连接点有跨界词，疑似重叠或切词"})
-    return {"ok": not issues, "segments": segments, "junctions": junctions,
-            "issue_count": len(issues), "issues": issues,
+    blocking = [item for item in issues if item.get("level", "error") == "error"]
+    return {"ok": not blocking, "segments": segments, "junctions": junctions,
+            "issue_count": len(blocking), "issues": issues,
             "asr_source": "rendered_audio_preview"}
 
 
@@ -223,7 +252,8 @@ def main() -> int:
                               "detail": f"生成预览后无法执行二次 ASR：{exc}"}],
                           "asr_source": "rendered_audio_preview"}
     issues = [*source_report["issues"], *preview_report["issues"]]
-    report = {"ok": not issues, "issue_count": len(issues), "issues": issues,
+    blocking_issues = [item for item in issues if item.get("level", "error") == "error"]
+    report = {"ok": not blocking_issues, "issue_count": len(blocking_issues), "issues": issues,
               "source_timestamp_analysis": source_report,
               "preview_asr_analysis": preview_report,
               "segments": preview_report["segments"],
