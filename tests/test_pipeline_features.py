@@ -10,6 +10,7 @@ from agent_video.engine.scripts.cuts import expand
 from agent_video.engine.scripts.digest_candidates import category, quality
 from agent_video.engine.scripts.prep import (cache_key, parse_subtitle,
                                              merge_blocks, usable,
+                                             transcript_cache_key,
                                              words_from_subtitles)
 from agent_video.engine.scripts import cuts, prep
 from agent_video.engine.scripts.visual_mix import (apply as apply_visual_mix,
@@ -190,6 +191,21 @@ class PipelineFeatureTest(unittest.TestCase):
             subtitle.write_text("new content", encoding="utf-8")
             second = cache_key(media, subtitle, None, False)
             self.assertNotEqual(first, second)
+
+    def test_transcript_cache_key_tracks_glossary_changes(self):
+        # glossary 的术语纠错直接改写转写文本：改词表必须让转写缓存失效，
+        # 否则旧转写（裸口/长蹄）会被静默复用，成片字幕照旧。
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "video.mp4"
+            media.write_bytes(b"video")
+            asr = {"backend": "mlx", "model": "m"}
+            before = transcript_cache_key(media, None, asr, False)
+            with patch.object(prep, "fingerprint",
+                              side_effect=lambda path: ("changed" if "glossary" in str(path)
+                                                        else "same")):
+                after = transcript_cache_key(media, None, asr, False)
+            self.assertNotEqual(before["vocab"], after["vocab"])
 
     def test_subtitle_prepare_defers_audio_extraction(self):
         with tempfile.TemporaryDirectory() as directory:

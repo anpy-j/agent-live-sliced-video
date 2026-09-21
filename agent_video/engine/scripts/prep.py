@@ -105,6 +105,18 @@ def cache_key(media, subtitle, asr_config, no_words):
             "no_words": bool(no_words), "vocab": vocab_identity()}
 
 
+def transcript_cache_key(media, subtitle, asr_config, no_words):
+    """转写缓存的身份。
+
+    词表已经不只影响候选过滤：glossary 的术语纠错直接改写 sentences/words 的文本，
+    所以这里必须带上词表指纹，否则改词表会静默复用旧转写。
+    """
+    return {"version": 5, "media": fingerprint(media),
+            "subtitle": fingerprint(subtitle) if subtitle else None,
+            "mode": "subtitle" if subtitle else "whisper", "asr": asr_config,
+            "no_words": bool(no_words), "vocab": vocab_identity()}
+
+
 def cache_complete(workdir, key):
     path = os.path.join(workdir, "cache_manifest.json")
     if not os.path.exists(path):
@@ -457,10 +469,7 @@ def main():
         wav = (os.path.join(workdir, "audio16k.wav") if subtitle
                else extract_audio(media, workdir))
 
-        transcript_key = {"version": 4, "media": fingerprint(media),
-                          "subtitle": fingerprint(subtitle) if subtitle else None,
-                          "mode": "subtitle" if subtitle else "whisper", "asr": asr_config,
-                          "no_words": bool(a.no_words)}
+        transcript_key = transcript_cache_key(media, subtitle, asr_config, a.no_words)
         words = []
         if transcript_cache_complete(workdir, transcript_key):
             sentences = json.load(open(os.path.join(workdir, "sentences.json"), encoding="utf-8"))
