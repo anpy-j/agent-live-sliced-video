@@ -3213,60 +3213,74 @@ class JobRunner:
         self._emergency_cut(job, source, workspace, reason)
 
     def _emergency_cut(self, job: dict[str, Any], source: Path,
-                       workspace: Path, reason: str) -> Path:
-        """Guarantee a playable deliverable with a bounded source excerpt."""
+                       workspace: Path, reason: str) -> Path | None:
+        """降级链只降低画质与自动化程度，不允许放弃剪辑本身。
+
+        旧实现把源素材前 90 秒原样复制成交付文件，成品和原片没有任何区别
+        （用户看到的是一条「毫无剪辑的 1 分 30 秒原素材」）。现在改成拼接真正
+        被选中的片段：优先已剪时间线，其次方案 picks，最后按质量排序的候选池。
+        一个可用片段都没有时宁可阻塞等待人工，也不伪造一条成片。
+        """
         job_id = job["id"]
-        self.store.stage_start(job_id, "delivery", "正在生成紧急降级成片")
+        engine_work = workspace / "engine"
+        rows = self._fallback_audio_rows(job, engine_work)
+        if not rows:
+            self.store.stage_wait(
+                job_id, "delivery",
+                "降级链没有可用的候选片段，无法在不截取原素材的前提下交付，等待人工处理",
+                {"reason": reason})
+            return None
+        self.store.stage_start(job_id, "delivery",
+                               "正在生成降级成片（仅拼接已选片段）")
+        final_work = workspace / "final-render"
+        final_work.mkdir(parents=True, exist_ok=True)
+        dual_rows = [{"section": "body", "audio": row,
+                      "video": self._fallback_visual_pieces(row)} for row in rows]
+        timeline = final_work / "fallback_dual_timeline.json"
+        self._write_json_atomic(timeline, dual_rows)
+
         target_dir = workspace / "deliverables"
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / f"{self._safe_title(job['title'])}.mp4"
         partial = target.with_name(f"{target.stem}.fallback.partial.mp4")
-        steps: list[dict[str, Any]] = []
-        duration = float(job.get("target_max_seconds") or 0) or 90.0
-        try:
-            duration = min(duration, max(1.0, float(self._probe(source)["format"]["duration"])))
-        except Exception:
-            duration = max(1.0, duration)
-
         # 重跑同一任务时 deliverables/ 下可能残留上一次的旧成片。进入降级链意味着
         # 常规渲染已经失败，该残留文件必然是过期产物；必须无条件重新生成，
         # 否则会把旧成片当作本次结果重新登记，表现为“重跑后没有新成片”。
         partial.unlink(missing_ok=True)
-        copy_command = [
-            "ffmpeg", "-y", "-v", "error", "-ss", "0", "-i", str(source),
-            "-t", f"{duration:.3f}", "-map", "0:v:0", "-map", "0:a?",
-            "-c", "copy", "-avoid_negative_ts", "make_zero", "-movflags", "+faststart",
-            str(partial),
+        options = self._render_options(job)
+        scripts = self.project_root / "agent_video" / "engine" / "scripts"
+        engine_python = Path(self.store.get_setting("engine_python", sys.executable)).expanduser()
+        command = [
+            str(engine_python), str(scripts / "render_dual.py"), str(timeline),
+            str(partial), "--src", f"1={source}",
+            "--width", str(options["width"]), "--height", str(options["height"]),
+            "--video-codec", options["video_codec"],
+            "--video-bitrate", options["video_bitrate"],
+            "--crf", str(options["crf"]), "--preset", options["preset"],
+            "--audio-bitrate", options["audio_bitrate"],
+            "--loudness", str(options["loudness"]),
         ]
+        steps: list[dict[str, Any]] = []
         try:
-            self._run_delivery_step(job_id, "紧急快速剪辑", copy_command, steps, 0.85)
-        except (OSError, RuntimeError):
+            self._run_delivery_step(job_id, "降级拼接成片", command, steps, 0.9)
+        except (OSError, RuntimeError) as exc:
             partial.unlink(missing_ok=True)
-            transcode_command = [
-                "ffmpeg", "-y", "-v", "error", "-ss", "0", "-i", str(source),
-                "-t", f"{duration:.3f}", "-map", "0:v:0", "-map", "0:a?",
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(partial),
-            ]
-            try:
-                self._run_delivery_step(
-                    job_id, "紧急兼容转码", transcode_command, steps, 0.9)
-            except (OSError, RuntimeError):
-                partial.unlink(missing_ok=True)
-                shutil.copy2(source, partial)
-                steps.append({"name": "原素材保底交付", "ok": True,
-                              "degraded": True})
+            self.store.stage_wait(
+                job_id, "delivery", "降级成片渲染失败，等待重试",
+                {"reason": reason, "render_error": str(exc)})
+            return None
         partial.replace(target)
+        duration = self._fallback_duration(rows)
 
         self.store.add_artifact(job_id, "delivery", "video",
-                                f"自动降级成片 · {target.name}", target, "video/mp4")
+                                f"降级成片 · {target.name}", target, "video/mp4")
         fallback_summary = {
             "state": "complete_degraded", "publish_ready": False,
             "review_required": False, "degraded": True,
             "reason": reason, "source": str(source), "final_output": str(target),
-            "duration": round(duration, 3), "steps": steps,
+            "duration": round(duration, 3), "segments": len(rows), "steps": steps,
         }
-        report = workspace / "final-render" / "delivery_summary.json"
+        report = final_work / "delivery_summary.json"
         self._write_json_atomic(report, fallback_summary)
         self.store.add_artifact(job_id, "delivery", "report", "降级交付摘要",
                                 report, "application/json")
@@ -3275,17 +3289,84 @@ class JobRunner:
             if stage.get("status") not in {"succeeded", "cancelled"}:
                 self.store.stage_done(
                     job_id, stage["stage_id"],
-                    "常规路径不可用，已由紧急降级链自动完成",
+                    "常规路径不可用，已由降级链拼接已选片段完成",
                     fallback_summary if stage["stage_id"] == "delivery" else None)
         self.store.update_job(job_id, status="completed", progress=100,
                               current_stage="delivery", finished_at=utc_now(),
                               error=None, engine_state="complete_degraded")
         self.store.add_event(
             job_id, "delivery", "warning", "fallback_delivery_completed",
-            "常规流程异常已生成降级成片并自动完成任务，未标记为可发布",
+            f"常规路径异常，已用 {len(rows)} 个已选片段拼接降级成片（{duration:.1f}s），未标记为可发布",
             fallback_summary,
         )
         return target
+
+    def _fallback_audio_rows(self, job: dict[str, Any],
+                             engine_work: Path) -> list[dict[str, Any]]:
+        """降级链可用的真实片段：优先已剪时间线，其次方案 picks，最后候选池。
+
+        每一行都代表一次真正被选中的原声区间；只保留落在允许时长窗口内的段，
+        组合到成片目标时长上限为止。源素材的连续截取不是剪辑，不会被采用。
+        """
+        candidates = self._eligible_candidates(
+            self._read_json(engine_work / "candidate_digest.json", []))
+        limits = self._editing_constraints(candidates, job)
+        minimum, maximum = limits["min_total"], limits["max_total"]
+        pools: list[list[dict[str, Any]]] = []
+        timeline = self._read_json(engine_work / "timeline.json", [])
+        if isinstance(timeline, list):
+            pools.append(timeline)
+        plan = self._read_json(engine_work / "picks.json", {})
+        if isinstance(plan, dict) and isinstance(plan.get("picks"), list):
+            pools.append(plan["picks"])
+        ranked = sorted(
+            [item for item in candidates if item.get("safe_standalone")],
+            key=lambda item: (-int(item.get("q", 0)), float(item.get("s", 0))))
+        pools.append([{"src": 1, "start": item.get("s"), "end": item.get("e"),
+                       "text": item.get("t", "")} for item in ranked])
+        for pool in pools:
+            rows = self._normalized_fallback_rows(pool, maximum)
+            if self._fallback_duration(rows) >= min(minimum, 5.0):
+                return rows
+        return []
+
+    @staticmethod
+    def _normalized_fallback_rows(pool: list[dict[str, Any]],
+                                  maximum: float) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        total = 0.0
+        for item in pool:
+            try:
+                start, end = float(item["start"]), float(item["end"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            duration = end - start
+            if duration < MIN_PICK_SECONDS - 1e-6 or duration > MAX_PICK_SECONDS + 1e-6:
+                continue
+            rows.append({"src": int(item.get("src", 1)),
+                         "start": round(start, 3), "end": round(end, 3),
+                         "text": str(item.get("text") or "")})
+            total += duration
+            if total >= maximum:
+                break
+        return rows
+
+    @staticmethod
+    def _fallback_duration(rows: list[dict[str, Any]]) -> float:
+        return sum(float(row["end"]) - float(row["start"]) for row in rows)
+
+    @staticmethod
+    def _fallback_visual_pieces(row: dict[str, Any],
+                                max_seconds: float = 3.0) -> list[dict[str, Any]]:
+        source = int(row.get("src", 1))
+        cursor, end = float(row["start"]), float(row["end"])
+        pieces: list[dict[str, Any]] = []
+        while cursor < end - 1e-6:
+            piece_end = min(end, cursor + max_seconds)
+            pieces.append({"src": source, "start": round(cursor, 3),
+                           "end": round(piece_end, 3), "kind": "aroll"})
+            cursor = piece_end
+        return pieces
 
     @staticmethod
     def _read_json(path: Path, default: Any) -> Any:

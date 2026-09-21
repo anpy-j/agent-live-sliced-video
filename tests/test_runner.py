@@ -689,14 +689,10 @@ class RunnerTest(unittest.TestCase):
         workspace = self.root / "job"
         job_id = self.store.create_job(title="保底交付", source_path=str(source),
                                        brief="", mode="fast", workspace=str(workspace))
-
-        def render_step(_job_id, _label, command, steps, _progress, stage="delivery"):
-            Path(command[-1]).write_bytes(b"fallback-video")
-            steps.append({"name": "fallback", "ok": True})
-
-        with patch.object(self.runner, "_probe",
-                          return_value={"format": {"duration": "120"}}), \
-                patch.object(self.runner, "_run_delivery_step", side_effect=render_step):
+        self._seed_fallback_candidates(workspace)
+        self.fallback_commands = []
+        with patch.object(self.runner, "_run_delivery_step",
+                          side_effect=self._fallback_render_step):
             self.runner._complete_with_fallback(job_id, "synthetic interruption")
 
         job = self.store.get_job(job_id)
@@ -707,26 +703,63 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(len(videos), 1)
         self.assertTrue(Path(videos[0]["path"]).is_file())
 
+    @staticmethod
+    def _seed_fallback_candidates(workspace, count=8):
+        engine = workspace / "engine"
+        engine.mkdir(parents=True, exist_ok=True)
+        (engine / "candidate_digest.json").write_text(json.dumps([
+            {"i": index, "s": index * 12.0, "e": index * 12.0 + 10.0,
+             "t": f"候选{index}", "q": 7, "safe_standalone": True}
+            for index in range(count)
+        ]), encoding="utf-8")
+
+    def _fallback_render_step(self, _job_id, _label, command, steps, _progress,
+                              stage="delivery"):
+        self.fallback_commands.append(command)
+        output = next(Path(arg) for arg in command if str(arg).endswith(".partial.mp4"))
+        output.write_bytes(b"fresh-fallback-video")
+        steps.append({"name": "fallback", "ok": True})
+
     def test_emergency_cut_overwrites_stale_deliverable_from_previous_run(self):
         source = self.root / "source.mp4"
         source.write_bytes(b"source-video")
         workspace = self.root / "job"
         job_id = self.store.create_job(title="保底交付", source_path=str(source),
                                        brief="", mode="fast", workspace=str(workspace))
+        self._seed_fallback_candidates(workspace)
         stale = workspace / "deliverables" / "保底交付.mp4"
         stale.parent.mkdir(parents=True, exist_ok=True)
-        stale.write_bytes(b"stale-video-from-this-morning")
+        stale.write_bytes(b"stale-raw-90s-clip-from-this-morning")
+        self.fallback_commands = []
 
-        def render_step(_job_id, _label, command, steps, _progress, stage="delivery"):
-            Path(command[-1]).write_bytes(b"fresh-fallback-video")
-            steps.append({"name": "fallback", "ok": True})
-
-        with patch.object(self.runner, "_probe",
-                          return_value={"format": {"duration": "120"}}), \
-                patch.object(self.runner, "_run_delivery_step", side_effect=render_step):
+        with patch.object(self.runner, "_run_delivery_step",
+                          side_effect=self._fallback_render_step):
             self.runner._complete_with_fallback(job_id, "synthetic interruption")
 
         self.assertEqual(stale.read_bytes(), b"fresh-fallback-video")
+        self.assertTrue(self.fallback_commands)
+        command = self.fallback_commands[-1]
+        self.assertIn("render_dual.py", " ".join(str(arg) for arg in command))
+        self.assertTrue(str(command[2]).endswith("fallback_dual_timeline.json"))
+        summary = json.loads(
+            (workspace / "final-render" / "delivery_summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["segments"], 8)
+        self.assertAlmostEqual(summary["duration"], 80.0, places=1)
+
+    def test_emergency_cut_without_candidates_blocks_instead_of_dumping_raw_source(self):
+        source = self.root / "source.mp4"
+        source.write_bytes(b"source-video")
+        workspace = self.root / "job"
+        job_id = self.store.create_job(title="无候选", source_path=str(source),
+                                       brief="", mode="fast", workspace=str(workspace))
+        (workspace / "engine").mkdir(parents=True, exist_ok=True)
+
+        with patch.object(self.runner, "_run_delivery_step") as render_step:
+            self.runner._complete_with_fallback(job_id, "synthetic interruption")
+
+        render_step.assert_not_called()
+        self.assertFalse((workspace / "deliverables" / "无候选.mp4").exists())
+        self.assertEqual(self.store.get_job(job_id)["status"], "waiting_input")
 
     def test_validation_repair_removes_later_duplicate_and_moves_close_to_end(self):
         body = []
