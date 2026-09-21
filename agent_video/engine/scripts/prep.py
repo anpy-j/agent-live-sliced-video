@@ -35,6 +35,7 @@ except ImportError:  # pragma: no cover - Windows degrades to process-local cach
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from badvocab import BAD_RE, review_hits  # noqa: E402
 from asr_backend import Transcriber, resolve_config  # noqa: E402
+from glossary import correct_terms  # noqa: E402
 from textnorm import content_rejection, context_dependent_start, incomplete_ending  # noqa: E402
 
 try:
@@ -48,8 +49,12 @@ FINAL_PUNCT = "。！？!?…"
 
 
 def simp(t):
-    """繁简归一：whisper 局部窗口常吐繁体，简体字表会对不上。"""
-    return _zh(t or "", "zh-cn")
+    """繁简归一：whisper 局部窗口常吐繁体，简体字表会对不上。
+
+    顺带把已知的同音误听改回术语（裸口→罗纹、长蹄→长T）。句子和词级 token 走
+    同一个函数，改写保持两侧一致，切点对齐不会因为改写而失配。
+    """
+    return correct_terms(_zh(t or "", "zh-cn"))
 
 
 def run(cmd):
@@ -89,6 +94,7 @@ def vocab_identity():
         "profile": optional_fingerprint(profile),
         "badvocab": fingerprint(os.path.join(os.path.dirname(__file__), "badvocab.py")),
         "textnorm": fingerprint(os.path.join(os.path.dirname(__file__), "textnorm.py")),
+        "glossary": fingerprint(os.path.join(os.path.dirname(__file__), "glossary.py")),
     }
 
 

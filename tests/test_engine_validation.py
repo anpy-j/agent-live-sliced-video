@@ -22,6 +22,33 @@ def read_filter_graph(command):
 
 
 class EngineValidationTest(unittest.TestCase):
+    def test_glossary_rewrites_known_asr_mishearings(self):
+        from agent_video.engine.scripts.glossary import correct_terms
+        self.assertEqual(correct_terms("全部做这样的一个裸口之带"), "全部做这样的一个罗纹之带")
+        self.assertEqual(correct_terms("买这种长蹄日常"), "买这种长T日常")
+        self.assertEqual(correct_terms("剩下那个5叫安伦"), "剩下那个5叫氨纶")
+        self.assertEqual(correct_terms("买个背信都不止这100多块钱"), "买个背心都不止这100多块钱")
+        self.assertEqual(correct_terms("3000多件的一件提取"), "3000多件的一件起批")
+
+    def test_glossary_keeps_correct_text_and_is_idempotent(self):
+        from agent_video.engine.scripts.glossary import correct_terms
+        self.assertEqual(correct_terms("全部真皮大底的，感受一下它的皮料"),
+                         "全部真皮大底的，感受一下它的皮料")
+        self.assertEqual(correct_terms("全部真皮大底，你在做tpr胶质地复合"),
+                         "全部真皮大底，你在做tpr胶质地复合")
+        self.assertEqual(correct_terms("你看这是大版型"), "你看这是大版型")
+        fixed = correct_terms("裸口 长蹄 安伦 背信 一件提取")
+        self.assertEqual(correct_terms(fixed), fixed)
+
+    def test_glossary_only_rewrites_big_bottom_before_tshirt(self):
+        from agent_video.engine.scripts.glossary import correct_terms
+        self.assertEqual(correct_terms("你着急穿一件大底T恤的时候"), "你着急穿一件大版T恤的时候")
+        self.assertEqual(correct_terms("你着急穿一件大底t恤的时候"), "你着急穿一件大版t恤的时候")
+
+    def test_prep_simplify_applies_glossary(self):
+        from agent_video.engine.scripts.prep import simp
+        self.assertEqual(simp("全部定制裸口 看到了吗"), "全部定制罗纹 看到了吗")
+
     def test_secondary_product_detail_is_advisory(self):
         self.assertEqual(issue_level({"type": "secondary_product_detail"}), "warning")
         self.assertEqual(issue_level({"type": "cut_inside_token"}), "error")

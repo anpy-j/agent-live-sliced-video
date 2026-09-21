@@ -32,6 +32,7 @@ PAD_HEAD, PAD_TAIL = 0.4, 0.6
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from badvocab import BAD_RE  # noqa: E402
 from asr_backend import Transcriber  # noqa: E402
+from glossary import correct_terms  # noqa: E402
 from textnorm import cn_num  # noqa: E402
 
 try:
@@ -44,8 +45,11 @@ PROMPT_ZH = "以下是普通话口播，请使用简体中文，带标点。"
 
 
 def simp(t):
-    """繁简归一：局部窗口转写常出繁体，简体字表会对不上（实测踩过）。"""
-    return _zh(t or "", "zh-cn")
+    """繁简归一：局部窗口转写常出繁体，简体字表会对不上（实测踩过）。
+
+    和 prep.simp 一样叠加术语纠错，两侧写法必须一致，否则切点比对会错位。
+    """
+    return correct_terms(_zh(t or "", "zh-cn"))
 
 
 def norm(t):
