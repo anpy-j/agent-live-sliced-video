@@ -99,7 +99,7 @@ def vocab_identity():
 
 
 def cache_key(media, subtitle, asr_config, no_words):
-    return {"version": 6, "media": fingerprint(media),
+    return {"version": 7, "media": fingerprint(media),
             "subtitle": fingerprint(subtitle) if subtitle else None,
             "mode": "subtitle" if subtitle else "whisper", "asr": asr_config,
             "no_words": bool(no_words), "vocab": vocab_identity()}
@@ -134,6 +134,17 @@ def cache_complete(workdir, key):
         required.extend(["subtitle_blocks.json", "words.json"])
     if previous.get("key") != key or not all(
             os.path.exists(os.path.join(workdir, name)) for name in required):
+        return False
+    # 索引目录「完整」还不够：里面的转写必须和当前代码/词表匹配。transcript_key 与
+    # cache_key 只差一个版本号，曾经出现过旧转写被新 cache_manifest 追认、之后每次
+    # 都命中外层缓存、改词表也再不生效的情况（成片字幕一直是「裸口/长蹄」）。
+    try:
+        stored = json.load(open(os.path.join(workdir, "transcript_manifest.json"),
+                                encoding="utf-8")).get("key") or {}
+    except Exception:
+        return False
+    expected = {name: value for name, value in key.items() if name != "version"}
+    if {name: value for name, value in stored.items() if name != "version"} != expected:
         return False
     if key["mode"] == "subtitle":
         return True

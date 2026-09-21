@@ -207,6 +207,31 @@ class PipelineFeatureTest(unittest.TestCase):
                 after = transcript_cache_key(media, None, asr, False)
             self.assertNotEqual(before["vocab"], after["vocab"])
 
+    def test_cache_complete_rejects_index_built_from_stale_transcript(self):
+        # 索引目录依赖清单和文件都在，但里面的转写是旧词表/旧代码产出的：必须判为
+        # 未命中，否则旧转写（裸口/长蹄）会被追认后长期复用。
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            media = work / "video.mp4"
+            media.write_bytes(b"video")
+            key = cache_key(media, None, {"backend": "mlx", "model": "m"}, False)
+            for name in ("probe.txt", "sentences.json", "candidates.json", "words.json"):
+                (work / name).write_text("[]", encoding="utf-8")
+            (work / "audio16k.wav").write_bytes(b"wav")
+            (work / "audio16k.wav.manifest.json").write_text(
+                json.dumps({"key": {"media": key["media"]}}), encoding="utf-8")
+            stale = {name: value for name, value in key.items() if name != "version"}
+            stale.pop("vocab")
+            (work / "transcript_manifest.json").write_text(
+                json.dumps({"key": dict(stale, version=4)}), encoding="utf-8")
+            (work / "cache_manifest.json").write_text(
+                json.dumps({"key": key}), encoding="utf-8")
+            self.assertFalse(prep.cache_complete(work, key))
+            (work / "transcript_manifest.json").write_text(
+                json.dumps({"key": dict(stale, vocab=key["vocab"], version=5)}),
+                encoding="utf-8")
+            self.assertTrue(prep.cache_complete(work, key))
+
     def test_subtitle_prepare_defers_audio_extraction(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
