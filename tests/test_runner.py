@@ -527,6 +527,17 @@ class RunnerTest(unittest.TestCase):
             plan, {"min_total": 1, "max_total": 30, "min_segments": 2, "max_segments": 12})
         self.assertIn("incomplete_sentence", {item["code"] for item in issues})
 
+    def test_plan_preflight_rejects_semantic_fragment_even_when_punctuation_looks_complete(self):
+        plan = {"main_product": "T恤", "picks": [
+            {"src": 1, "start": 0, "end": 3, "text": "我们新加了黑色灰色，我上次白色。",
+             "role": "color", "module": "body", "semantic_verdict": "keep",
+             "semantic_standalone": False},
+        ]}
+        issues = self.runner._plan_preflight_issues(
+            plan, {"min_total": 1, "max_total": 30, "min_segments": 1,
+                   "max_segments": 12})
+        self.assertIn("semantic_fragment", {item["code"] for item in issues})
+
     def test_retry_returns_invalid_validation_plan_to_edit_stage(self):
         workspace = self.root / "job"
         engine = workspace / "engine"

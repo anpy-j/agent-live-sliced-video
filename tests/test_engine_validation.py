@@ -263,6 +263,16 @@ class EngineValidationTest(unittest.TestCase):
                          "context_dependent_start")
         self.assertEqual(content_rejection("删掉来整个先删掉好"), "stage_chatter")
         self.assertEqual(content_rejection("轻柔羊毛手手"), "malformed_speech")
+        self.assertEqual(content_rejection("姐妹们，有的给我打个有"), "stage_chatter")
+        self.assertEqual(content_rejection("马甲全没了，给一波15天的预售连接"),
+                         "stage_chatter")
+        self.assertEqual(content_rejection("就20个不够卖，要不然改预售"),
+                         "stage_chatter")
+        self.assertEqual(content_rejection("没有买到T恤的自己去看评价"),
+                         "stage_chatter")
+        self.assertEqual(content_rejection(
+            "不是你花不了钱，领子变形的，你很糟糕，你好着急"),
+            "malformed_speech")
         self.assertIsNone(content_rejection("这件毛衣上身显瘦又利落"))
 
     @patch("agent_video.engine.scripts.validate_timeline.media_duration", return_value=100)

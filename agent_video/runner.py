@@ -40,7 +40,7 @@ SEMANTIC_AUDIT_BATCH_SIZE = 35
 # 模型偶尔漏判个别候选；先对漏判项定向重试，仍缺失时按「不采用」收口，
 # 而不是因单条格式瑕疵把整个任务判死。
 SEMANTIC_AUDIT_RETRY_LIMIT = 2
-SEMANTIC_AUDIT_POLICY_VERSION = 4
+SEMANTIC_AUDIT_POLICY_VERSION = 5
 DEPENDENCY_REJECTIONS = frozenset({"context_dependent_start", "incomplete_sentence"})
 
 
@@ -663,8 +663,9 @@ class JobRunner:
         row = dict(candidate)
         if not decision:
             return row
-        for key in ("opening_suitability", "information_gain", "selling_value",
-                    "content_function", "standalone", "subject_explicit", "referent"):
+        for key in ("verdict", "opening_suitability", "information_gain", "selling_value",
+                    "content_type", "content_function", "standalone", "subject_explicit",
+                    "referent", "requires_previous", "requires_next"):
             if key in decision:
                 row[f"semantic_{key}"] = decision[key]
         return row
@@ -738,6 +739,7 @@ class JobRunner:
             is_rel = decision.get("main_product_relevant")
 
             if (ctype in rejected_types
+                    or decision.get("verdict") == "reject"
                     or is_rel is False
                     or cfunc == "discard"
                     or banned_word_hit(text)
@@ -1762,6 +1764,16 @@ class JobRunner:
                                    "combination": combination_index, "segment": 0,
                                    "detail": f"开头以依赖上文的“{opening_connector}”起句，建议换成可独立理解的表达"})
             for index, item in enumerate(rows):
+                if item.get("semantic_verdict") == "reject":
+                    issues.append({"code": "semantic_rejected", "combination": combination_index,
+                                   "segment": index,
+                                   "detail": f"第 {index + 1} 段已被逐句语义审核拒绝"})
+                    continue
+                if item.get("semantic_standalone") is False:
+                    issues.append({"code": "semantic_fragment", "combination": combination_index,
+                                   "segment": index,
+                                   "detail": f"第 {index + 1} 段经逐句审核判定不能脱离原上下文独立成句"})
+                    continue
                 ending = incomplete_ending(str(item.get("text", "")))
                 if ending and not item.get("requires_next"):
                     issues.append({"code": "incomplete_sentence", "combination": combination_index,
@@ -2163,8 +2175,10 @@ class JobRunner:
         self._ensure_done(job_id, "edit_plan", "Agent 已完成音画编排")
         self.store.stage_start(job_id, "validation", "正在校验句子边界、重复信息与内容结构")
         selected_candidates = self._effective_candidates(job, engine_work)
-        candidates = self._eligible_candidates(
-            self._read_json(engine_work / "candidate_digest.json", []))
+        # Validation repair/backfill must stay inside the semantic whitelist.  Using
+        # the raw digest here silently reintroduced clips explicitly rejected as
+        # stage chatter, garbled ASR, inventory talk, or incomplete fragments.
+        candidates = selected_candidates
         limits = self._editing_constraints(selected_candidates, job)
         limit_options = ["--min-total", str(limits["min_total"]),
                          "--max-total", str(limits["max_total"]),
