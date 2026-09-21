@@ -48,6 +48,55 @@ class EngineValidationTest(unittest.TestCase):
             self.assertEqual(result["error_count"], 0)
             self.assertEqual(result["warning_count"], 1)
 
+    def test_numerals_only_variance_does_not_fail_boundary_audit(self):
+        # 同一段口播：计划文本按字幕写成「3050」，词级 ASR 写成「三十五十」。
+        # 渲染用原声，text 不进画面，这种数字字形差异只应提示、不应阻塞渲染。
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            timeline = root / "timeline.json"
+            timeline.write_text(json.dumps([
+                {"src": 1, "start": 0, "end": 3,
+                 "text": "全王我这个T差不多3050有了的销量"},
+            ]), encoding="utf-8")
+            words = root / "words.json"
+            words.write_text(json.dumps([
+                {"s": 0, "e": 3, "w": "全王我这个t差不多三十五十有了的销量"},
+            ]), encoding="utf-8")
+            report = root / "report.json"
+            argv = ["audit_bounds.py", str(timeline), str(words),
+                    "--report", str(report)]
+            with patch("sys.argv", argv):
+                code = audit_bounds_main()
+            result = json.loads(report.read_text(encoding="utf-8"))
+            self.assertEqual(code, 0)
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["error_count"], 0)
+            types = [item["type"] for item in result["issues"]]
+            self.assertIn("spoken_number_variance", types)
+            self.assertNotIn("spoken_text_mismatch", types)
+
+    def test_different_spoken_text_still_blocks_boundary_audit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            timeline = root / "timeline.json"
+            timeline.write_text(json.dumps([
+                {"src": 1, "start": 0, "end": 3, "text": "完全不相干的一句文案"},
+            ]), encoding="utf-8")
+            words = root / "words.json"
+            words.write_text(json.dumps([
+                {"s": 0, "e": 3, "w": "牛仔裤颜色版型显瘦"},
+            ]), encoding="utf-8")
+            report = root / "report.json"
+            argv = ["audit_bounds.py", str(timeline), str(words),
+                    "--report", str(report)]
+            with patch("sys.argv", argv):
+                code = audit_bounds_main()
+            result = json.loads(report.read_text(encoding="utf-8"))
+            self.assertEqual(code, 1)
+            self.assertFalse(result["ok"])
+            types = [item["type"] for item in result["issues"]]
+            self.assertIn("spoken_text_mismatch", types)
+
     def test_legacy_visual_review_pipeline_stays_removed(self):
         scripts = Path(__file__).parents[1] / "agent_video" / "engine" / "scripts"
         self.assertFalse((scripts / "visual_review.py").exists())

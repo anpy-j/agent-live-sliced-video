@@ -32,7 +32,11 @@ EPS = 1e-6
 
 # Editorial preferences should remain visible in the audit report without
 # blocking an otherwise executable timeline.
-SOFT_ISSUE_TYPES = {"secondary_product_detail"}
+SOFT_ISSUE_TYPES = {"secondary_product_detail", "spoken_number_variance"}
+
+# 数字字形：同一段口播在不同来源里字形不同（字幕/计划写「3050」，词级 ASR 写
+# 「三十五十」）。纯数字字形差异不代表选错区间，不应阻塞渲染。
+NUMERAL_CHARS = frozenset("0123456789零一二三四五六七八九十百千万亿两")
 
 
 def issue_level(item):
@@ -45,6 +49,26 @@ def norm(text):
     与 cuts.py 共用 textnorm，保证两侧归一方式一致。"""
     return "".join(c.lower() for c in cn_num(text)
                    if c.isalnum() or "\u4e00" <= c <= "\u9fff")
+
+
+def without_numerals(normalized):
+    """去掉全部数字字形，用于判断差异是否只来自数字写法。"""
+    return "".join(c for c in normalized if c not in NUMERAL_CHARS)
+
+
+def numerals_only_variance(expected, actual, threshold):
+    """口播与计划文本除了数字写法外是否一致。
+
+    norm() 只能归一整段阿拉伯数字（如 150→一百五十），无法处理两侧把同一串
+    数字切成不同单位的情况（计划「3050」vs 语音「三十五十」）。渲染使用原声，
+    text 不参与画面，因此这种纯字形差异降级为提示，不再阻塞整条成片。
+    """
+    kept_expected, kept_actual = without_numerals(expected), without_numerals(actual)
+    if len(kept_expected) < 2 or len(kept_actual) < 2:
+        return False
+    if kept_expected == kept_actual:
+        return True
+    return difflib.SequenceMatcher(None, kept_expected, kept_actual).ratio() >= threshold
 
 
 def diagnose(coverage, similarity):
@@ -166,12 +190,20 @@ def main():
                                "word_coverage": round(coverage, 3),
                                "diagnosis": "切点吃进了相邻内容：把窗口收窄到整句边界内"})
         elif expected_norm and similarity < args.min_text_similarity:
-            issues.append({"segment": index, "src": source_id,
-                           "type": "spoken_text_mismatch",
-                           "similarity": round(similarity, 4),
-                           "word_coverage": round(coverage, 3),
-                           "diagnosis": diagnose(coverage, similarity),
-                           "actual": actual_norm[:100]})
+            if numerals_only_variance(expected_norm, actual_norm,
+                                      args.min_text_similarity):
+                issues.append({"segment": index, "src": source_id,
+                               "type": "spoken_number_variance",
+                               "similarity": round(similarity, 4),
+                               "word_coverage": round(coverage, 3),
+                               "actual": actual_norm[:100]})
+            else:
+                issues.append({"segment": index, "src": source_id,
+                               "type": "spoken_text_mismatch",
+                               "similarity": round(similarity, 4),
+                               "word_coverage": round(coverage, 3),
+                               "diagnosis": diagnose(coverage, similarity),
+                               "actual": actual_norm[:100]})
         banned = hit(actual)
         if banned:
             issues.append({"segment": index, "src": source_id,
