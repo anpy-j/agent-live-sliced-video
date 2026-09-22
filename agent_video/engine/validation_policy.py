@@ -9,6 +9,9 @@ from .scripts.dependency_graph import dependency_issues
 
 MIN_SEGMENT_SECONDS = 1.2
 MAX_SEGMENT_SECONDS = 5.0
+# 不可切分的原生完整长句才允许突破 5 秒；旧值 18 秒让编排用长句凑段数，
+# 产出「90 秒 10 段」这种不符合 2-5 秒片段口径的成片。
+MAX_LONG_COMPLETE_SECONDS = 8.0
 ALIGNMENT_EXPANSION_MARGIN = 0.30
 MAX_DEMOS = 3
 MAX_MATERIAL_SEGMENTS = 1
@@ -44,9 +47,9 @@ def shared_issues(rows: list[dict[str, Any]], *, pre_alignment: bool = False) ->
             issues.append({"level": "error", "code": "segment_too_short", "segment": index,
                            "detail": f"第 {index + 1} 段 {duration:.2f}s 过短"})
         is_long_complete = bool(row.get("long_complete_utterance"))
-        seg_max = 18.0 if is_long_complete else maximum
+        seg_max = MAX_LONG_COMPLETE_SECONDS if is_long_complete else maximum
         if duration > seg_max + 1e-6:
-            tolerated = (18.0 if is_long_complete else
+            tolerated = (MAX_LONG_COMPLETE_SECONDS if is_long_complete else
                          (MAX_SEGMENT_SECONDS if pre_alignment
                           else MAX_SEGMENT_SECONDS + ALIGNMENT_EXPANSION_MARGIN))
             level = "warning" if duration <= tolerated + 1e-6 else "error"

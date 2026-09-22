@@ -538,6 +538,37 @@ class RunnerTest(unittest.TestCase):
                    "max_segments": 12})
         self.assertIn("semantic_fragment", {item["code"] for item in issues})
 
+    def test_plan_preflight_defers_semantic_fragment_to_engine_standalone_flag(self):
+        limits = {"min_total": 1, "max_total": 60, "min_segments": 1, "max_segments": 12}
+        base = [
+            {"src": 1, "start": 0, "end": 3, "text": "我们新加了黑色跟灰色。",
+             "role": "color", "module": "body", "semantic_verdict": "keep",
+             "semantic_standalone": False, "safe_standalone": True},
+            {"src": 1, "start": 5, "end": 8, "text": "面料比去年的手感更好。",
+             "role": "material", "module": "body", "semantic_verdict": "keep"},
+        ]
+        issues = self.runner._plan_preflight_issues(
+            {"main_product": "T恤", "picks": base}, limits)
+        codes = {item["code"] for item in issues}
+        self.assertNotIn("semantic_fragment", codes)
+        self.assertIn("semantic_fragment_advisory", codes)
+
+    def test_plan_preflight_accepts_semantic_fragment_when_neighbour_bound(self):
+        limits = {"min_total": 1, "max_total": 60, "min_segments": 1, "max_segments": 12}
+        picks = [
+            {"src": 1, "start": 0, "end": 3, "text": "别穿一次性的白T。",
+             "role": "pain", "module": "body", "semantic_verdict": "keep",
+             "semantic_standalone": False, "safe_standalone": False,
+             "requires_next": True},
+            {"src": 1, "start": 3, "end": 6, "text": "不然洗两次领子就废了。",
+             "role": "proof", "module": "body", "semantic_verdict": "keep"},
+        ]
+        issues = self.runner._plan_preflight_issues(
+            {"main_product": "T恤", "picks": picks}, limits)
+        codes = {item["code"] for item in issues}
+        self.assertNotIn("semantic_fragment", codes)
+        self.assertIn("semantic_fragment_bound", codes)
+
     def test_retry_returns_invalid_validation_plan_to_edit_stage(self):
         workspace = self.root / "job"
         engine = workspace / "engine"
@@ -719,7 +750,7 @@ class RunnerTest(unittest.TestCase):
         engine = workspace / "engine"
         engine.mkdir(parents=True, exist_ok=True)
         (engine / "candidate_digest.json").write_text(json.dumps([
-            {"i": index, "s": index * 12.0, "e": index * 12.0 + 10.0,
+            {"i": index, "s": index * 12.0, "e": index * 12.0 + 6.0,
              "t": f"候选{index}", "q": 7, "safe_standalone": True}
             for index in range(count)
         ]), encoding="utf-8")
@@ -755,7 +786,7 @@ class RunnerTest(unittest.TestCase):
         summary = json.loads(
             (workspace / "final-render" / "delivery_summary.json").read_text(encoding="utf-8"))
         self.assertEqual(summary["segments"], 8)
-        self.assertAlmostEqual(summary["duration"], 80.0, places=1)
+        self.assertAlmostEqual(summary["duration"], 48.0, places=1)
 
     def test_emergency_cut_without_candidates_blocks_instead_of_dumping_raw_source(self):
         source = self.root / "source.mp4"

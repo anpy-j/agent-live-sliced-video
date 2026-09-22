@@ -19,3 +19,6 @@ package-lock.json
 .agents/
 .multica/
 AGENTS.md
+
+# local runtime logs
+.runtime/

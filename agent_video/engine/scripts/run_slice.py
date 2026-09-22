@@ -30,7 +30,7 @@ VOCAB_PROFILE_ENV = "DOUYIN_VOCAB_PROFILE"
 
 # 单段时长上限（与 validate_timeline.py 对齐）。超过这个值的
 # 选段下游一定会被门禁拦下，而且还可能让 cuts 的局部窗口退化，所以在入口就拦。
-MAX_PICK_SECONDS = 18.0
+MAX_PICK_SECONDS = 8.0
 ALLOWED_ROLES = {"hook", "result", "pain", "proof", "fit", "material", "craft",
                  "color", "styling", "scene", "demo", "close", "bridge",
                  "personality", "story", "reaction", "visual"}
@@ -166,7 +166,7 @@ def normalize_picks(path, media, output, max_pick_seconds=MAX_PICK_SECONDS):
 
     - `src` 只在缺失时补 1。原实现无条件把 `src` 改写成 1，多源 picks 传进来会被
       静默改成单源、切点全错却不报错；现在显式给出别的源直接拒绝。
-    - 单个完整口播单元在入口先查一遍（完整声音硬上限 18s，与门禁一致）。
+    - 单个完整口播单元在入口先查一遍（完整声音硬上限 8s，与编排门禁一致）。
       超长选段下游必然失败，而且会让 cuts 的局部窗口退化，在这里失败能省掉
       整条渲染与一次全片转写。
     """
@@ -212,7 +212,7 @@ def normalize_picks(path, media, output, max_pick_seconds=MAX_PICK_SECONDS):
         raise RuntimeError(
             f"picks.json 有 {len(too_long)} 条口播单元超过 {max_pick_seconds:.1f}s（"
             + "、".join(too_long[:6])
-            + "）。完整口播必须控制在 1.2-18.0s；超过 10s 仅允许无法安全拆分的完整声音单元")
+            + "）。完整口播必须控制在 1.2-5.0s；仅无法安全拆分的完整长句可放宽到 8.0s")
     if not normalized:
         raise RuntimeError("picks.json contains no picks")
     modules = {row["module"] for row in normalized}
@@ -406,7 +406,8 @@ def selection_state(workdir, media, duration, limits, picks_path):
             # 段数是「钩子 + 正文」并集，钩子也占额度；写多了会被 cuts 合并/剔除，
             # 写少了直接 too_few_segments 打回，所以给出可落地的区间而不是理论值。
             "segments": "target segment count is supplied by the job-specific editing constraints",
-            "segment_seconds": "1.2-18.0s per complete spoken unit; >10s only when no safe speech split exists; visual shots cut shorter independently",
+            "segment_seconds": "1.2-5.0s per complete spoken unit; an unmergeable native long "
+                               "sentence may go up to 8.0s; visual shots cut shorter independently",
             "cut_effects": "cuts.py merges adjacent same-role picks (<=0.45s apart), drops "
                            "overlapping/duplicated picks and any segment hitting a banned word, "
                            "so pick 2-4 segments more than the target floor",

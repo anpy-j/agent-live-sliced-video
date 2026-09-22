@@ -177,9 +177,9 @@ def validate_rows(rows, sources, min_total, max_total, min_segments, max_segment
                             f"total {total:.2f}s exceeds {max_total:.2f}s",
                             duration=round(total, 3)))
     if len(rows) < min_segments:
-        issues.append(issue("soft_too_few_segments",
-                            f"{len(rows)} segments below soft target {min_segments}",
-                            level="warning"))
+        issues.append(issue("too_few_segments",
+                            f"{len(rows)} segments below minimum {min_segments}; "
+                            "a cut must be composed of 2-5s spoken units"))
     if len(rows) > max_segments:
         issues.append(issue("too_many_segments", f"{len(rows)} segments; maximum {max_segments}"))
     if demo_count > 3:
@@ -261,8 +261,8 @@ def main():
     parser.add_argument("--min-segments", type=int, default=18)
     parser.add_argument("--max-segments", type=int, default=32)
     parser.add_argument("--min-segment", type=float, default=1.2)
-    parser.add_argument("--max-segment", type=float, default=18.0)
-    parser.add_argument("--max-demo-segment", type=float, default=18.0)
+    parser.add_argument("--max-segment", type=float, default=8.0)
+    parser.add_argument("--max-demo-segment", type=float, default=8.0)
     parser.add_argument("--require-structure", action="store_true")
     parser.add_argument("--report", required=True)
     args = parser.parse_args()

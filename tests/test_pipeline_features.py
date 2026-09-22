@@ -8,6 +8,7 @@ from agent_video.db import Store
 from agent_video.ai import PLAN_PATCH_SCHEMA, ProviderResponseError
 from agent_video.engine.scripts.cuts import expand
 from agent_video.engine.scripts.digest_candidates import category, quality
+from agent_video.engine.scripts.global_quality import review_copy
 from agent_video.engine.scripts.prep import (cache_key, parse_subtitle,
                                              merge_blocks, usable,
                                              transcript_cache_key,
@@ -41,6 +42,25 @@ def semantic_audit_response(candidates, main_product="上衣", reject_ids=()):
 
 
 class PipelineFeatureTest(unittest.TestCase):
+    def test_generic_color_never_creates_a_cross_back_jump(self):
+        rows = [
+            {"text": "这件白色很显气质。", "product": "T恤", "color": "白色"},
+            {"text": "通用色谁穿都合适。", "product": "T恤", "color": "通用"},
+            {"text": "白色搭牛仔裤很好看。", "product": "T恤", "color": "白色"},
+        ]
+        codes = {item["code"] for item in review_copy(rows)["issues"]}
+        self.assertNotIn("color_jump", codes)
+
+    def test_generic_color_still_flags_a_real_cross_back_jump(self):
+        rows = [
+            {"text": "这件白色很显气质。", "product": "T恤", "color": "白色"},
+            {"text": "黑色更耐脏一些。", "product": "T恤", "color": "黑色"},
+            {"text": "通用色谁穿都合适。", "product": "T恤", "color": "通用"},
+            {"text": "白色搭牛仔裤很好看。", "product": "T恤", "color": "白色"},
+        ]
+        codes = {item["code"] for item in review_copy(rows)["issues"]}
+        self.assertIn("color_jump", codes)
+
     def test_enterprise_console_assets_and_accessibility_contract(self):
         root = Path(__file__).resolve().parents[1]
         index = (root / "web" / "index.html").read_text(encoding="utf-8")
@@ -318,6 +338,29 @@ class PipelineFeatureTest(unittest.TestCase):
         self.assertEqual(final[0]["code"], "segment_too_long")
         self.assertEqual(final[0]["level"], "warning")
 
+    def test_long_complete_utterance_is_capped_at_eight_seconds(self):
+        tolerable = shared_issues([
+            {"start": 0, "end": 7.0, "text": "不可切分的长句", "role": "proof",
+             "long_complete_utterance": True}])
+        self.assertNotIn("segment_too_long", {item["code"] for item in tolerable})
+        blocked = shared_issues([
+            {"start": 0, "end": 12.2, "text": "被合并出来的长段", "role": "proof",
+             "long_complete_utterance": True}])
+        self.assertEqual(blocked[0]["code"], "segment_too_long")
+        self.assertEqual(blocked[0]["level"], "error")
+
+    def test_segment_floor_is_a_blocking_issue(self):
+        plan = {"main_product": "上衣", "picks": [
+            {"start": index * 12.0, "end": index * 12.0 + 12.0, "text": f"长段{index}",
+             "role": "proof", "module": "body"}
+            for index in range(10)]}
+        issues = JobRunner._plan_preflight_issues(plan, {
+            "min_total": 70, "max_total": 120, "min_segments": 18, "max_segments": 32})
+        floor = [item for item in issues if item["code"] == "too_few_segments"]
+        self.assertTrue(floor)
+        self.assertEqual(floor[0]["level"], "error")
+        self.assertIn("segment_too_long", {item["code"] for item in issues})
+
     def test_incremental_merge_does_not_reselect_existing_candidate(self):
         base = {"main_product": "上衣", "picks": [
             {"_candidate_id": 1, "role": "hook"}, {"_candidate_id": 3, "role": "close"}]}
@@ -501,7 +544,7 @@ class PipelineFeatureTest(unittest.TestCase):
             provider.generate_plan.side_effect = [
                 semantic_audit_response(candidates),
                 response([0, 1, 2, 3], ["hook", "proof", "styling", "close"]),
-                response([4], ["bridge"]), response([5], ["bridge"])]
+                response([4, 5], ["bridge", "bridge"]), response([6, 7], ["bridge", "bridge"])]
             with patch.object(runner, "enqueue"):
                 runner._run_ai_plan_attempt(store.get_job(job_id), engine, provider, "workbuddy", "auto")
             self.assertEqual(provider.generate_plan.call_count, 4)
@@ -570,7 +613,7 @@ class PipelineFeatureTest(unittest.TestCase):
             ]
             preflight = [
                 [{"code": "needs_patch", "level": "error"}],
-                [{"code": "soft_too_few_segments", "level": "warning"}],
+                [{"code": "soft_duration_short", "level": "warning"}],
             ]
             with patch.object(runner, "_plan_preflight_issues",
                               side_effect=preflight), \
@@ -582,6 +625,9 @@ class PipelineFeatureTest(unittest.TestCase):
             selected = [pick.get("_candidate_id") for pick in written["picks"]]
             self.assertIn(4, selected)
             self.assertEqual(selected.index(1), selected.index(4) + 1)
+            review = json.loads((engine / "global_plan_review.json").read_text(
+                encoding="utf-8"))
+            self.assertEqual(review["variants"][0]["pick_count"], len(written["picks"]))
 
     @staticmethod
     def _audit_decision(candidate_id):

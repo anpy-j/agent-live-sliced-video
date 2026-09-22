@@ -25,6 +25,8 @@ LOW_VALUE_OPENING = re.compile(
 )
 EMPTY_PRAISE_OPENING = re.compile(r"^(?:真的|非常|特别|超级|巨|太)?(?:好看|漂亮|高级|绝了|喜欢)[啊呀哦吧！!。]*$")
 SHOUT_OPENING = re.compile(r"^(?:冲冲冲|上车|拍它|闭眼入|抢起来|不要犹豫)")
+# 颜色/商品字段里的“泛化占位值”不构成具体款式，参与连续性判断会制造假跳回。
+GENERIC_VARIANTS = frozenset({"通用", "通用色", "通用款", "不限", "无", "默认", "其它", "其他", "-", "—"})
 
 
 def _norm(value: str) -> str:
@@ -83,6 +85,8 @@ def review_copy(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
         product = str(row.get("product") or "").strip()
         color = str(row.get("color") or "").strip()
+        if color in GENERIC_VARIANTS:
+            color = ""
         if product and product != last_product:
             if product in seen_products:
                 issues.append({"code": "product_jump", "level": "error",

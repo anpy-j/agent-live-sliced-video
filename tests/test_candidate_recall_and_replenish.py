@@ -5,7 +5,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from agent_video.engine.scripts.digest_candidates import (
-    merge_short_units, should_merge_speech_units, dependency_metadata
+    merge_short_units, should_merge_speech_units, dependency_metadata,
+    TARGET_SPEECH, MAX_COMPLETE_SPEECH,
 )
 from agent_video.runner import JobRunner
 
@@ -44,6 +45,20 @@ class CandidateRecallAndReplenishTest(unittest.TestCase):
         merged = merge_short_units(rows, min_duration=1.5, max_duration=18.0, max_gap=0.40)
         self.assertEqual(len(merged), 2)
         self.assertAlmostEqual(merged[0]["end"] - merged[0]["start"], 1.0)
+
+    def test_merge_target_keeps_units_inside_five_second_budget(self):
+        self.assertLessEqual(TARGET_SPEECH, 5.0)
+        self.assertLessEqual(MAX_COMPLETE_SPEECH, 8.0)
+        # 三句各自 1.4 秒、彼此紧邻：旧上限 18 秒会把它们并成一个 4.2 秒长段；
+        # 目标上限下仍允许并成一段（因为 4.2 <= 4.7），但不会跨过 5 秒门禁。
+        rows = [{"start": index * 1.4, "end": index * 1.4 + 1.4,
+                 "text": f"短句{index}"} for index in range(6)]
+        merged = merge_short_units(rows, min_duration=1.5,
+                                   max_duration=TARGET_SPEECH, max_gap=0.40)
+        durations = [row["end"] - row["start"] for row in merged]
+        self.assertTrue(durations)
+        self.assertLessEqual(max(durations), TARGET_SPEECH + 1e-6)
+        self.assertGreater(len(merged), 1)
 
     def test_anchored_editing_constraints_prevent_target_shrinkage(self):
         with TemporaryDirectory() as tmp:

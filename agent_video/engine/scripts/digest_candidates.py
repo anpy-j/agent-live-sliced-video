@@ -17,8 +17,12 @@ except ImportError:  # Script entry point: its directory is already on sys.path.
 
 # 常规片段下限；验收硬门槛是 1.2 秒。
 MIN_SPEECH = 1.5
+# 合并目标：切片由 2-5 秒的声音单元组成，故短句只向上合并到对齐余量后的 5 秒上限。
+# 旧值 18 秒会把若干短句粘成一个长段，直接导致「90 秒只有 10 段」的编排结果。
+TARGET_SPEECH = 4.7
 MAX_SPEECH = 5.0
-MAX_COMPLETE_SPEECH = 18.0
+# 硬上限：只留给原生就不可切分的完整长句；不再允许把短句合并到这个长度。
+MAX_COMPLETE_SPEECH = 8.0
 
 LEADING_REFERENCE_RE = re.compile(
     r"^(?:(?:这|那)(?:个|种|样|条|套|双|件|款)|这些|那些|它|它们|"
@@ -282,9 +286,9 @@ def main():
     with open(args.input, encoding="utf-8") as handle:
         rows = json.load(handle)
     # 前置短句智能合并：依据间隙 (<0.4s)、停顿、标点和语义依赖，将 <1.5s 的
-    # 短促转折或修饰句前置合并为 1.5–18 秒的自然声音单元，避免 60% 可用上下文在
-    # 筛选前被简单物理丢弃。
-    rows = merge_short_units(rows, min_duration=MIN_SPEECH, max_duration=MAX_COMPLETE_SPEECH, max_gap=0.40)
+    # 短促转折或修饰句前置合并为 1.5-4.7 秒的自然声音单元，避免 60% 可用上下文在
+    # 筛选前被简单物理丢弃。上限对齐 5 秒片段门禁，使切片天然由多段短单元组成。
+    rows = merge_short_units(rows, min_duration=MIN_SPEECH, max_duration=TARGET_SPEECH, max_gap=0.40)
     rows = dependency_metadata(rows)
     rows = [row for row in rows if 1.2 <=
             float(row.get("end", 0)) - float(row.get("start", 0)) <= MAX_COMPLETE_SPEECH
