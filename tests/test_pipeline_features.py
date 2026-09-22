@@ -19,6 +19,7 @@ from agent_video.engine.scripts.visual_mix import (apply as apply_visual_mix,
 from agent_video.engine.validation_policy import shared_issues
 from agent_video.rules import DirectivesManager
 from agent_video.runner import (JobRunner, PlanRefinementError,
+                                SEMANTIC_AUDIT_BATCH_SIZE,
                                 SEMANTIC_AUDIT_RETRY_LIMIT)
 from agent_video.server import Application
 
@@ -646,6 +647,54 @@ class PipelineFeatureTest(unittest.TestCase):
                         for item in report["decisions"]}
             for candidate_id in (1, 2, 3, 4):
                 self.assertEqual(verdicts[candidate_id], "reject")
+
+    def test_semantic_audit_resumes_from_completed_batch_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = Store(root / "db.sqlite")
+            runner = JobRunner(store, root)
+            engine = root / "job" / "engine"
+            engine.mkdir(parents=True)
+            candidates = [
+                {"i": index, "s": index * 3.0, "e": index * 3.0 + 2.0,
+                 "c": "other", "t": f"第{index}条独立完整卖点"}
+                for index in range(SEMANTIC_AUDIT_BATCH_SIZE + 1)
+            ]
+            job_id = store.create_job(title="断点审核", source_path="/tmp/source.mp4",
+                                      brief="", mode="fast", workspace=str(engine.parent),
+                                      products=["上衣"])
+            first_batch = {"main_product": "上衣", "picks": [
+                self._audit_decision(index) for index in range(SEMANTIC_AUDIT_BATCH_SIZE)
+            ]}
+            first_provider = Mock(display_name="Mock")
+            first_provider.generate_plan.side_effect = [
+                {"plan": first_batch, "raw": {"result": first_batch}, "seconds": 1,
+                 "usage": {"input_tokens": 5, "output_tokens": 1}},
+                RuntimeError("模拟第二批进程中断"),
+            ]
+            with self.assertRaisesRegex(RuntimeError, "模拟第二批"):
+                runner._semantic_review_candidates(
+                    store.get_job(job_id), engine, first_provider,
+                    "workbuddy", "auto", candidates)
+            progress = json.loads(
+                (engine / "semantic_audit.progress.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(progress["decisions"]), SEMANTIC_AUDIT_BATCH_SIZE)
+
+            final_batch = {"main_product": "上衣", "picks": [
+                self._audit_decision(SEMANTIC_AUDIT_BATCH_SIZE)
+            ]}
+            resumed_provider = Mock(display_name="Mock")
+            resumed_provider.generate_plan.return_value = {
+                "plan": final_batch, "raw": {"result": final_batch}, "seconds": 1,
+                "usage": {"input_tokens": 5, "output_tokens": 1},
+            }
+            runner._semantic_review_candidates(
+                store.get_job(job_id), engine, resumed_provider,
+                "workbuddy", "auto", candidates)
+            self.assertEqual(resumed_provider.generate_plan.call_count, 1)
+            report = json.loads((engine / "semantic_audit.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(report["decisions"]), len(candidates))
+            self.assertFalse((engine / "semantic_audit.progress.json").exists())
 
     def test_visual_candidate_set_is_enforced(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -895,12 +895,31 @@ class JobRunner:
         # keep 结果后再进入编排。每批独立做逐条覆盖校验，避免大批次被截断。
         batches = [candidates[index:index + SEMANTIC_AUDIT_BATCH_SIZE]
                    for index in range(0, len(candidates), SEMANTIC_AUDIT_BATCH_SIZE)]
-        decisions: list[dict[str, Any]] = []
-        batch_main_products: list[str] = []
-        raw_batches: list[Any] = []
-        total_seconds = 0.0
-        total_usage = {"input_tokens": 0, "output_tokens": 0}
+        fingerprint = self._semantic_audit_fingerprint(job, candidates)
+        progress_path = engine_work / "semantic_audit.progress.json"
+        progress = self._read_json(progress_path, {})
+        resumable = (isinstance(progress, dict)
+                     and progress.get("candidate_fingerprint") == fingerprint
+                     and progress.get("provider") == provider_id
+                     and progress.get("model") == model
+                     and int(progress.get("batch_size") or 0) == SEMANTIC_AUDIT_BATCH_SIZE)
+        decisions: list[dict[str, Any]] = list(progress.get("decisions") or []) if resumable else []
+        batch_main_products: list[str] = list(
+            progress.get("batch_main_products") or []) if resumable else []
+        raw_batches: list[Any] = list(progress.get("raw_batches") or []) if resumable else []
+        total_seconds = float(progress.get("seconds") or 0) if resumable else 0.0
+        total_usage = dict(progress.get("usage") or {}) if resumable else {}
+        total_usage = {key: int(total_usage.get(key) or 0)
+                       for key in ("input_tokens", "output_tokens")}
         for batch_index, batch in enumerate(batches, 1):
+            expected = {int(item.get("i", -1)) for item in batch}
+            completed_ids = {int(item.get("candidate_id", -1)) for item in decisions}
+            if expected <= completed_ids:
+                self.store.update_stage(
+                    job["id"], "edit_plan", status="running",
+                    progress=round(0.24 * batch_index / len(batches), 4),
+                    message=(f"已从检查点恢复语义审核第 {batch_index}/{len(batches)} 批"))
+                continue
             if len(batches) > 1:
                 self.store.update_stage(
                     job["id"], "edit_plan", status="running",
@@ -919,7 +938,6 @@ class JobRunner:
                 kwargs["should_cancel"] = lambda: (
                     (self.store.get_job(job["id"]) or {}).get("status") == "cancelled"
                 )
-            expected = {int(item.get("i", -1)) for item in batch}
             covered_all: dict[int, dict[str, Any]] = {}
             batch_product = ""
             unresolved = list(batch)
@@ -968,6 +986,22 @@ class JobRunner:
                         "reason": "AI 未返回该候选判定，按不采用处理",
                     })
             decisions.extend(batch_decisions)
+            # Persist every completed batch. A daemon restart, agent timeout, or later
+            # provider failure must not throw away tens of minutes of completed review.
+            self._write_json_atomic(progress_path, {
+                "version": 1,
+                "candidate_fingerprint": fingerprint,
+                "provider": provider_id,
+                "model": model,
+                "batch_size": SEMANTIC_AUDIT_BATCH_SIZE,
+                "batch_count": len(batches),
+                "completed_batches": batch_index,
+                "decisions": decisions,
+                "batch_main_products": batch_main_products,
+                "raw_batches": raw_batches,
+                "seconds": total_seconds,
+                "usage": total_usage,
+            })
             if len(batches) > 1:
                 self.store.update_stage(
                     job["id"], "edit_plan", status="running",
@@ -1027,7 +1061,7 @@ class JobRunner:
 
         report = {
             "version": SEMANTIC_AUDIT_POLICY_VERSION,
-            "candidate_fingerprint": self._semantic_audit_fingerprint(job, candidates),
+            "candidate_fingerprint": fingerprint,
             "provider": provider_id,
             "model": model,
             "main_product": ((job.get("products") or [""])[0] or
@@ -1051,6 +1085,7 @@ class JobRunner:
                                 report_path, "application/json")
         response_path = Path(job["workspace"]) / f"{provider_id}-semantic-audit-response.json"
         self._write_json_atomic(response_path, {"batches": raw_batches})
+        progress_path.unlink(missing_ok=True)
         self.store.add_artifact(job["id"], "edit_plan", "ai_response",
                                 f"{provider.display_name} 语义审核原始响应",
                                 response_path, "application/json")
