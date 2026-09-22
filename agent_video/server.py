@@ -68,12 +68,38 @@ class Application:
             "multica_workspace_id": "",
             "ai_default_selection": "workbuddy:auto",
             "visual_ai_default_selection": "workbuddy:glm-5v-turbo",
+            "jev_enabled": False,
+            "jev_api_key": self._detect_jev_api_key(),
+            "jev_base_url": "https://api.typesafe.ai/v1",
+            "jev_default_model": "jev-latest",
+            "jev_min_confidence": 0.6,
+            "jev_timeout_seconds": 15.0,
+            "jev_concurrency": 8,
         }
         for key, value in defaults.items():
             if self.store.get_setting(key) is None:
                 self.store.set_setting(key, value)
         if is_windows:
             self._migrate_macos_defaults_on_windows(defaults)
+
+    @staticmethod
+    def _detect_jev_api_key() -> str:
+        env_key = os.environ.get("TYPESAFE_API_KEY", "").strip()
+        if env_key:
+            return env_key
+        demo_env = Path("/Volumes/MacData/Users/anpy/develop/personal/AI/project/typesafe-jev-demo/.env")
+        if demo_env.is_file():
+            try:
+                for line in demo_env.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line.startswith("TYPESAFE_API_KEY="):
+                        val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        if val:
+                            return val
+            except Exception:
+                pass
+        return ""
+
 
     def _migrate_macos_defaults_on_windows(self, defaults: dict[str, Any]) -> None:
         legacy = {
@@ -392,8 +418,19 @@ try {{
                 "workbuddy_cli_path", "workbuddy_default_model",
                 "antigravity_cli_path", "codex_cli_path", "opencode_cli_path",
                 "multica_cli_path", "multica_profile", "multica_workspace_id",
-                "ai_default_selection", "visual_ai_default_selection"]
+                "ai_default_selection", "visual_ai_default_selection",
+                "jev_enabled", "jev_base_url", "jev_default_model",
+                "jev_min_confidence", "jev_timeout_seconds", "jev_concurrency"]
         result = {key: self.store.get_setting(key) for key in keys}
+        raw_jev_key = str(self.store.get_setting("jev_api_key") or "").strip()
+        result["jev_api_key_configured"] = bool(raw_jev_key)
+        if raw_jev_key:
+            if len(raw_jev_key) <= 8:
+                result["jev_api_key"] = "****"
+            else:
+                result["jev_api_key"] = f"{raw_jev_key[:3]}****{raw_jev_key[-4:]}"
+        else:
+            result["jev_api_key"] = ""
         result["engine_path"] = str(self.root / "agent_video" / "engine")
         result["engine_bundled"] = True
         return result
@@ -402,14 +439,36 @@ try {{
         allowed = {"engine_python", "skill_path", "mcp_enabled",
                    "workbuddy_cli_path", "workbuddy_default_model", "antigravity_cli_path",
                    "codex_cli_path", "opencode_cli_path", "multica_cli_path", "multica_profile",
-                   "multica_workspace_id", "ai_default_selection", "visual_ai_default_selection"}
+                   "multica_workspace_id", "ai_default_selection", "visual_ai_default_selection",
+                   "jev_enabled", "jev_api_key", "jev_base_url", "jev_default_model",
+                   "jev_min_confidence", "jev_timeout_seconds", "jev_concurrency"}
         if "ai_default_selection" in payload:
             self.runner.resolve_ai_selection(str(payload["ai_default_selection"]))
         if "visual_ai_default_selection" in payload:
             self.runner.resolve_visual_ai_selection(str(payload["visual_ai_default_selection"]))
         for key in allowed & payload.keys():
-            self.store.set_setting(key, payload[key])
+            val = payload[key]
+            if key == "jev_api_key":
+                val_str = str(val or "").strip()
+                if not val_str or "****" in val_str:
+                    continue
+                self.store.set_setting(key, val_str)
+            elif key in {"jev_min_confidence", "jev_timeout_seconds"}:
+                try:
+                    self.store.set_setting(key, float(val))
+                except (ValueError, TypeError):
+                    pass
+            elif key == "jev_concurrency":
+                try:
+                    self.store.set_setting(key, max(1, min(32, int(val))))
+                except (ValueError, TypeError):
+                    pass
+            elif key == "jev_enabled":
+                self.store.set_setting(key, bool(val))
+            else:
+                self.store.set_setting(key, val)
         return self.settings()
+
 
     def skill(self) -> dict[str, Any]:
         path = Path(self.store.get_setting("skill_path", ""))

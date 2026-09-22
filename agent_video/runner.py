@@ -898,6 +898,97 @@ class JobRunner:
         valid_ids = set(resolve_dependency_closure(candidates, selected_ids).valid_ids)
         return [item for item in candidates if int(item.get("i", -1)) in valid_ids]
 
+    def _run_jev_audit(
+        self, job: dict[str, Any], engine_work: Path, candidates: list[dict[str, Any]]
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], float]:
+        from .jev import (
+            JevClient, DEFAULT_JEV_BASE_URL, DEFAULT_JEV_MODEL,
+            DEFAULT_MIN_CONFIDENCE, DEFAULT_TIMEOUT_SECONDS, DEFAULT_CONCURRENCY
+        )
+        import concurrent.futures
+
+        jev_key = str(self.store.get_setting("jev_api_key") or "").strip()
+        base_url = str(self.store.get_setting("jev_base_url") or DEFAULT_JEV_BASE_URL)
+        model = str(self.store.get_setting("jev_default_model") or DEFAULT_JEV_MODEL)
+        try:
+            min_confidence = float(self.store.get_setting("jev_min_confidence") or DEFAULT_MIN_CONFIDENCE)
+        except (ValueError, TypeError):
+            min_confidence = DEFAULT_MIN_CONFIDENCE
+        try:
+            timeout = float(self.store.get_setting("jev_timeout_seconds") or DEFAULT_TIMEOUT_SECONDS)
+        except (ValueError, TypeError):
+            timeout = DEFAULT_TIMEOUT_SECONDS
+        try:
+            concurrency = int(self.store.get_setting("jev_concurrency") or DEFAULT_CONCURRENCY)
+        except (ValueError, TypeError):
+            concurrency = DEFAULT_CONCURRENCY
+
+        client = JevClient(api_key=jev_key, base_url=base_url, timeout=timeout, default_model=model)
+        main_product = ((job.get("products") or [""])[0] or "女装T恤").strip()
+
+        start_time = time.perf_counter()
+        self.store.update_stage(
+            job["id"], "edit_plan", status="running",
+            progress=0.05,
+            message=f"正在调用 TypeSafe AI Jev 并发审核候选（并发 {concurrency}，置信度阈值 {min_confidence:.2f}）")
+
+        confident_decisions: list[dict[str, Any]] = []
+        unresolved: list[dict[str, Any]] = []
+
+        def _eval_one(cand: dict[str, Any]):
+            text = str(cand.get("t") or "").strip()
+            try:
+                ev = client.evaluate_candidate(
+                    text=text, main_product=main_product, min_confidence=min_confidence
+                )
+                return cand, ev, None
+            except Exception as exc:
+                return cand, None, exc
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(32, concurrency))) as executor:
+            results = list(executor.map(_eval_one, candidates))
+
+        for cand, ev, exc in results:
+            cid = int(cand.get("i", -1))
+            if exc is not None or ev is None:
+                unresolved.append(cand)
+                continue
+            if ev.confidence < min_confidence:
+                unresolved.append(cand)
+                continue
+            confident_decisions.append({
+                "candidate_id": cid,
+                "verdict": ev.verdict,
+                "standalone": ev.standalone,
+                "subject_explicit": True,
+                "referent": "",
+                "requires_previous": False,
+                "requires_next": False,
+                "opening_suitability": ev.opening_suitability,
+                "information_gain": ev.information_gain,
+                "content_function": "hook" if ev.opening_suitability >= 75 else ("body" if ev.is_usable else "discard"),
+                "main_product_relevant": ev.main_product_relevant,
+                "content_type": ev.content_type,
+                "selling_value": ev.selling_value,
+                "confidence": ev.confidence,
+                "reason": ev.reason,
+                "source": "jev",
+            })
+
+        elapsed = time.perf_counter() - start_time
+        self.store.add_event(
+            job["id"], "edit_plan", "info", "jev_audit_finished",
+            f"TypeSafe Jev 快速审核完成：共 {len(candidates)} 条，高置信度采纳 {len(confident_decisions)} 条，"
+            f"低置信度/待回退 {len(unresolved)} 条（耗时 {elapsed:.2f}s）",
+            {
+                "total": len(candidates),
+                "confident": len(confident_decisions),
+                "unresolved": len(unresolved),
+                "seconds": round(elapsed, 2),
+            }
+        )
+        return confident_decisions, unresolved, elapsed
+
     def _semantic_review_candidates(
             self, job: dict[str, Any], engine_work: Path, provider: CliProvider,
             provider_id: str, model: str,
@@ -907,10 +998,30 @@ class JobRunner:
             return cached, {"cached": True, "seconds": 0.0,
                             "usage": {"input_tokens": 0, "output_tokens": 0}}
 
+        total_seconds = 0.0
+        total_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
+
+        # 如果启用了 TypeSafe AI Jev 语义判断层，先由 Jev 进行快速并发初筛与置信度门禁
+        jev_enabled = bool(self.store.get_setting("jev_enabled", False))
+        jev_key = str(self.store.get_setting("jev_api_key") or "").strip()
+        candidates_to_audit = candidates
+        jev_decisions: list[dict[str, Any]] = []
+        if jev_enabled and jev_key:
+            try:
+                jev_decisions, unresolved_candidates, jev_sec = self._run_jev_audit(
+                    job, engine_work, candidates)
+                total_seconds += jev_sec
+                candidates_to_audit = unresolved_candidates
+            except Exception as jev_exc:
+                self.store.add_event(
+                    job["id"], "edit_plan", "warning", "jev_audit_error",
+                    f"TypeSafe Jev 快速审核异常，已平滑回退全量 LLM 审核: {jev_exc}")
+                candidates_to_audit = candidates
+
         # 候选池不再有 80 条上限，因此审核按小批分批调用，合并全部
         # keep 结果后再进入编排。每批独立做逐条覆盖校验，避免大批次被截断。
-        batches = [candidates[index:index + SEMANTIC_AUDIT_BATCH_SIZE]
-                   for index in range(0, len(candidates), SEMANTIC_AUDIT_BATCH_SIZE)]
+        batches = [candidates_to_audit[index:index + SEMANTIC_AUDIT_BATCH_SIZE]
+                   for index in range(0, len(candidates_to_audit), SEMANTIC_AUDIT_BATCH_SIZE)]
         fingerprint = self._semantic_audit_fingerprint(job, candidates)
         progress_path = engine_work / "semantic_audit.progress.json"
         progress = self._read_json(progress_path, {})
@@ -923,10 +1034,17 @@ class JobRunner:
         batch_main_products: list[str] = list(
             progress.get("batch_main_products") or []) if resumable else []
         raw_batches: list[Any] = list(progress.get("raw_batches") or []) if resumable else []
-        total_seconds = float(progress.get("seconds") or 0) if resumable else 0.0
-        total_usage = dict(progress.get("usage") or {}) if resumable else {}
-        total_usage = {key: int(total_usage.get(key) or 0)
-                       for key in ("input_tokens", "output_tokens")}
+        if resumable:
+            total_seconds += float(progress.get("seconds") or 0)
+            total_usage = dict(progress.get("usage") or {})
+            total_usage = {key: int(total_usage.get(key) or 0)
+                           for key in ("input_tokens", "output_tokens")}
+
+        # 合并 Jev 的高置信度判定
+        for jd in jev_decisions:
+            if not any(int(d.get("candidate_id", -1)) == int(jd.get("candidate_id", -1)) for d in decisions):
+                decisions.append(jd)
+
         for batch_index, batch in enumerate(batches, 1):
             expected = {int(item.get("i", -1)) for item in batch}
             completed_ids = {int(item.get("candidate_id", -1)) for item in decisions}
@@ -1078,8 +1196,8 @@ class JobRunner:
         report = {
             "version": SEMANTIC_AUDIT_POLICY_VERSION,
             "candidate_fingerprint": fingerprint,
-            "provider": provider_id,
-            "model": model,
+            "provider": provider_id if candidates_to_audit else "typesafe_jev",
+            "model": model if candidates_to_audit else str(self.store.get_setting("jev_default_model") or "jev-latest"),
             "main_product": ((job.get("products") or [""])[0] or
                              max((item for item in batch_main_products if item),
                                  key=batch_main_products.count, default="")),
@@ -1099,19 +1217,27 @@ class JobRunner:
         self._write_json_atomic(report_path, report)
         self.store.add_artifact(job["id"], "edit_plan", "report", "AI 逐句语义审核",
                                 report_path, "application/json")
-        response_path = Path(job["workspace"]) / f"{provider_id}-semantic-audit-response.json"
-        self._write_json_atomic(response_path, {"batches": raw_batches})
+        if raw_batches:
+            response_path = Path(job["workspace"]) / f"{provider_id}-semantic-audit-response.json"
+            self._write_json_atomic(response_path, {"batches": raw_batches})
+            self.store.add_artifact(job["id"], "edit_plan", "ai_response",
+                                    f"{provider.display_name} 语义审核原始响应",
+                                    response_path, "application/json")
         progress_path.unlink(missing_ok=True)
-        self.store.add_artifact(job["id"], "edit_plan", "ai_response",
-                                f"{provider.display_name} 语义审核原始响应",
-                                response_path, "application/json")
+        completed_msg = (
+            f"AI 逐句审核完成：{len(candidates)} 条候选经 Jev 初筛与 LLM 审核（共分 {len(batches)} 批），"
+            f"保留 {len(filtered)} 条（首选 {len(pools['preferred_ids'])} 条，召回 {len(pools['recalled_ids'])} 条）"
+            if len(batches) > 0 else
+            f"AI 逐句审核完成：{len(candidates)} 条候选经 TypeSafe AI Jev 毫秒级网关全量初筛完成，"
+            f"保留 {len(filtered)} 条（首选 {len(pools['preferred_ids'])} 条，召回 {len(pools['recalled_ids'])} 条）"
+        )
+        if supplemented_ids:
+            completed_msg += f"（其中 {len(supplemented_ids)} 条由本地安全规则补齐）"
         self.store.add_event(
             job["id"], "edit_plan", "success", "ai_semantic_audit_completed",
-            f"AI 逐句审核完成：{len(candidates)} 条候选分 {len(batches)} 批审核，"
-            f"保留 {len(filtered)} 条（首选 {len(pools['preferred_ids'])} 条，召回 {len(pools['recalled_ids'])} 条）"
-            + (f"（其中 {len(supplemented_ids)} 条由本地安全规则补齐）"
-               if supplemented_ids else ""),
-            {"provider": provider_id, "model": model,
+            completed_msg,
+            {"provider": provider_id if candidates_to_audit else "typesafe_jev",
+             "model": model if candidates_to_audit else str(self.store.get_setting("jev_default_model") or "jev-latest"),
              "input": len(candidates), "kept": len(filtered),
              "preferred": len(pools["preferred_ids"]),
              "recalled": len(pools["recalled_ids"]),
