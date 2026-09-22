@@ -683,7 +683,23 @@ class JobRunner:
         products = [str(value).strip() for value in (job.get("products") or [])
                     if str(value).strip()]
         product_text = "、".join(products) if products else "从全部候选中识别唯一主商品"
-        payload = json.dumps(candidates, ensure_ascii=False, separators=(",", ":"))
+        audit_payload = []
+        for item in candidates:
+            cid = item.get("candidate_id")
+            if cid is None:
+                cid = item.get("i", -1)
+            row: dict[str, Any] = {
+                "candidate_id": int(cid),
+                "text": str(item.get("t") or item.get("current_text") or item.get("text") or ""),
+            }
+            if item.get("previous_text"):
+                row["previous_text"] = str(item["previous_text"])
+            if item.get("next_text"):
+                row["next_text"] = str(item["next_text"])
+            if "safe_standalone" in item:
+                row["safe_standalone"] = bool(item["safe_standalone"])
+            audit_payload.append(row)
+        payload = json.dumps(audit_payload, ensure_ascii=False, separators=(",", ":"))
         return f"""你是女装直播切片的独立语义质检器，不负责剪辑编排。
 
 任务：逐条审核下面每一个候选口播，建立后续编排唯一可用的白名单。
