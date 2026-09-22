@@ -99,6 +99,11 @@
             <label class="field">文本编排 AI<span class="field-control" id="newJobTextModelPicker"><input disabled value="正在读取可用模型…"></span><small>只接收本地脚本筛过的候选文字，负责选句和排序。</small></label>
             <label class="field">多模态混剪 AI<span class="field-control" id="newJobVisualModelPicker"><input disabled value="正在读取可用模型…"></span><small>仅在原画面明显差时，从联系表中选择同款全身展示画面。</small></label>
           </div>
+          <label class="field">语义审核引擎<select name="semantic_engine" id="newJobSemanticEngine">
+            <option value="auto" selected>自动（跟随系统设置）</option>
+            <option value="jev">TypeSafe Jev（毫秒级初筛，需在系统设置配置 Key）</option>
+            <option value="llm">LLM（所选文本编排模型逐句审核）</option>
+          </select><small>决定“哪些句子可独立成段”的逐句审核由谁完成；Jev 更快更省，命中低置信度会自动回退 LLM。编排与成片仍由文本编排 AI 负责。</small></label>
           <details class="optional-field"><summary>补充剪辑偏好（可选）</summary><label class="field">创意偏好<textarea name="brief" rows="3" placeholder="例如：突出主播审美观点、节奏自然、控制在 60 秒左右"></textarea><small>只影响 Agent 的创意取舍；留空使用默认女装精剪策略，不会改变技术流程。</small></label></details>
         </section>
       </div>

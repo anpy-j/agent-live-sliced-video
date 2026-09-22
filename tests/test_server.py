@@ -144,5 +144,38 @@ class FilePickerTest(unittest.TestCase):
         self.assertIsNone(self.app.store.get_job(job_id))
 
 
+class SemanticEngineSelectionTest(unittest.TestCase):
+    """新建任务接口接受 semantic_engine，并把它写进任务记录。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.video = self.root / "demo.mp4"
+        self.video.write_bytes(b"data")
+        self.app = Application(self.root)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _create(self, **extra):
+        payload = {"title": "引擎选择", "source_path": str(self.video), "products": ["衣服"]}
+        payload.update(extra)
+        with patch.object(self.app.runner, "resolve_ai_selection", return_value=("manual", None)), \
+             patch.object(self.app.runner, "resolve_visual_ai_selection", return_value=("manual", None)), \
+             patch.object(self.app.runner, "enqueue"):
+            return self.app.create_job(payload)
+
+    def test_engine_defaults_to_auto(self):
+        self.assertEqual(self._create()["semantic_engine"], "auto")
+
+    def test_engine_can_be_jev_or_llm(self):
+        self.assertEqual(self._create(semantic_engine="jev")["semantic_engine"], "jev")
+        self.assertEqual(self._create(semantic_engine="llm")["semantic_engine"], "llm")
+
+    def test_unknown_engine_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self._create(semantic_engine="gpt")
+
+
 if __name__ == "__main__":
     unittest.main()

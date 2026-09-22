@@ -151,6 +151,8 @@ class Store:
                 con.execute("ALTER TABLE jobs ADD COLUMN target_min_seconds INTEGER NOT NULL DEFAULT 0")
             if "target_max_seconds" not in columns:
                 con.execute("ALTER TABLE jobs ADD COLUMN target_max_seconds INTEGER NOT NULL DEFAULT 0")
+            if "semantic_engine" not in columns:
+                con.execute("ALTER TABLE jobs ADD COLUMN semantic_engine TEXT NOT NULL DEFAULT 'auto'")
             con.execute("UPDATE jobs SET current_stage='validation' "
                         "WHERE current_stage IN ('rough_cut','pre_render_review')")
             con.execute("UPDATE events SET stage_id='validation' "
@@ -177,16 +179,18 @@ class Store:
                    materials: list[str] | None = None, colors: list[str] | None = None,
                    subtitle_path: str | None = None,
                    delivery_mode: str = "merged", creative_strategy: str = "auto",
-                   target_min_seconds: int = 0, target_max_seconds: int = 0) -> str:
+                   target_min_seconds: int = 0, target_max_seconds: int = 0,
+                   semantic_engine: str = "auto") -> str:
         job_id = f"job_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
         now = utc_now()
         with self.connect() as con:
             con.execute(
-                "INSERT INTO jobs(id,title,source_path,brief,status,current_stage,progress,mode,created_at,updated_at,workspace,model_provider,model_name,visual_model_provider,visual_model_name,products_json,materials_json,colors_json,subtitle_path,delivery_mode,creative_strategy,target_min_seconds,target_max_seconds) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO jobs(id,title,source_path,brief,status,current_stage,progress,mode,created_at,updated_at,workspace,model_provider,model_name,visual_model_provider,visual_model_name,products_json,materials_json,colors_json,subtitle_path,delivery_mode,creative_strategy,target_min_seconds,target_max_seconds,semantic_engine) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (job_id, title, source_path, brief, "queued", "material_index", 0, mode, now, now,
                  workspace, model_provider, model_name, visual_model_provider, visual_model_name,
                  _json(products or []), _json(materials or []), _json(colors or []),
-                 subtitle_path, delivery_mode, creative_strategy, target_min_seconds, target_max_seconds),
+                 subtitle_path, delivery_mode, creative_strategy, target_min_seconds, target_max_seconds,
+                 semantic_engine),
             )
             con.executemany(
                 "INSERT INTO stages(job_id,stage_id,name,position) VALUES(?,?,?,?)",
@@ -200,7 +204,8 @@ class Store:
                         "subtitle_path": subtitle_path, "delivery_mode": delivery_mode,
                         "creative_strategy": creative_strategy,
                         "target_min_seconds": target_min_seconds,
-                        "target_max_seconds": target_max_seconds})
+                        "target_max_seconds": target_max_seconds,
+                        "semantic_engine": semantic_engine})
         return job_id
 
     def list_jobs(self, limit: int = 100) -> list[dict[str, Any]]:

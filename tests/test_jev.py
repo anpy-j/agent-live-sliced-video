@@ -259,5 +259,59 @@ class JevRunnerAuditTestCase(unittest.TestCase):
             self.assertEqual(unresolved[0]["i"], 2)
 
 
+class JevJobEngineSelectionTestCase(unittest.TestCase):
+    """新建任务可显式选择语义审核引擎（jev / llm），auto 跟随系统设置。"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.store = Store(self.root / "test.db")
+        self.runner = JobRunner(self.store, self.root)
+
+    def tearDown(self):
+        self.runner.stop()
+        self.temp_dir.cleanup()
+
+    def _job(self, semantic_engine):
+        job_id = self.store.create_job(
+            title="引擎选择", source_path="/tmp/fake.mp4", brief="", mode="fast",
+            workspace=str(self.root / "workspace"), semantic_engine=semantic_engine)
+        return self.store.get_job(job_id)
+
+    def test_default_engine_is_auto(self):
+        job_id = self.store.create_job(
+            title="引擎选择", source_path="/tmp/fake.mp4", brief="", mode="fast",
+            workspace=str(self.root / "workspace"))
+        self.assertEqual(self.store.get_job(job_id)["semantic_engine"], "auto")
+
+    def test_job_created_event_records_engine(self):
+        job = self._job("jev")
+        created = [event for event in job["events"] if event["kind"] == "job_created"]
+        self.assertEqual(created[0]["payload"]["semantic_engine"], "jev")
+
+    def test_explicit_jev_needs_api_key(self):
+        job = self._job("jev")
+        self.assertFalse(self.runner._jev_audit_enabled(job))
+        kinds = [event["kind"] for event in self.store.get_job(job["id"])["events"]]
+        self.assertIn("jev_audit_unavailable", kinds)
+
+    def test_explicit_jev_with_key_is_enabled(self):
+        self.store.set_setting("jev_api_key", "ts_live_key")
+        self.store.set_setting("jev_enabled", False)
+        self.assertTrue(self.runner._jev_audit_enabled(self._job("jev")))
+
+    def test_explicit_llm_overrides_global_switch(self):
+        self.store.set_setting("jev_enabled", True)
+        self.store.set_setting("jev_api_key", "ts_live_key")
+        self.assertFalse(self.runner._jev_audit_enabled(self._job("llm")))
+
+    def test_auto_follows_global_switch(self):
+        self.store.set_setting("jev_api_key", "ts_live_key")
+        self.store.set_setting("jev_enabled", True)
+        self.assertTrue(self.runner._jev_audit_enabled(self._job("auto")))
+        self.store.set_setting("jev_enabled", False)
+        self.assertFalse(self.runner._jev_audit_enabled(self._job("auto")))
+
+
 if __name__ == "__main__":
     unittest.main()

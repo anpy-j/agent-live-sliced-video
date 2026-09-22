@@ -989,6 +989,22 @@ class JobRunner:
         )
         return confident_decisions, unresolved, elapsed
 
+    def _jev_audit_enabled(self, job: dict[str, Any]) -> bool:
+        """任务级语义审核引擎：jev / llm 显式指定，auto 跟随系统设置。"""
+        engine_choice = str(job.get("semantic_engine") or "auto").strip().lower()
+        if engine_choice == "jev":
+            jev_enabled = True
+        elif engine_choice == "llm":
+            jev_enabled = False
+        else:
+            jev_enabled = bool(self.store.get_setting("jev_enabled", False))
+        if jev_enabled and not str(self.store.get_setting("jev_api_key") or "").strip():
+            self.store.add_event(
+                job["id"], "edit_plan", "warning", "jev_audit_unavailable",
+                "未配置 TypeSafe Jev API Key，本次语义审核回退到 LLM")
+            return False
+        return jev_enabled
+
     def _semantic_review_candidates(
             self, job: dict[str, Any], engine_work: Path, provider: CliProvider,
             provider_id: str, model: str,
@@ -1001,12 +1017,11 @@ class JobRunner:
         total_seconds = 0.0
         total_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
 
-        # 如果启用了 TypeSafe AI Jev 语义判断层，先由 Jev 进行快速并发初筛与置信度门禁
-        jev_enabled = bool(self.store.get_setting("jev_enabled", False))
-        jev_key = str(self.store.get_setting("jev_api_key") or "").strip()
+        # 语义审核引擎：任务创建时可显式指定 jev / llm，auto 则跟随系统设置。
+        jev_enabled = self._jev_audit_enabled(job)
         candidates_to_audit = candidates
         jev_decisions: list[dict[str, Any]] = []
-        if jev_enabled and jev_key:
+        if jev_enabled:
             try:
                 jev_decisions, unresolved_candidates, jev_sec = self._run_jev_audit(
                     job, engine_work, candidates)

@@ -145,6 +145,9 @@ class Application:
         creative_strategy = str(payload.get("creative_strategy") or "auto")
         if creative_strategy not in {"auto", "selling", "tryon", "personality", "story", "visual"}:
             raise ValueError("creative_strategy 必须是 auto、selling、tryon、personality、story 或 visual")
+        semantic_engine = str(payload.get("semantic_engine") or "auto").strip().lower()
+        if semantic_engine not in {"auto", "jev", "llm"}:
+            raise ValueError("语义审核引擎必须是 auto（跟随系统设置）、jev 或 llm")
         target_min_seconds, target_max_seconds = self._parse_target_duration(payload)
         default_selection = str(self.store.get_setting("ai_default_selection", "workbuddy:auto"))
         ai_model = str(payload.get("text_ai_model") or payload.get("ai_model") or default_selection)
@@ -165,7 +168,8 @@ class Application:
                                        subtitle_path=subtitle_path, delivery_mode=delivery_mode,
                                        creative_strategy=creative_strategy,
                                        target_min_seconds=target_min_seconds,
-                                       target_max_seconds=target_max_seconds)
+                                       target_max_seconds=target_max_seconds,
+                                       semantic_engine=semantic_engine)
         edit_name = f"{job_id}-{self._path_slug(title, 48)}"
         workspace = source_workspace / "edits" / edit_name
         workspace.mkdir(parents=True, exist_ok=True)
