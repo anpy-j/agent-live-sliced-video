@@ -196,6 +196,16 @@ class CliProvider:
     def models(self) -> list[tuple[str, str]]:
         return self.model_choices
 
+    def audit_env(self) -> dict[str, str] | None:
+        """Env overrides for lightweight structured tasks (e.g. the semantic audit).
+
+        Those calls are pure JSON classification. Providers that auto-inject agent
+        context (memory, workspace rules) into every prompt can suppress it here so
+        the same fixed payload is not re-sent on each batch. Returning ``None`` keeps
+        the default provider behavior.
+        """
+        return None
+
     def info(self) -> dict[str, Any]:
         return {
             "id": self.provider_id,
@@ -456,6 +466,18 @@ class WorkBuddyCli(CliProvider):
     display_name = "WorkBuddy CLI"
     model_choices = WORKBUDDY_MODELS
 
+    # The underlying codebuddy CLI prepends ~39 KB of auto-memory and AGENTS.md
+    # workspace rules to every `-p` prompt. A JSON classification task does not
+    # need either, so the semantic audit suppresses them per invocation instead of
+    # paying the same fixed input on every batch.
+    AUDIT_ENV = {
+        "CODEBUDDY_DISABLE_AUTO_MEMORY": "1",
+        "CODEBUDDY_DISABLE_SYSTEM_REMINDER_MD": "1",
+    }
+
+    def audit_env(self) -> dict[str, str] | None:
+        return dict(self.AUDIT_ENV)
+
     def vision_models(self) -> list[tuple[str, str]]:
         return [(model_id, name) for model_id, name in self.models()
                 if model_id == "glm-5v-turbo"]
@@ -493,6 +515,7 @@ class WorkBuddyCli(CliProvider):
     def generate_plan(self, *, model: str, prompt: str, cwd: Path,
                       schema: dict[str, Any] = PLAN_SCHEMA,
                       on_process: Callable[[subprocess.Popen[str]], None] | None = None,
+                      env_overrides: dict[str, str] | None = None,
                       timeout: int = DEFAULT_AI_TIMEOUT_SECONDS) -> dict[str, Any]:
         self._ensure_available()
         self.validate_model(model)
@@ -505,7 +528,7 @@ class WorkBuddyCli(CliProvider):
         started = time.monotonic()
         stdout, stderr, seconds = self._complete(
             command, cwd=cwd, on_process=on_process, timeout=timeout, started=started,
-            stdin_text=prompt)
+            env_overrides=env_overrides, stdin_text=prompt)
         envelope = self._parse_json(stdout)
         plan = self._find_plan(envelope)
         if not plan:

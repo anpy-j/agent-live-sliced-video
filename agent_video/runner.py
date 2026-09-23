@@ -36,9 +36,11 @@ MAX_PICK_SECONDS = MAX_LONG_COMPLETE_SECONDS
 MAX_CONTINUOUS_SOURCE_SECONDS = 10.0
 MAX_ROLE_CLUSTER_SECONDS = 8.0
 CONTIGUOUS_GAP_SECONDS = 0.75
-# WorkBuddy 在 35 条长上下文候选上仍可能跑满 15 分钟硬超时。更小的批次
-# 减少单次结构化输出负担；总候选仍全部审核，不牺牲覆盖率。
-SEMANTIC_AUDIT_BATCH_SIZE = 20
+# 语义审核每批候选数。过去取 20 是为了压住单次结构化输出，但每批都要重复支付
+# provider 的固定提示注入（实测 WorkBuddy 约 39 KB/次），12 批里近一半输入是纯浪费。
+# 审核改为轻量结构化调用（关闭注入）后单批负担大幅下降，因此放宽到 40，用更少
+# 的调用覆盖全部候选；漏判仍由下面的定向重试兜底。
+SEMANTIC_AUDIT_BATCH_SIZE = 40
 # 模型偶尔漏判个别候选；先对漏判项定向重试，仍缺失时按「不采用」收口，
 # 而不是因单条格式瑕疵把整个任务判死。
 SEMANTIC_AUDIT_RETRY_LIMIT = 2
@@ -1113,6 +1115,9 @@ class JobRunner:
                 "schema": SEMANTIC_AUDIT_SCHEMA,
                 "on_process": lambda process: self._active.__setitem__(job["id"], process),
             }
+            audit_env = provider.audit_env() if isinstance(provider, CliProvider) else None
+            if audit_env:
+                kwargs["env_overrides"] = audit_env
             if isinstance(provider, MulticaCli):
                 kwargs["should_cancel"] = lambda: (
                     (self.store.get_job(job["id"]) or {}).get("status") == "cancelled"
