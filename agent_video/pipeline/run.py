@@ -26,6 +26,13 @@ from .split import DEFAULT_MAX_DURATION, DEFAULT_MIN_DURATION, split_clauses
 
 DEFAULT_TARGET = (45.0, 60.0)
 
+StageCallback = Callable[[str, str, str], None]
+
+
+def _emit(on_stage: StageCallback | None, stage: str, status: str, message: str) -> None:
+    if on_stage is not None:
+        on_stage(stage, status, message)
+
 
 def _duration(clause: dict[str, Any]) -> float:
     return float(clause["end"]) - float(clause["start"])
@@ -136,14 +143,20 @@ def run_pipeline(media: str, workdir: str, *,
                  select_visual_fn: Callable[[dict[str, Any]], tuple[float, float]]
                  | None = None,
                  render_size: tuple[int, int] | None = None,
-                 preset: str | None = None) -> dict[str, Any]:
-    """跑完 S1→S2→S3→S4→S6，返回结果摘要并落盘 timeline/manifest/final.mp4。"""
+                 preset: str | None = None,
+                 on_stage: StageCallback | None = None) -> dict[str, Any]:
+    """跑完 S1→S2→S3→S4→S6，返回结果摘要并落盘 timeline/manifest/final.mp4。
+
+    ``on_stage(stage_id, status, message)`` 在每一步开始/结束时回调，供上层
+    （如 Web 任务详情）展示进度；``status`` 为 ``"start"`` 或 ``"done"``。
+    """
     media = os.path.abspath(media)
     workdir = os.path.abspath(workdir)
     os.makedirs(workdir, exist_ok=True)
     model = ai_model or os.environ.get("PIPELINE_AI_MODEL") or "auto"
 
     # S1 —— ASR + 子句切分（确定性）
+    _emit(on_stage, "asr", "start", "语音转写与子句切分")
     if transcript is not None:
         sentences, words = transcript
         duration = max([float(word["e"]) for word in words] + [0.0])
@@ -159,18 +172,23 @@ def run_pipeline(media: str, workdir: str, *,
                                 "clauses": clauses}
     _dump(os.path.join(workdir, "timeline.json"), timeline)
     _dump(os.path.join(workdir, "clauses.json"), timeline)
+    _emit(on_stage, "asr", "done", f"切出 {len(clauses)} 个子句")
 
     # S2 —— 规则粗筛（确定性）
+    _emit(on_stage, "filter", "start", "规则粗筛（违禁/价格/场控/去重）")
     filter_clauses(clauses, min_duration=min_duration)
     _dump(os.path.join(workdir, "clauses.filtered.json"),
           {"source": media, "duration": timeline["duration"], "clauses": clauses})
     usable = [clause for clause in clauses if clause["usable"]]
     if not usable:
         raise RuleFilterEmpty(f"S2 规则筛后无可用子句（共 {len(clauses)} 条全部被剔除）")
+    _emit(on_stage, "filter", "done",
+          f"规则筛后剩 {len(usable)}/{len(clauses)} 条可用子句")
 
     ai_calls = 0
 
     # S3 —— AI 判定（仅 1 次调用）
+    _emit(on_stage, "judge", "start", f"AI 可用性判定（{len(usable)} 条子句）")
     decisions = ai_call(model, _judge_prompt(usable), DECISION_SCHEMA, ai_timeout)
     ai_calls += 1
     by_id = _validate_decisions(decisions, usable)
@@ -187,8 +205,11 @@ def run_pipeline(media: str, workdir: str, *,
         raise TargetUnreachable(
             f"S3 判定后可用子句总时长仅 {judged_seconds:.2f}s，低于目标下限 "
             f"{target_seconds[0]:g}s，S4 无法排出达标成片")
+    _emit(on_stage, "judge", "done", f"AI 判定后剩 {len(judged)} 条可用子句")
 
     # S4 —— AI 排序（仅 1 次调用）
+    _emit(on_stage, "order",
+          "start", f"AI 排序编排（目标 {target_seconds[0]:g}~{target_seconds[1]:g}s）")
     order = ai_call(model, _order_prompt(judged, target_seconds), ORDER_SCHEMA, ai_timeout)
     ai_calls += 1
     main_product, ordered_ids, total_seconds = _validate_order(
@@ -199,8 +220,11 @@ def run_pipeline(media: str, workdir: str, *,
     ordered_clauses = [clause for clause in clauses if clause["order"] is not None]
     ordered_clauses.sort(key=lambda clause: clause["order"])
     _dump(os.path.join(workdir, "timeline.json"), timeline)
+    _emit(on_stage, "order", "done",
+          f"选出 {len(ordered_clauses)} 段、共 {total_seconds:.2f}s")
 
     # S6 —— 渲染（确定性）
+    _emit(on_stage, "render", "start", "ffmpeg 逐段剪切并拼接")
     segments = build_segments(ordered_clauses, select_visual_fn)
     output = os.path.join(workdir, "deliverables", "final.mp4")
     render_video(media, segments, output, workdir,
@@ -225,6 +249,8 @@ def run_pipeline(media: str, workdir: str, *,
         "transcript_words": len(words),
     }
     _dump(os.path.join(workdir, "manifest.json"), manifest)
+    _emit(on_stage, "render", "done",
+          f"成片已生成：{manifest['output']}（{manifest['total_seconds']}s）")
     return manifest
 
 

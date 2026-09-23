@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_video.db import Store
+from agent_video.db import STAGE_DEFINITIONS, Store
 
 
 class StoreTest(unittest.TestCase):
@@ -13,98 +13,35 @@ class StoreTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_job_contains_all_stages_and_events(self):
+    def test_job_contains_lean_pipeline_stages(self):
         job_id = self.store.create_job(title="测试", source_path="/tmp/source.mp4",
-                                       brief="", mode="standard", workspace="/tmp/job")
+                                       workspace="/tmp/job")
         job = self.store.get_job(job_id)
         self.assertEqual(job["status"], "queued")
-        self.assertEqual(len(job["stages"]), 5)
-        self.assertEqual([stage["stage_id"] for stage in job["stages"]], [
-            "material_index", "edit_plan", "validation", "visual_mix", "delivery",
-        ])
+        self.assertEqual([stage["stage_id"] for stage in job["stages"]],
+                         [stage_id for stage_id, _, _ in STAGE_DEFINITIONS])
+        self.assertEqual([stage["stage_id"] for stage in job["stages"]],
+                         ["asr", "filter", "judge", "order", "render"])
         self.assertEqual(job["events"][0]["kind"], "job_created")
 
     def test_stage_transition_is_persisted(self):
         job_id = self.store.create_job(title="测试", source_path="/tmp/source.mp4",
-                                       brief="", mode="standard", workspace="/tmp/job")
-        self.store.stage_start(job_id, "material_index", "开始")
-        self.store.stage_done(job_id, "material_index", "完成", {"duration": 42})
+                                       workspace="/tmp/job")
+        self.store.stage_start(job_id, "asr", "开始")
+        self.store.stage_done(job_id, "asr", "完成", {"duration": 42})
         job = self.store.get_job(job_id)
         stage = job["stages"][0]
         self.assertEqual(stage["status"], "succeeded")
         self.assertEqual(stage["result"]["duration"], 42)
 
-    def test_job_persists_ai_provider_and_model(self):
-        job_id = self.store.create_job(title="测试", source_path="/tmp/source.mp4",
-                                       brief="", mode="fast", workspace="/tmp/job",
-                                       model_provider="workbuddy", model_name="kimi-k2.5")
-        job = self.store.get_job(job_id)
-        self.assertEqual(job["model_provider"], "workbuddy")
-        self.assertEqual(job["model_name"], "kimi-k2.5")
-
-    def test_job_persists_separate_visual_model(self):
-        job_id = self.store.create_job(
-            title="视觉模型", source_path="/tmp/source.mp4", brief="", mode="standard",
-            workspace="/tmp/work", model_provider="opencode", model_name="text-model",
-            visual_model_provider="codex", visual_model_name="gpt-5.6-sol")
-        job = self.store.get_job(job_id)
-        self.assertEqual(job["visual_model_provider"], "codex")
-        self.assertEqual(job["visual_model_name"], "gpt-5.6-sol")
-
-    def test_old_rough_cut_stage_is_removed(self):
-        job_id = self.store.create_job(title="旧任务", source_path="/tmp/source.mp4",
-                                       brief="", mode="standard", workspace="/tmp/job")
-        with self.store.connect() as con:
-            con.execute("INSERT INTO stages(job_id,stage_id,name,position) VALUES(?,?,?,?)",
-                        (job_id, "rough_cut", "粗剪与审片", 80))
-            con.execute("UPDATE jobs SET current_stage='rough_cut' WHERE id=?", (job_id,))
-        Store(self.store.path)
-        job = self.store.get_job(job_id)
-        self.assertEqual(job["current_stage"], "validation")
-        self.assertNotIn("rough_cut", {stage["stage_id"] for stage in job["stages"]})
-
-    def test_job_persists_products_materials_colors(self):
-        job_id = self.store.create_job(
-            title="多商品", source_path="/tmp/source.mp4", brief="", mode="standard",
-            workspace="/tmp/job", products=["羊毛衫", "百褶裙"], materials=["羊毛", "混纺"],
-            colors=["黑色", "燕麦色"]
-        )
-        job = self.store.get_job(job_id)
-        self.assertEqual(job["products"], ["羊毛衫", "百褶裙"])
-        self.assertEqual(job["materials"], ["羊毛", "混纺"])
-        self.assertEqual(job["colors"], ["黑色", "燕麦色"])
-
-    def test_job_persists_subtitle_and_delivery_mode(self):
-        job_id = self.store.create_job(
-            title="分段导出", source_path="/tmp/source.mp4", brief="", mode="fast",
-            workspace="/tmp/job", subtitle_path="/tmp/source.srt", delivery_mode="segments")
-        job = self.store.get_job(job_id)
-        self.assertEqual(job["subtitle_path"], "/tmp/source.srt")
-        self.assertEqual(job["delivery_mode"], "segments")
-
-    def test_job_persists_creative_strategy(self):
-        job_id = self.store.create_job(
-            title="人设切片", source_path="/tmp/source.mp4", brief="", mode="fast",
-            workspace="/tmp/job", creative_strategy="personality")
-        self.assertEqual(self.store.get_job(job_id)["creative_strategy"], "personality")
-
-    def test_job_persists_target_duration(self):
-        job_id = self.store.create_job(
-            title="长视频", source_path="/tmp/source.mp4", brief="", mode="fast",
-            workspace="/tmp/job", target_min_seconds=180, target_max_seconds=240)
-        job = self.store.get_job(job_id)
-        self.assertEqual(job["target_min_seconds"], 180)
-        self.assertEqual(job["target_max_seconds"], 240)
-
-
     def test_delete_job_removes_job_and_cascades(self):
         job_id = self.store.create_job(title="待删除", source_path="/tmp/source.mp4",
-                                       brief="", mode="standard", workspace="/tmp/job")
-        self.store.add_event(job_id, "material_index", "info", "test_event", "测试事件")
+                                       workspace="/tmp/job")
+        self.store.add_event(job_id, "asr", "info", "test_event", "测试事件")
         artifact_file = Path(self.tmp.name) / "test_artifact.txt"
         artifact_file.write_text("hello", encoding="utf-8")
-        self.store.add_artifact(job_id, "material_index", "log", "测试产物", artifact_file)
-        
+        self.store.add_artifact(job_id, "render", "log", "测试产物", artifact_file)
+
         self.assertIsNotNone(self.store.get_job(job_id))
         deleted = self.store.delete_job(job_id)
         self.assertTrue(deleted)
@@ -119,24 +56,40 @@ class StoreTest(unittest.TestCase):
 
     def test_reset_job_resets_stages_and_artifacts(self):
         job_id = self.store.create_job(title="待重置", source_path="/tmp/source.mp4",
-                                       brief="", mode="standard", workspace="/tmp/job")
-        self.store.stage_start(job_id, "material_index", "进行中")
-        self.store.stage_done(job_id, "material_index", "完成")
-        self.store.stage_recover(job_id, "edit_plan", "AI 不可用，正在自动降级")
+                                       workspace="/tmp/job")
+        self.store.stage_start(job_id, "asr", "进行中")
+        self.store.stage_done(job_id, "asr", "完成")
         artifact_file = Path(self.tmp.name) / "test_artifact2.txt"
         artifact_file.write_text("hello2", encoding="utf-8")
-        self.store.add_artifact(job_id, "material_index", "log", "测试产物2", artifact_file)
+        self.store.add_artifact(job_id, "asr", "log", "测试产物2", artifact_file)
 
         self.store.reset_job(job_id)
         job = self.store.get_job(job_id)
         self.assertEqual(job["status"], "queued")
-        self.assertEqual(job["current_stage"], "material_index")
+        self.assertEqual(job["current_stage"], "asr")
         self.assertEqual(job["progress"], 0)
         self.assertIsNone(job["error"])
         for stage in job["stages"]:
             self.assertEqual(stage["status"], "pending")
             self.assertEqual(stage["progress"], 0)
         self.assertEqual(len(job["artifacts"]), 0)
+
+    def test_recoverable_jobs_are_requeued_on_restart(self):
+        job_id = self.store.create_job(title="中断", source_path="/tmp/source.mp4",
+                                       workspace="/tmp/job")
+        self.store.update_job(job_id, status="running")
+        self.assertEqual([job["id"] for job in self.store.list_recoverable_jobs()], [job_id])
+
+    def test_settings_round_trip(self):
+        self.store.set_setting("ai_model", "opencode:gpt-5")
+        self.assertEqual(self.store.get_setting("ai_model"), "opencode:gpt-5")
+
+    def test_dashboard_counts_jobs(self):
+        self.store.create_job(title="a", source_path="/tmp/a.mp4", workspace="/tmp/a")
+        self.store.create_job(title="b", source_path="/tmp/b.mp4", workspace="/tmp/b")
+        data = self.store.dashboard()
+        self.assertEqual(data["total"], 2)
+        self.assertEqual(data["active"], 2)
 
 
 if __name__ == "__main__":

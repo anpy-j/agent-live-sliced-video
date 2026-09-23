@@ -10,9 +10,7 @@ import secrets
 import shutil
 import subprocess
 import sys
-import threading
 import urllib.parse
-from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -24,63 +22,39 @@ except ImportError:  # pragma: no cover - Windows fallback keeps single-process 
 
 from .db import Store, utc_now
 from .mcp import McpEndpoint, tool_specs
-from .rules import DirectivesManager
 from .runner import JobRunner
 
 
 class Application:
+    """本地服务：唯一处理路径是精简管线，这里只做任务登记、队列与产物展示。"""
+
     def __init__(self, root: Path):
         self.root = Path(root).resolve()
         self.data_dir = self.root / "data"
         self.workspace_root = self.root / "workspaces"
         self.web_root = self.root / "web"
         self.store = Store(self.data_dir / "agent.db")
-        self.directives = DirectivesManager(self.root)
         self.runner = JobRunner(self.store, self.root)
         self._defaults()
         self.mcp = McpEndpoint(self.invoke_tool)
 
     def _defaults(self) -> None:
         is_windows = sys.platform == "win32"
-        is_macos = sys.platform == "darwin"
         venv_python = self.root / ".venv" / ("Scripts/python.exe" if is_windows else "bin/python")
-        detected_workbuddy = shutil.which("codebuddy")
-        detected_antigravity = shutil.which("agy")
-        detected_codex = shutil.which("codex")
-        detected_opencode = shutil.which("opencode")
-        detected_multica = shutil.which("multica")
         defaults = {
             "engine_python": str(venv_python),
             "skill_path": str(self.root / "integrations" / "skill" / "SKILL.md"),
             "mcp_enabled": True,
             "mcp_token": secrets.token_urlsafe(24),
-            "workbuddy_cli_path": detected_workbuddy or (
-                "/Applications/AI/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy"
-                if is_macos else ""),
-            "workbuddy_default_model": "auto",
-            "antigravity_cli_path": detected_antigravity or (
-                str(Path.home() / ".local" / "bin" / "agy") if not is_windows else ""),
-            "codex_cli_path": detected_codex or ("/opt/homebrew/bin/codex" if is_macos else ""),
-            "opencode_cli_path": detected_opencode or str(
-                Path.home() / ".opencode" / "bin" / ("opencode.exe" if is_windows else "opencode")),
-            "multica_cli_path": detected_multica or "",
-            "multica_profile": "",
-            "multica_workspace_id": "",
-            "ai_default_selection": "workbuddy:auto",
-            "visual_ai_default_selection": "workbuddy:glm-5v-turbo",
-            "jev_enabled": False,
+            "ai_engine": "llm",
+            "ai_provider": "auto",
+            "ai_model": "auto",
             "jev_api_key": self._detect_jev_api_key(),
             "jev_base_url": "https://api.typesafe.ai/v1",
-            "jev_default_model": "jev-latest",
-            "jev_min_confidence": 0.6,
-            "jev_timeout_seconds": 15.0,
-            "jev_concurrency": 8,
         }
         for key, value in defaults.items():
             if self.store.get_setting(key) is None:
                 self.store.set_setting(key, value)
-        if is_windows:
-            self._migrate_macos_defaults_on_windows(defaults)
 
     @staticmethod
     def _detect_jev_api_key() -> str:
@@ -100,76 +74,17 @@ class Application:
                 pass
         return ""
 
-
-    def _migrate_macos_defaults_on_windows(self, defaults: dict[str, Any]) -> None:
-        legacy = {
-            "engine_path": ("/Volumes/MacData/Users/anpy/develop/personal/自媒体/切片/"
-                            "douyin-womenswear-slicing"),
-            "engine_python": str(self.root / ".venv" / "bin" / "python"),
-            "workbuddy_cli_path": ("/Applications/AI/WorkBuddy.app/Contents/Resources/"
-                                   "app.asar.unpacked/cli/bin/codebuddy"),
-            "antigravity_cli_path": str(Path.home() / ".local" / "bin" / "agy"),
-            "codex_cli_path": "/opt/homebrew/bin/codex",
-            "opencode_cli_path": str(Path.home() / ".opencode" / "bin" / "opencode"),
-        }
-        for key, old_value in legacy.items():
-            if self.store.get_setting(key) == old_value and key in defaults:
-                self.store.set_setting(key, defaults[key])
-
     def create_job(self, payload: dict[str, Any]) -> dict[str, Any]:
         source = Path(str(payload.get("source_path", ""))).expanduser().resolve()
         if not source.is_file():
             raise ValueError(f"素材文件不存在: {source}")
-        # 历史 mode 仅保留兼容读取；新任务固定走最快生产路径。
-        mode = "fast"
         title = str(payload.get("title") or source.stem).strip()[:120]
         if not title:
             raise ValueError("请填写成片名称")
-        brief = str(payload.get("brief") or "").strip()
-        products = self._parse_terms(payload.get("products"))
-        if not products:
-            raise ValueError("请至少填写一个商品；多个商品请换行或用逗号分隔")
-        materials = self._parse_terms(payload.get("materials"))
-        colors = self._parse_terms(payload.get("colors"))
-        subtitle_path = str(payload.get("subtitle_path") or "").strip() or None
-        if subtitle_path:
-            subtitle = Path(subtitle_path).expanduser().resolve()
-            if not subtitle.is_file():
-                raise ValueError(f"字幕文件不存在: {subtitle}")
-            if subtitle.suffix.lower() not in {".srt", ".vtt", ".ass", ".ssa", ".txt"}:
-                raise ValueError("字幕仅支持 SRT、VTT、ASS/SSA 或带时间码 TXT")
-            subtitle_path = str(subtitle)
-        delivery_mode = str(payload.get("delivery_mode") or "merged")
-        if delivery_mode not in {"merged", "segments"}:
-            raise ValueError("delivery_mode 必须是 merged 或 segments")
-        creative_strategy = str(payload.get("creative_strategy") or "auto")
-        if creative_strategy not in {"auto", "selling", "tryon", "personality", "story", "visual"}:
-            raise ValueError("creative_strategy 必须是 auto、selling、tryon、personality、story 或 visual")
-        semantic_engine = str(payload.get("semantic_engine") or "auto").strip().lower()
-        if semantic_engine not in {"auto", "jev", "llm"}:
-            raise ValueError("语义审核引擎必须是 auto（跟随系统设置）、jev 或 llm")
-        target_min_seconds, target_max_seconds = self._parse_target_duration(payload)
-        default_selection = str(self.store.get_setting("ai_default_selection", "workbuddy:auto"))
-        ai_model = str(payload.get("text_ai_model") or payload.get("ai_model") or default_selection)
-        model_provider, model_name = self.runner.resolve_ai_selection(ai_model)
-        visual_default = str(self.store.get_setting(
-            "visual_ai_default_selection", "workbuddy:glm-5v-turbo"))
-        visual_ai_model = str(payload.get("visual_ai_model") or visual_default)
-        visual_model_provider, visual_model_name = self.runner.resolve_visual_ai_selection(
-            visual_ai_model)
         source_workspace = self._source_workspace(source)
         placeholder = source_workspace / "edits" / "pending"
-        job_id = self.store.create_job(title=title, source_path=str(source), brief=brief,
-                                       mode=mode, workspace=str(placeholder),
-                                       model_provider=model_provider, model_name=model_name,
-                                       visual_model_provider=visual_model_provider,
-                                       visual_model_name=visual_model_name, products=products,
-                                       materials=materials, colors=colors,
-                                       subtitle_path=subtitle_path, delivery_mode=delivery_mode,
-                                       creative_strategy=creative_strategy,
-                                       target_min_seconds=target_min_seconds,
-                                       target_max_seconds=target_max_seconds,
-                                       semantic_engine=semantic_engine)
+        job_id = self.store.create_job(title=title, source_path=str(source),
+                                       workspace=str(placeholder))
         edit_name = f"{job_id}-{self._path_slug(title, 48)}"
         workspace = source_workspace / "edits" / edit_name
         workspace.mkdir(parents=True, exist_ok=True)
@@ -200,7 +115,7 @@ class Application:
 
     @staticmethod
     def _source_identity(source: Path) -> dict[str, Any]:
-        """Use content bytes as well as metadata so replaced media cannot reuse stale indexes."""
+        """Use content bytes as well as metadata so replaced media cannot reuse a folder."""
         stat = source.stat()
         digest = hashlib.sha256()
         sample = 1024 * 1024
@@ -211,37 +126,6 @@ class Application:
                 digest.update(handle.read(sample))
         return {"path": str(source.resolve()), "size": stat.st_size,
                 "mtime_ns": stat.st_mtime_ns, "edge_sha256": digest.hexdigest()}
-
-    @staticmethod
-    def _parse_target_duration(payload: dict[str, Any]) -> tuple[int, int]:
-        selection = str(payload.get("target_duration") or "auto").strip()
-        presets = {"auto": (0, 0), "70-120": (70, 120),
-                   "120-180": (120, 180), "180-240": (180, 240)}
-        if selection in presets:
-            return presets[selection]
-        if selection != "custom":
-            raise ValueError("target_duration 无效")
-        try:
-            minimum = int(payload.get("target_min_seconds"))
-            maximum = int(payload.get("target_max_seconds"))
-        except (TypeError, ValueError):
-            raise ValueError("自定义时长必须填写整数秒数") from None
-        if not 30 <= minimum <= maximum <= 600:
-            raise ValueError("自定义时长必须满足 30 ≤ 最短秒数 ≤ 最长秒数 ≤ 600")
-        return minimum, maximum
-
-    @staticmethod
-    def _parse_terms(value: Any) -> list[str]:
-        if isinstance(value, list):
-            raw = [str(item) for item in value]
-        else:
-            raw = re.split(r"[,，;；\n]+", str(value or ""))
-        result = []
-        for item in raw:
-            item = item.strip()[:80]
-            if item and item not in result:
-                result.append(item)
-        return result[:20]
 
     def pick_file(self, kind: str = "video") -> dict[str, Any]:
         if sys.platform == "win32":
@@ -254,30 +138,20 @@ class Application:
         return self.pick_file(kind="video")
 
     def deliverable_info(self, job: dict[str, Any]) -> dict[str, Any]:
-        """成片输出目录与交付门禁状态。"""
+        """成片输出目录与产物清单。"""
         workspace = Path(str(job.get("workspace") or ""))
         folder = workspace / "deliverables"
-        summary_file = workspace / "final-render" / "delivery_summary.json"
-        summary: dict[str, Any] = {}
-        if summary_file.is_file():
-            try:
-                summary = json.loads(summary_file.read_text(encoding="utf-8"))
-            except Exception:
-                pass
+        output = folder / "final.mp4"
         return {
             "folder": str(folder),
-            "exists": folder.is_dir(),
-            "publish_ready": bool(summary.get("publish_ready", False)),
-            "degraded": bool(summary.get("degraded", False)),
-            "review_reason": summary.get("review_reason"),
-            "deliverables": summary.get("deliverables") or [],
+            "exists": output.is_file(),
+            "output": str(output),
+            "deliverables": [{"title": "成片", "path": str(output), "kind": "video"}]
+            if output.is_file() else [],
         }
 
     def open_deliverable_folder(self, job_id: str) -> dict[str, Any]:
-        """在系统文件管理器中打开任务成片文件夹。
-
-        路径只从任务记录推导，不信任前端传入的任何路径。
-        """
+        """在系统文件管理器中打开任务成片文件夹；路径只从任务记录推导。"""
         job = self.store.get_job(job_id)
         if not job:
             raise ValueError("任务不存在")
@@ -294,10 +168,7 @@ class Application:
         return {"opened": True, "folder": str(folder)}
 
     def _pick_file_macos(self, kind: str = "video") -> dict[str, Any]:
-        if kind == "subtitle":
-            script = 'POSIX path of (choose file with prompt "选择时间戳字幕文件" of type {"srt", "vtt", "ass", "ssa", "txt"})'
-        else:
-            script = 'POSIX path of (choose file with prompt "选择直播视频素材")'
+        script = 'POSIX path of (choose file with prompt "选择直播视频素材")'
         result = subprocess.run(["/usr/bin/osascript", "-e", script], capture_output=True,
                                 text=True, encoding="utf-8", errors="replace", timeout=300)
         if result.returncode:
@@ -314,12 +185,9 @@ class Application:
         powershell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
         if not powershell:
             raise ValueError("未找到 PowerShell，无法打开 Windows 文件选择器")
-        if kind == "subtitle":
-            title = '选择时间戳字幕文件'
-            filter_spec = '字幕文件 (*.srt;*.vtt;*.ass;*.ssa;*.txt)|*.srt;*.vtt;*.ass;*.ssa;*.txt|所有文件 (*.*)|*.*'
-        else:
-            title = '选择直播视频素材'
-            filter_spec = '视频文件 (*.mp4;*.mov;*.mkv;*.m4v;*.avi;*.webm;*.ts)|*.mp4;*.mov;*.mkv;*.m4v;*.avi;*.webm;*.ts|所有文件 (*.*)|*.*'
+        title = "选择直播视频素材"
+        filter_spec = ("视频文件 (*.mp4;*.mov;*.mkv;*.m4v;*.avi;*.webm;*.ts)|"
+                       "*.mp4;*.mov;*.mkv;*.m4v;*.avi;*.webm;*.ts|所有文件 (*.*)|*.*")
         script = rf"""
 Add-Type -AssemblyName System.Windows.Forms
 $owner = New-Object System.Windows.Forms.Form
@@ -371,14 +239,9 @@ try {{
     @staticmethod
     def _picked_file_result(raw_path: str, kind: str = "video") -> dict[str, Any]:
         path = Path(raw_path).resolve()
-        if kind == "subtitle":
-            allowed = {".srt", ".vtt", ".ass", ".ssa", ".txt"}
-            if not path.is_file() or path.suffix.lower() not in allowed:
-                raise ValueError("请选择 SRT、VTT、ASS/SSA 或 TXT 字幕文件")
-        else:
-            allowed = {".mp4", ".mov", ".mkv", ".m4v", ".avi", ".webm", ".ts"}
-            if not path.is_file() or path.suffix.lower() not in allowed:
-                raise ValueError("请选择 MP4、MOV、MKV、M4V、AVI、WebM 或 TS 视频")
+        allowed = {".mp4", ".mov", ".mkv", ".m4v", ".avi", ".webm", ".ts"}
+        if not path.is_file() or path.suffix.lower() not in allowed:
+            raise ValueError("请选择 MP4、MOV、MKV、M4V、AVI、WebM 或 TS 视频")
         return {"cancelled": False, "path": str(path), "name": path.stem}
 
     @staticmethod
@@ -394,16 +257,13 @@ try {{
             job = self.store.get_job(str(args.get("job_id", "")))
             if not job:
                 raise KeyError("任务不存在")
+            job["deliverables"] = self.deliverable_info(job)
             return job
-        if name == "get_stage_packet":
-            return self.runner.packet(str(args.get("job_id", "")))
-        if name == "submit_stage_payload":
-            return self.runner.submit(str(args.get("job_id", "")), args.get("payload") or {})
         if name == "retry_video_job":
             job_id = str(args.get("job_id", ""))
             if not self.store.get_job(job_id):
                 raise KeyError("任务不存在")
-            self.runner.retry(job_id)
+            self.runner.restart(job_id)
             return {"job_id": job_id, "queued": True}
         if name == "restart_video_job":
             job_id = str(args.get("job_id", ""))
@@ -419,12 +279,7 @@ try {{
 
     def settings(self) -> dict[str, Any]:
         keys = ["engine_python", "skill_path", "mcp_enabled", "mcp_token",
-                "workbuddy_cli_path", "workbuddy_default_model",
-                "antigravity_cli_path", "codex_cli_path", "opencode_cli_path",
-                "multica_cli_path", "multica_profile", "multica_workspace_id",
-                "ai_default_selection", "visual_ai_default_selection",
-                "jev_enabled", "jev_base_url", "jev_default_model",
-                "jev_min_confidence", "jev_timeout_seconds", "jev_concurrency"]
+                "ai_engine", "ai_provider", "ai_model", "jev_base_url"]
         result = {key: self.store.get_setting(key) for key in keys}
         raw_jev_key = str(self.store.get_setting("jev_api_key") or "").strip()
         result["jev_api_key_configured"] = bool(raw_jev_key)
@@ -440,16 +295,13 @@ try {{
         return result
 
     def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
-        allowed = {"engine_python", "skill_path", "mcp_enabled",
-                   "workbuddy_cli_path", "workbuddy_default_model", "antigravity_cli_path",
-                   "codex_cli_path", "opencode_cli_path", "multica_cli_path", "multica_profile",
-                   "multica_workspace_id", "ai_default_selection", "visual_ai_default_selection",
-                   "jev_enabled", "jev_api_key", "jev_base_url", "jev_default_model",
-                   "jev_min_confidence", "jev_timeout_seconds", "jev_concurrency"}
-        if "ai_default_selection" in payload:
-            self.runner.resolve_ai_selection(str(payload["ai_default_selection"]))
-        if "visual_ai_default_selection" in payload:
-            self.runner.resolve_visual_ai_selection(str(payload["visual_ai_default_selection"]))
+        allowed = {"engine_python", "skill_path", "mcp_enabled", "ai_engine", "ai_provider",
+                   "ai_model", "jev_api_key", "jev_base_url"}
+        if "ai_engine" in payload and str(payload["ai_engine"]) not in {"llm", "jev"}:
+            raise ValueError("ai_engine 必须是 llm 或 jev")
+        if "ai_provider" in payload and str(payload["ai_provider"]) not in {
+                "auto", "opencode", "codex", "workbuddy", "antigravity"}:
+            raise ValueError("ai_provider 无效")
         for key in allowed & payload.keys():
             val = payload[key]
             if key == "jev_api_key":
@@ -457,22 +309,11 @@ try {{
                 if not val_str or "****" in val_str:
                     continue
                 self.store.set_setting(key, val_str)
-            elif key in {"jev_min_confidence", "jev_timeout_seconds"}:
-                try:
-                    self.store.set_setting(key, float(val))
-                except (ValueError, TypeError):
-                    pass
-            elif key == "jev_concurrency":
-                try:
-                    self.store.set_setting(key, max(1, min(32, int(val))))
-                except (ValueError, TypeError):
-                    pass
-            elif key == "jev_enabled":
+            elif key == "mcp_enabled":
                 self.store.set_setting(key, bool(val))
             else:
-                self.store.set_setting(key, val)
+                self.store.set_setting(key, str(val))
         return self.settings()
-
 
     def skill(self) -> dict[str, Any]:
         path = Path(self.store.get_setting("skill_path", ""))
@@ -517,14 +358,6 @@ try {{
         self.store.set_setting("mcp_token", token)
         return token
 
-    def ai_providers(self) -> dict[str, Any]:
-        default_selection = self.store.get_setting("ai_default_selection", "workbuddy:auto")
-        visual_default = self.store.get_setting(
-            "visual_ai_default_selection", "workbuddy:glm-5v-turbo")
-        return {"providers": self.runner.provider_infos(), "default": default_selection,
-                "visual_default": visual_default,
-                "manual": {"id": "manual", "name": "在编排节点手动决定"}}
-
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "SliceAgent/0.1"
@@ -545,10 +378,6 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json_response(self.app.store.dashboard())
             if path == "/api/jobs":
                 return self.json_response({"jobs": self.app.store.list_jobs()})
-            if path.startswith("/api/jobs/") and path.endswith("/packet"):
-                parts = path.strip("/").split("/")
-                if len(parts) == 4:
-                    return self.json_response(self.app.runner.packet(parts[2]))
             if path.startswith("/api/jobs/"):
                 job_id = path.removeprefix("/api/jobs/").strip("/")
                 job = self.app.store.get_job(job_id)
@@ -558,12 +387,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json_response(job or {"error": "任务不存在"}, 200 if job else 404)
             if path == "/api/settings":
                 return self.json_response(self.app.settings())
-            if path == "/api/ai/providers":
-                return self.json_response(self.app.ai_providers())
             if path == "/api/skill":
                 return self.json_response(self.app.skill())
-            if path == "/api/rules":
-                return self.json_response(self.app.directives.load())
             if path == "/api/mcp":
                 return self.json_response(self.app.mcp_info(self.headers.get("Host", "127.0.0.1:8787")))
             if path.startswith("/api/artifacts/") and path.endswith("/content"):
@@ -584,15 +409,6 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json_response(self.app.pick_file(kind=kind))
             if path == "/api/jobs":
                 return self.json_response(self.app.create_job(payload), 201)
-            if path == "/api/rules/enable":
-                rule_id = str(payload.get("rule_id") or "").strip()
-                if not rule_id:
-                    raise ValueError("rule_id 不能为空")
-                return self.json_response(
-                    self.app.directives.set_enabled(rule_id, bool(payload.get("enabled"))))
-            if path == "/api/rules/rollback":
-                return self.json_response(
-                    self.app.directives.rollback(int(payload.get("version"))))
             if path.startswith("/api/jobs/"):
                 parts = path.strip("/").split("/")
                 if len(parts) == 4:
@@ -600,7 +416,7 @@ class Handler(BaseHTTPRequestHandler):
                     if action == "cancel":
                         return self.json_response({"cancelled": self.app.runner.cancel(job_id)})
                     if action == "retry":
-                        self.app.runner.retry(job_id)
+                        self.app.runner.restart(job_id)
                         return self.json_response({"queued": True})
                     if action == "restart":
                         self.app.runner.restart(job_id)
@@ -609,68 +425,6 @@ class Handler(BaseHTTPRequestHandler):
                         return self.json_response({"deleted": self.app.runner.delete(job_id)})
                     if action == "open-folder":
                         return self.json_response(self.app.open_deliverable_folder(job_id))
-                    if action == "submit":
-                        return self.json_response(self.app.runner.submit(job_id, payload))
-                    if action == "ai-plan":
-                        selection = payload.get("ai_model")
-                        if not selection:
-                            selection = f"workbuddy:{payload.get('model') or 'auto'}"
-                        return self.json_response(
-                            self.app.runner.request_ai_plan(job_id, str(selection)))
-                    if action == "feedback":
-                        text = str(payload.get("feedback") or "").strip()
-                        if not text:
-                            raise ValueError("反馈内容不能为空")
-                        upgrade = bool(payload.get("upgrade", True))
-                        job = self.app.store.get_job(job_id)
-                        if not job:
-                            raise ValueError("任务不存在")
-                        workspace = Path(job.get("workspace", ""))
-                        feedback_record = {
-                            "feedback": text,
-                            "problem_type": str(payload.get("problem_type") or "general"),
-                            "task": str(payload.get("task") or "video_edit"),
-                            "timestamp": str(payload.get("timestamp") or "") or None,
-                            "segment": str(payload.get("segment") or "") or None,
-                            "product": str(payload.get("product") or "") or None,
-                            "scope": str(payload.get("scope") or "text"),
-                            "kind": str(payload.get("kind") or "soft"),
-                            "created_at": utc_now(),
-                        }
-                        if workspace.is_dir():
-                            rev_file = workspace / "revision_request.json"
-                            rev_file.write_text(json.dumps(
-                                feedback_record, ensure_ascii=False, indent=2), encoding="utf-8")
-                        self.app.store.add_event(job_id, job.get("current_stage"), "info", "job_feedback",
-                                                f"审片问题反馈: {text}", {"feedback": text, "upgrade": upgrade})
-                        if upgrade:
-                            updated = self.app.directives.add_feedback(
-                                problem_type=str(payload.get("problem_type") or "general"),
-                                task=str(payload.get("task") or "video_edit"),
-                                timestamp=str(payload.get("timestamp") or "") or None,
-                                segment=str(payload.get("segment") or "") or None,
-                                product=str(payload.get("product") or "") or None,
-                                expected_change=text,
-                                scope=str(payload.get("scope") or "text"),
-                                kind=str(payload.get("kind") or "soft"),
-                                job_id=job_id, verified=bool(payload.get("verified", False)))
-                            count = len(updated.get("rules", []))
-                            # add_feedback may deduplicate and return the unchanged list;
-                            # inspect the matching rule instead of an unrelated final entry.
-                            latest = next((item for item in reversed(updated.get("rules", []))
-                                           if item.get("expected_change") == text
-                                           and item.get("scope") == feedback_record["scope"]
-                                           and item.get("problem_type") ==
-                                           feedback_record["problem_type"]), {})
-                            message = (f"反馈已记录，但检测到规则冲突，已保持禁用，等待人工确认（累计 {count} 条）。"
-                                       if not latest.get("enabled", True) else
-                                       f"反馈已记录！Agent 规则库已升级（累计 {count} 条定制规则）。")
-                            return self.json_response({
-                                "ok": True,
-                                "message": message,
-                                "directives_count": count
-                            })
-                        return self.json_response({"ok": True, "message": "反馈已记录"})
             if path == "/api/mcp/token":
                 return self.json_response({"token": self.app.rotate_token()})
             if path == "/mcp":
