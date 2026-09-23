@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 import threading
 import uuid
 from contextlib import contextmanager
@@ -18,6 +19,16 @@ STAGE_DEFINITIONS = [
     ("order", "AI 排序编排", 80),
     ("render", "渲染成片", 100),
 ]
+
+_LEAN_STAGE_IDS = {stage_id for stage_id, _, _ in STAGE_DEFINITIONS}
+
+# 旧管线遗留在 jobs 表里的独占列；出现即代表磁盘上是旧 schema。
+_LEGACY_JOB_COLUMNS = {
+    "brief", "mode", "engine_state", "model_name", "token_input", "token_output",
+    "model_provider", "visual_model_provider", "visual_model_name", "products_json",
+    "materials_json", "colors_json", "subtitle_path", "delivery_mode",
+    "creative_strategy", "target_min_seconds", "target_max_seconds", "semantic_engine",
+}
 
 
 def utc_now() -> str:
@@ -48,7 +59,42 @@ class Store:
             finally:
                 con.close()
 
+    def _archive_legacy_store(self) -> None:
+        """旧管线的 jobs/stages 与精简 schema 不兼容，归档后重建，避免旧字段泄漏。
+
+        只重命名数据库文件（保留为 agent.db.legacy-<时间戳>），不删除任何产物。
+        """
+        if not self.path.exists() or self.path.stat().st_size == 0:
+            return
+        try:
+            con = sqlite3.connect(self.path, timeout=5)
+        except sqlite3.Error:
+            return
+        try:
+            tables = {row[0] for row in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            if "jobs" not in tables:
+                return
+            columns = {row[1] for row in con.execute("PRAGMA table_info(jobs)")}
+            stage_ids = ({row[0] for row in con.execute("SELECT DISTINCT stage_id FROM stages")}
+                         if "stages" in tables else set())
+        except sqlite3.Error:
+            return
+        finally:
+            con.close()
+        if not (columns & _LEGACY_JOB_COLUMNS or stage_ids - _LEAN_STAGE_IDS):
+            return
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        archive = self.path.with_name(f"{self.path.name}.legacy-{stamp}")
+        for suffix in ("", "-wal", "-shm"):
+            source = Path(f"{self.path}{suffix}")
+            if source.exists():
+                source.rename(Path(f"{archive}{suffix}"))
+        print(f"[db] 检测到旧管线数据库，已归档为 {archive.name} 并重建精简 schema",
+              file=sys.stderr)
+
     def init(self) -> None:
+        self._archive_legacy_store()
         with self.connect() as con:
             con.executescript(
                 """

@@ -1,8 +1,27 @@
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 
 from agent_video.db import STAGE_DEFINITIONS, Store
+
+
+def _write_legacy_store(path: Path) -> None:
+    con = sqlite3.connect(path)
+    con.executescript(
+        """
+        CREATE TABLE jobs (id TEXT PRIMARY KEY, title TEXT, source_path TEXT, brief TEXT,
+          status TEXT, current_stage TEXT, progress REAL, mode TEXT, created_at TEXT,
+          updated_at TEXT, workspace TEXT, semantic_engine TEXT);
+        CREATE TABLE stages (job_id TEXT, stage_id TEXT, name TEXT, position INTEGER,
+          status TEXT);
+        """
+    )
+    con.execute("INSERT INTO jobs VALUES('job_old','旧任务','/tmp/old.mp4','','blocked',"
+                "'edit_plan',40,'fast','2026-01-01','2026-01-01','/tmp/old','jev')")
+    con.execute("INSERT INTO stages VALUES('job_old','edit_plan','旧编排',1,'running')")
+    con.commit()
+    con.close()
 
 
 class StoreTest(unittest.TestCase):
@@ -83,6 +102,27 @@ class StoreTest(unittest.TestCase):
     def test_settings_round_trip(self):
         self.store.set_setting("ai_model", "opencode:gpt-5")
         self.assertEqual(self.store.get_setting("ai_model"), "opencode:gpt-5")
+
+    def test_legacy_store_is_archived_and_rebuilt(self):
+        path = Path(self.tmp.name) / "legacy.db"
+        _write_legacy_store(path)
+        store = Store(path)
+        self.assertEqual(store.dashboard()["total"], 0)
+        with store.connect() as con:
+            columns = {row[1] for row in con.execute("PRAGMA table_info(jobs)")}
+        self.assertNotIn("semantic_engine", columns)
+        self.assertNotIn("brief", columns)
+        archived = list(path.parent.glob(f"{path.name}.legacy-*"))
+        self.assertEqual(len(archived), 1)
+        self.assertTrue(archived[0].stat().st_size > 0)
+
+    def test_fresh_store_without_legacy_markers_is_untouched(self):
+        path = Path(self.tmp.name) / "fresh.db"
+        first = Store(path)
+        first.create_job(title="保留", source_path="/tmp/keep.mp4", workspace="/tmp/keep")
+        reopened = Store(path)
+        self.assertEqual(reopened.dashboard()["total"], 1)
+        self.assertEqual(list(path.parent.glob(f"{path.name}.legacy-*")), [])
 
     def test_dashboard_counts_jobs(self):
         self.store.create_job(title="a", source_path="/tmp/a.mp4", workspace="/tmp/a")
