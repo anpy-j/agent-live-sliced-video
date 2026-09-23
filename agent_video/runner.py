@@ -16,8 +16,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .ai import (PLAN_PATCH_SCHEMA, SEMANTIC_AUDIT_SCHEMA, AntigravityCli,
-                 CliProvider, CodexCli, MulticaCli, OpenCodeCli, WorkBuddyCli)
+from .ai import (ANTIGRAVITY_FALLBACK_MODELS, CODEX_MODELS,
+                 DEFAULT_AI_TIMEOUT_SECONDS, OPENCODE_FALLBACK_MODELS,
+                 PLAN_PATCH_SCHEMA, SEMANTIC_AUDIT_SCHEMA, WORKBUDDY_MODELS,
+                 AntigravityCli, CliProvider, CodexCli, MulticaCli, OpenCodeCli,
+                 WorkBuddyCli)
 from .db import Store, utc_now
 from .engine.scripts.badvocab import hit as banned_word_hit
 from .engine.scripts.textnorm import (content_rejection, context_dependent_start,
@@ -44,6 +47,35 @@ SEMANTIC_AUDIT_BATCH_SIZE = 20
 SEMANTIC_AUDIT_RETRY_LIMIT = 2
 SEMANTIC_AUDIT_POLICY_VERSION = 5
 DEPENDENCY_REJECTIONS = frozenset({"context_dependent_start", "incomplete_sentence"})
+# 自动编排最多按顺序尝试的 provider 数（首个失败后仍有备用，但不无限等待）。
+MAX_TEXT_MODEL_ATTEMPTS = 3
+# 静默长调用期间刷新 stage message 的间隔秒数。
+HEARTBEAT_INTERVAL_SECONDS = 15
+
+
+def _concrete_models(choices: list[tuple[str, str]]) -> tuple[str, ...]:
+    return tuple(model for model, _name in choices if model and model != "auto")
+
+
+# 降级链里的 provider 绝不能把 `auto` 当保底：`auto` 委派给各 provider 自己的默认
+# 配置，而默认配置会悄悄指向已下线模型（OpenCode 默认解析到 EOL 的 GLM，备用调用
+# 直接 410），使整个降级链形同虚设。这里为每个备用 provider 固定一个具体模型 ID。
+FALLBACK_MODELS: dict[str, tuple[str, ...]] = {
+    "opencode": _concrete_models(OPENCODE_FALLBACK_MODELS),
+    "codex": _concrete_models(CODEX_MODELS),
+    "antigravity": _concrete_models(ANTIGRAVITY_FALLBACK_MODELS),
+    "workbuddy": _concrete_models(WORKBUDDY_MODELS),
+}
+_HEARTBEAT_SUFFIX_RE = re.compile(r"（已运行 \d+ 秒[^）]*）\s*$")
+
+
+def _heartbeat_message(base: str, elapsed: float) -> str:
+    """Append an elapsed-time suffix without stacking it on each refresh."""
+    clean = _HEARTBEAT_SUFFIX_RE.sub("", base).rstrip()
+    if not clean:
+        return base
+    minutes = max(1, int(DEFAULT_AI_TIMEOUT_SECONDS) // 60)
+    return f"{clean}（已运行 {int(elapsed)} 秒，单次调用上限 {minutes} 分钟）"
 
 
 def _hard_content_rejection(text: str) -> str | None:
@@ -273,14 +305,40 @@ class JobRunner:
         }
         return kept
 
-    def _heartbeat(self, job_id: str, stop: threading.Event) -> None:
-        """Keep the job visibly alive while a CLI is silent or buffering output."""
+    def _heartbeat(self, job_id: str, stop: threading.Event,
+                   stage_id: str = "edit_plan") -> None:
+        """Keep the job visibly alive while a CLI is silent or buffering output.
+
+        Besides refreshing ``updated_at`` this now rewrites the stage message with
+        elapsed seconds. A single plan call may legally run for many minutes
+        (``DEFAULT_AI_TIMEOUT_SECONDS``); before this the message froze and a
+        healthy-but-slow call was indistinguishable from a hang.
+        """
+        started = time.monotonic()
+        tick = 0
         while not stop.wait(2):
             self.store.touch_job(job_id)
+            tick += 2
+            if tick < HEARTBEAT_INTERVAL_SECONDS:
+                continue
+            tick = 0
+            job = self.store.get_job(job_id) or {}
+            stage = next((item for item in job.get("stages") or []
+                          if item.get("stage_id") == stage_id), None)
+            if not stage or stage.get("status") != "running":
+                continue
+            base = str(stage.get("message") or "")
+            if not base:
+                continue
+            message = _heartbeat_message(base, time.monotonic() - started)
+            if message != base:
+                self.store.update_stage(job_id, stage_id, status="running",
+                                        message=message)
 
-    def _with_heartbeat(self, job_id: str, operation: Any) -> Any:
+    def _with_heartbeat(self, job_id: str, operation: Any,
+                        stage_id: str = "edit_plan") -> Any:
         stop = threading.Event()
-        thread = threading.Thread(target=self._heartbeat, args=(job_id, stop),
+        thread = threading.Thread(target=self._heartbeat, args=(job_id, stop, stage_id),
                                   name=f"heartbeat-{job_id}", daemon=True)
         thread.start()
         try:
@@ -1297,7 +1355,10 @@ class JobRunner:
         job_id = job["id"]
         chain = self._text_model_chain(job)
         if not chain:
-            self._use_local_plan(job, engine_work, ["没有可用的 AI CLI"])
+            self._use_local_plan(
+                job, engine_work,
+                ["没有可用的 AI 提供方：所有已配置的 CLI 均不可用，"
+                 "或无法解析出可用模型"])
             return
         errors: list[str] = []
         for index, (provider_id, model) in enumerate(chain):
@@ -1305,7 +1366,7 @@ class JobRunner:
                 provider = self._provider(provider_id)
                 provider.validate_model(model)
             except ValueError as exc:
-                errors.append(str(exc))
+                errors.append(f"{provider_id}: {exc}")
                 continue
             if str(job.get("model_provider") or "") != provider_id \
                     or str(job.get("model_name") or "auto") != model:
@@ -1329,9 +1390,13 @@ class JobRunner:
                         f"{provider.display_name} · {model} 已用完两轮局部修复，不再全量重编",
                         {"error": str(exc)})
                     break
-                self.store.add_event(job_id, "edit_plan", "warning", "ai_plan_attempt_failed",
-                                     f"{provider.display_name} · {model} 编排失败，自动尝试下一个可用模型",
-                                     {"error": str(exc)})
+                remaining = len(chain) - index - 1
+                self.store.add_event(
+                    job_id, "edit_plan", "warning", "ai_plan_attempt_failed",
+                    (f"{provider.display_name} · {model} 编排失败，自动尝试下一个可用模型"
+                     if remaining else
+                     f"{provider.display_name} · {model} 编排失败，已无更多可用模型"),
+                    {"error": str(exc), "remaining_attempts": remaining})
         self._use_local_plan(job, engine_work, errors)
 
     def _use_local_plan(self, job: dict[str, Any], engine_work: Path,
@@ -1368,30 +1433,62 @@ class JobRunner:
                               error=f"AI 语义审核/编排失败，需人工处理后重试：{detail}")
 
     def _text_model_chain(self, job: dict[str, Any]) -> list[tuple[str, str]]:
-        candidates: list[tuple[str, str]] = []
+        """Ordered provider/model pairs to try for one AI plan.
+
+        A fallback entry must be a concrete, currently-listed model: delegating to
+        a provider's ``auto`` default is what silently pointed the backup at a
+        retired model and turned every fallback into an HTTP 410. The user's
+        explicit selection is preserved as-is so a deliberate ``auto`` choice is
+        not overridden.
+        """
+        candidates: list[tuple[str, str, bool]] = []
         selected_provider = str(job.get("model_provider") or "")
+        selected_model = str(job.get("model_name") or "auto")
         if selected_provider in AI_PROVIDER_IDS:
-            candidates.append((selected_provider, str(job.get("model_name") or "auto")))
+            candidates.append((selected_provider, selected_model, True))
         default_provider, _, default_model = str(
             self.store.get_setting("ai_default_selection", "workbuddy:auto")).partition(":")
-        candidates.append((default_provider, default_model or "auto"))
-        candidates.extend((provider_id, "auto")
+        candidates.append((default_provider, default_model or "auto", False))
+        candidates.extend((provider_id, "auto", False)
                           for provider_id in ("opencode", "codex", "antigravity", "workbuddy"))
         chain: list[tuple[str, str]] = []
         seen: set[str] = set()
-        for provider_id, model in candidates:
+        for provider_id, model, is_primary in candidates:
             if not provider_id or provider_id in seen:
                 continue
             seen.add(provider_id)
             try:
-                if not self._provider(provider_id).info().get("available", False):
+                provider = self._provider(provider_id)
+                if not provider.info().get("available", False):
                     continue
+                resolved = model if is_primary else self._fallback_model(
+                    provider, provider_id, model)
+                provider.validate_model(resolved)
             except Exception:
                 continue
-            chain.append((provider_id, model))
-            if len(chain) >= 2:
+            chain.append((provider_id, resolved))
+            if len(chain) >= MAX_TEXT_MODEL_ATTEMPTS:
                 break
         return chain
+
+    @staticmethod
+    def _fallback_model(provider: CliProvider, provider_id: str, model: str) -> str:
+        """Resolve a fallback entry to a concrete model, never a blind ``auto``."""
+        if model and model != "auto":
+            return model
+        for candidate in FALLBACK_MODELS.get(provider_id, ()):
+            try:
+                provider.validate_model(candidate)
+                return candidate
+            except ValueError:
+                continue
+        try:
+            for model_id, _name in provider.models():
+                if model_id and model_id != "auto":
+                    return str(model_id)
+        except Exception:
+            pass
+        return model or "auto"
 
     def _run_ai_plan_attempt(self, job: dict[str, Any], engine_work: Path,
                              provider: CliProvider, provider_id: str, model: str) -> None:
@@ -1400,7 +1497,7 @@ class JobRunner:
             self._read_json(engine_work / "candidate_digest.json", []))
         candidates = all_candidates
         self.store.stage_start(job_id, "edit_plan",
-                               f"正在调用 {provider.display_name} · {model} 逐句审核候选语义")
+                               f"正在调用 {provider.display_name} · {model} 编排成片")
         attempts: list[dict[str, Any]] = []
         audit_meta: dict[str, Any] = {
             "seconds": 0.0, "usage": {"input_tokens": 0, "output_tokens": 0}}
@@ -1410,9 +1507,11 @@ class JobRunner:
             candidates, audit_meta = self._with_heartbeat(
                 job_id, lambda: self._semantic_review_candidates(
                     job, engine_work, provider, provider_id, model, all_candidates))
+            audit_note = ("复用已缓存的语义审核结果"
+                          if audit_meta.get("cached") else "AI 语义审核完成")
             self.store.update_stage(
                 job_id, "edit_plan", status="running", progress=0.25,
-                message=(f"AI 语义审核保留 {len(candidates)}/{len(all_candidates)} 条，"
+                message=(f"{audit_note}（保留 {len(candidates)}/{len(all_candidates)} 条），"
                          "正在进行成片编排"))
             prompt = self._plan_prompt(job, candidates)
             result = self._with_heartbeat(

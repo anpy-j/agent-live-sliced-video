@@ -19,7 +19,8 @@ from agent_video.engine.scripts.visual_mix import (apply as apply_visual_mix,
                                                    ranked_candidates)
 from agent_video.engine.validation_policy import shared_issues
 from agent_video.rules import DirectivesManager
-from agent_video.runner import (JobRunner, PlanRefinementError,
+from agent_video.runner import (FALLBACK_MODELS, JobRunner,
+                                MAX_TEXT_MODEL_ATTEMPTS, PlanRefinementError,
                                 SEMANTIC_AUDIT_BATCH_SIZE,
                                 SEMANTIC_AUDIT_RETRY_LIMIT)
 from agent_video.server import Application
@@ -380,12 +381,27 @@ class PipelineFeatureTest(unittest.TestCase):
         merged = JobRunner._merge_incremental_plan(base, patch)
         self.assertEqual([item["_candidate_id"] for item in merged["picks"]], [1, 5, 2, 4])
 
-    def test_model_chain_has_hard_two_provider_limit(self):
+    def test_model_chain_is_bounded_and_never_uses_auto_for_fallbacks(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             runner = JobRunner(Store(root / "db.sqlite"), root)
-            chain = runner._text_model_chain({"model_provider": "workbuddy", "model_name": "auto"})
-            self.assertLessEqual(len(chain), 2)
+
+            def provider(provider_id):
+                item = Mock()
+                item.info.return_value = {"available": True}
+                return item
+
+            with patch.object(runner, "_provider", side_effect=provider):
+                chain = runner._text_model_chain(
+                    {"model_provider": "workbuddy", "model_name": "auto"})
+            self.assertLessEqual(len(chain), MAX_TEXT_MODEL_ATTEMPTS)
+            # 首选模型保持用户显式选择，备用 provider 一律落到具体模型，不再用 auto。
+            self.assertEqual(chain[0], ("workbuddy", "auto"))
+            fallbacks = chain[1:]
+            self.assertTrue(fallbacks)
+            self.assertTrue(all(model != "auto" for _pid, model in fallbacks))
+            for provider_id, model in fallbacks:
+                self.assertIn(model, FALLBACK_MODELS[provider_id])
 
     def test_model_chain_skips_unavailable_provider_before_applying_limit(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -406,7 +422,39 @@ class PipelineFeatureTest(unittest.TestCase):
             with patch.object(runner, "_provider", side_effect=provider):
                 chain = runner._text_model_chain(
                     {"model_provider": "opencode", "model_name": "auto"})
-            self.assertEqual(chain, [("workbuddy", "auto"), ("codex", "auto")])
+            self.assertEqual([provider_id for provider_id, _ in chain],
+                             ["workbuddy", "codex", "antigravity"])
+            self.assertLessEqual(len(chain), MAX_TEXT_MODEL_ATTEMPTS)
+            self.assertTrue(all(model != "auto" for _pid, model in chain))
+
+    def test_opencode_fallback_uses_concrete_model_instead_of_auto(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner = JobRunner(Store(root / "db.sqlite"), root)
+            availability = {"workbuddy": True, "opencode": True}
+            supported = {
+                "workbuddy": ["auto", "glm-5.1"],
+                "opencode": ["auto", "opencode-go/gpt-5.6-luna", "openai/gpt-5.6-sol"],
+            }
+
+            def provider(provider_id):
+                item = Mock()
+                models = supported.get(provider_id, [])
+                item.info.return_value = {"available": availability.get(provider_id, False)}
+                item.models.return_value = [(model, model) for model in models]
+
+                def validate(value, allowed=models):
+                    if value not in allowed:
+                        raise ValueError(f"unsupported: {value}")
+
+                item.validate_model.side_effect = validate
+                return item
+
+            with patch.object(runner, "_provider", side_effect=provider):
+                chain = runner._text_model_chain(
+                    {"model_provider": "workbuddy", "model_name": "auto"})
+            self.assertEqual(chain[0], ("workbuddy", "auto"))
+            self.assertIn(("opencode", "opencode-go/gpt-5.6-luna"), chain)
 
     def test_refinement_exhaustion_does_not_switch_provider(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -1,12 +1,14 @@
 import json
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from agent_video.ai import SEMANTIC_AUDIT_SCHEMA
+from agent_video.ai import ProviderResponseError, SEMANTIC_AUDIT_SCHEMA
 from agent_video.db import Store
-from agent_video.runner import JobCancelled, JobRunner
+from agent_video.runner import JobCancelled, JobRunner, _heartbeat_message
 
 
 def semantic_audit_response(candidates, main_product="上衣", reject_ids=()):
@@ -423,6 +425,101 @@ class RunnerTest(unittest.TestCase):
         kinds = [event["kind"] for event in job["events"]]
         self.assertIn("ai_plan_local_fallback_blocked", kinds)
         self.assertNotIn("input_required", kinds)
+
+    def test_primary_timeout_falls_back_to_concrete_model(self):
+        engine = self._plan_setup_engine()
+        job_id = self.store.create_job(title="超时降级", source_path="/tmp/source.mp4",
+                                       brief="", mode="fast", workspace=str(engine.parent),
+                                       model_provider="workbuddy", model_name="auto")
+        timeout = ProviderResponseError("WorkBuddy CLI 编排超过 15 分钟，已停止",
+                                        {"timeout_seconds": 900})
+        failing = self._plan_provider("WorkBuddy CLI", error=timeout)
+        passing = self._plan_provider("OpenCode CLI", plan=self._auto_plan())
+        providers = {"workbuddy": failing, "opencode": passing}
+        def dispatch(provider_id: str) -> Mock:
+            if provider_id not in providers:
+                raise ValueError(f"不支持的 AI 提供方: {provider_id}")
+            return providers[provider_id]
+        with patch.object(self.runner, "_provider", side_effect=dispatch):
+            self.runner._run_ai_plan(self.store.get_job(job_id), engine)
+        job = self.store.get_job(job_id)
+        self.assertEqual(job["status"], "queued")
+        self.assertEqual(job["model_provider"], "opencode")
+        # 备用 provider 必须落到具体模型，不能再把 auto 当保底。
+        self.assertNotEqual(job["model_name"], "auto")
+        kinds = [event["kind"] for event in job["events"]]
+        self.assertIn("ai_plan_fallback", kinds)
+
+    def test_heartbeat_message_keeps_single_elapsed_suffix(self):
+        once = _heartbeat_message("正在进行成片编排", 30)
+        self.assertIn("已运行 30 秒", once)
+        twice = _heartbeat_message(once, 45)
+        self.assertEqual(twice.count("已运行"), 1)
+        self.assertEqual(twice.count("正在进行成片编排"), 1)
+        self.assertIn("已运行 45 秒", twice)
+
+    def test_silent_long_call_refreshes_stage_message(self):
+        workspace = self.root / "heartbeat-job"
+        workspace.mkdir()
+        job_id = self.store.create_job(title="心跳", source_path="/tmp/source.mp4",
+                                       brief="", mode="fast", workspace=str(workspace))
+        self.store.stage_start(job_id, "edit_plan", "正在进行成片编排")
+        stop = threading.Event()
+        message = ""
+        with patch("agent_video.runner.HEARTBEAT_INTERVAL_SECONDS", 0):
+            thread = threading.Thread(
+                target=self.runner._heartbeat, args=(job_id, stop, "edit_plan"))
+            thread.start()
+            deadline = time.time() + 6
+            while time.time() < deadline:
+                stage = next(item for item in self.store.get_job(job_id)["stages"]
+                             if item["stage_id"] == "edit_plan")
+                message = stage["message"]
+                if "已运行" in message:
+                    break
+                time.sleep(0.1)
+            stop.set()
+            thread.join(timeout=2)
+        self.assertIn("正在进行成片编排", message)
+        self.assertIn("已运行", message)
+
+    def test_cached_semantic_audit_message_does_not_claim_rescan(self):
+        workspace = self.root / "cached-job"
+        engine = workspace / "engine"
+        engine.mkdir(parents=True)
+        candidates = [
+            {"i": 1, "s": 1.0, "e": 3.0, "c": "hook", "t": "开头"},
+            {"i": 2, "s": 4.0, "e": 8.0, "c": "proof", "t": "正文"},
+            {"i": 3, "s": 10.0, "e": 12.0, "c": "styling", "t": "搭配"},
+            {"i": 4, "s": 14.0, "e": 16.0, "c": "close", "t": "收尾"},
+        ]
+        (engine / "candidate_digest.json").write_text(json.dumps(candidates), encoding="utf-8")
+        job_id = self.store.create_job(title="缓存", source_path="/tmp/source.mp4",
+                                       brief="", mode="fast", workspace=str(workspace),
+                                       products=["白山茶"])
+        job = self.store.get_job(job_id)
+        fingerprint = self.runner._semantic_audit_fingerprint(job, candidates)
+        decisions = [{"candidate_id": item["i"], "verdict": "keep"} for item in candidates]
+        (engine / "semantic_audit.json").write_text(json.dumps({
+            "version": 5, "candidate_fingerprint": fingerprint,
+            "kept_candidate_ids": [1, 2, 3, 4], "decisions": decisions,
+        }), encoding="utf-8")
+        plan = self._auto_plan()
+        provider = Mock(display_name="Mock AI")
+        provider.generate_plan.side_effect = [
+            {"plan": plan, "raw": {"result": plan}, "seconds": 1,
+             "usage": {"input_tokens": 10, "output_tokens": 5}}]
+        messages: list[str] = []
+        original = self.store.update_stage
+        def spy(job_id_, stage_id_, **fields):
+            if fields.get("message"):
+                messages.append(str(fields["message"]))
+            return original(job_id_, stage_id_, **fields)
+        with patch.object(self.store, "update_stage", side_effect=spy):
+            self.runner._run_ai_plan_attempt(self.store.get_job(job_id), engine,
+                                             provider, "workbuddy", "auto")
+        self.assertTrue(any("复用已缓存" in item for item in messages))
+        self.assertFalse(any("逐句审核" in item for item in messages))
 
     def test_manual_provider_job_automatically_resolves_default_model(self):
         source = self.root / "source.mp4"
