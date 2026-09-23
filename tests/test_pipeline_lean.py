@@ -17,6 +17,27 @@ def word(text, start, end):
     return {"w": text, "s": start, "e": end}
 
 
+class ProviderExecutableTest(unittest.TestCase):
+    def test_workbuddy_fallback_prefers_existing_candidate(self):
+        existing = pipeline_ai._FALLBACK_EXECUTABLES["workbuddy"][0]
+        with patch.object(pipeline_ai.shutil, "which", return_value=None), \
+                patch.object(pipeline_ai.os.path, "isfile",
+                             side_effect=lambda path: path == existing), \
+                patch.object(pipeline_ai.os, "access", return_value=True):
+            self.assertEqual(pipeline_ai._provider_executable("workbuddy"), existing)
+
+    def test_missing_provider_reports_primary_candidate(self):
+        primary = pipeline_ai._FALLBACK_EXECUTABLES["workbuddy"][0]
+        with patch.object(pipeline_ai.shutil, "which", return_value=None), \
+                patch.object(pipeline_ai.os.path, "isfile", return_value=False):
+            self.assertEqual(pipeline_ai._provider_executable("workbuddy"), primary)
+
+    def test_path_lookup_wins_over_fallback(self):
+        with patch.object(pipeline_ai.shutil, "which", return_value="/usr/bin/codebuddy"):
+            self.assertEqual(pipeline_ai._provider_executable("workbuddy"),
+                             "/usr/bin/codebuddy")
+
+
 class SplitTest(unittest.TestCase):
     def test_sentence_punctuation_is_a_hard_boundary(self):
         words = [word("你好", 0.0, 1.2), word("世界。", 1.2, 2.4),

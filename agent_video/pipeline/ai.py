@@ -72,11 +72,17 @@ _CLI_BUILDERS = {
     "opencode": OpenCodeCli,
 }
 
-_FALLBACK_EXECUTABLES = {
-    "workbuddy": "/Applications/AI/WorkBuddy.app/Contents/Resources/bin/codebuddy",
-    "antigravity": str(Path.home() / ".local" / "bin" / "agy"),
-    "codex": "/opt/homebrew/bin/codex",
-    "opencode": str(Path.home() / ".opencode" / "bin" / "opencode"),
+_FALLBACK_EXECUTABLES: dict[str, tuple[str, ...]] = {
+    # WorkBuddy 5.x 把 CLI 放进了 app.asar.unpacked/cli/bin；保留旧路径兼容旧版本。
+    "workbuddy": (
+        "/Applications/AI/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy",
+        "/Applications/AI/WorkBuddy.app/Contents/Resources/bin/codebuddy",
+        str(Path.home() / "Applications" / "WorkBuddy.app" / "Contents"
+            / "Resources" / "app.asar.unpacked" / "cli" / "bin" / "codebuddy"),
+    ),
+    "antigravity": (str(Path.home() / ".local" / "bin" / "agy"),),
+    "codex": ("/opt/homebrew/bin/codex",),
+    "opencode": (str(Path.home() / ".opencode" / "bin" / "opencode"),),
 }
 
 _WHICH = {
@@ -91,7 +97,13 @@ def _provider_executable(provider_id: str) -> str:
     found = shutil.which(_WHICH.get(provider_id, provider_id))
     if found:
         return found
-    return _FALLBACK_EXECUTABLES.get(provider_id, "")
+    candidates = [os.path.expanduser(path)
+                  for path in _FALLBACK_EXECUTABLES.get(provider_id, ())]
+    for candidate in candidates:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    # 都不存在时返回首选路径，让报错信息指出期望位置。
+    return candidates[0] if candidates else ""
 
 
 def resolve_provider(provider: str | None = None) -> tuple[str, str]:
