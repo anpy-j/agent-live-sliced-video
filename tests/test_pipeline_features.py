@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from agent_video.db import Store
-from agent_video.ai import PLAN_PATCH_SCHEMA, ProviderResponseError
+from agent_video.ai import PLAN_PATCH_SCHEMA, CliProvider, ProviderResponseError
 from agent_video.engine.scripts.cuts import expand
 from agent_video.engine.scripts.digest_candidates import category, quality
 from agent_video.engine.scripts.global_quality import review_copy
@@ -39,6 +39,25 @@ def semantic_audit_response(candidates, main_product="上衣", reject_ids=()):
     plan = {"main_product": main_product, "picks": decisions}
     return {"plan": plan, "raw": {"result": plan}, "seconds": 0.5,
             "usage": {"input_tokens": 0, "output_tokens": 0}}
+
+
+class RecordingAuditProvider(CliProvider):
+    """Real CliProvider subclass so the runner treats it as a provider with audit env."""
+
+    provider_id = "recording"
+    display_name = "Recording"
+
+    def __init__(self, response):
+        super().__init__(Path("/tmp/recording"))
+        self.response = response
+        self.calls = []
+
+    def audit_env(self):
+        return {"RECORDING_DISABLE_INJECTION": "1"}
+
+    def generate_plan(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.response
 
 
 class PipelineFeatureTest(unittest.TestCase):
@@ -693,6 +712,40 @@ class PipelineFeatureTest(unittest.TestCase):
                         for item in report["decisions"]}
             for candidate_id in (1, 2, 3, 4):
                 self.assertEqual(verdicts[candidate_id], "reject")
+
+    def test_semantic_audit_uses_provider_lightweight_env(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = Store(root / "db.sqlite")
+            runner = JobRunner(store, root)
+            engine = root / "job" / "engine"
+            engine.mkdir(parents=True)
+            candidates = [{"i": 0, "s": 0, "e": 2, "c": "other", "t": "候选零"}]
+            job_id = store.create_job(title="审核环境", source_path="/tmp/source.mp4",
+                                      brief="", mode="fast",
+                                      workspace=str(engine.parent), products=["上衣"])
+            provider = RecordingAuditProvider(semantic_audit_response(candidates, "上衣"))
+            runner._semantic_review_candidates(
+                store.get_job(job_id), engine, provider, "workbuddy", "auto", candidates)
+            self.assertEqual(provider.calls[0]["env_overrides"],
+                             {"RECORDING_DISABLE_INJECTION": "1"})
+
+    def test_semantic_audit_omits_env_for_plain_providers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = Store(root / "db.sqlite")
+            runner = JobRunner(store, root)
+            engine = root / "job" / "engine"
+            engine.mkdir(parents=True)
+            candidates = [{"i": 0, "s": 0, "e": 2, "c": "other", "t": "候选零"}]
+            job_id = store.create_job(title="审核无环境", source_path="/tmp/source.mp4",
+                                      brief="", mode="fast",
+                                      workspace=str(engine.parent), products=["上衣"])
+            provider = Mock(display_name="Mock")
+            provider.generate_plan.return_value = semantic_audit_response(candidates, "上衣")
+            runner._semantic_review_candidates(
+                store.get_job(job_id), engine, provider, "workbuddy", "auto", candidates)
+            self.assertNotIn("env_overrides", provider.generate_plan.call_args.kwargs)
 
     def test_semantic_audit_resumes_from_completed_batch_checkpoint(self):
         with tempfile.TemporaryDirectory() as directory:

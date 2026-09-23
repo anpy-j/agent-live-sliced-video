@@ -60,6 +60,26 @@ class WorkBuddyCliTest(unittest.TestCase):
         self.assertNotIn("test", cmd)
         self.assertEqual(complete.call_args.kwargs["stdin_text"], "test")
 
+    def test_workbuddy_audit_env_suppresses_agent_context_injection(self):
+        provider = WorkBuddyCli(Path("/tmp/workbuddy"))
+        self.assertEqual(provider.audit_env(), {
+            "CODEBUDDY_DISABLE_AUTO_MEMORY": "1",
+            "CODEBUDDY_DISABLE_SYSTEM_REMINDER_MD": "1",
+        })
+        self.assertIsNone(AntigravityCli(Path("/tmp/agy")).audit_env())
+        self.assertIsNone(CodexCli(Path("/tmp/codex")).audit_env())
+
+    def test_workbuddy_generate_plan_forwards_env_overrides(self):
+        provider = WorkBuddyCli(Path("/tmp/workbuddy"))
+        envelope = '{"result": {"structured_output": {"main_product": "T恤", "picks": []}}}'
+        with patch.object(provider, "_ensure_available"), \
+                patch.object(provider, "validate_model"), \
+                patch.object(provider, "_complete", return_value=(envelope, "", 1)) as complete:
+            provider.generate_plan(model="auto", prompt="test", cwd=Path("/tmp"),
+                                   env_overrides={"CODEBUDDY_DISABLE_AUTO_MEMORY": "1"})
+        self.assertEqual(complete.call_args.kwargs["env_overrides"],
+                         {"CODEBUDDY_DISABLE_AUTO_MEMORY": "1"})
+
     def test_all_providers_share_structured_plan_parser(self):
         envelope = {"output_text": '{"main_product":"风衣","picks":[]}'}
         self.assertEqual(AntigravityCli._find_plan(envelope)["main_product"], "风衣")
