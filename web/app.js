@@ -244,8 +244,8 @@ function labelColumnsHtml(){
   const clauses=session.clauses||[];
   const ok=clauses.filter(c=>c.usable),bad=clauses.filter(c=>!c.usable);
   return `<div class="label-columns">
-    <section class="panel"><div class="panel-head"><div><h2>S2 判合格</h2><p>${ok.length} 条 · 实际不该用就圈出误放行的词并标为不合格</p></div></div><div class="label-list">${ok.map(labelClauseRow).join('')||'<p class="muted-empty">无</p>'}</div></section>
-    <section class="panel"><div class="panel-head"><div><h2>S2 判不合格</h2><p>${bad.length} 条 · 实际可用就标为合格（默认移除命中词）</p></div></div><div class="label-list">${bad.map(labelClauseRow).join('')||'<p class="muted-empty">无</p>'}</div></section>
+    <section class="panel"><div class="panel-head"><div><h2>S2 判合格</h2><p>${ok.length} 条 · 实际不该用就圈出误放行的词并标为不合格</p></div></div><div class="label-list" data-list="ok">${ok.map(labelClauseRow).join('')||'<p class="muted-empty">无</p>'}</div></section>
+    <section class="panel"><div class="panel-head"><div><h2>S2 判不合格</h2><p>${bad.length} 条 · 实际可用就标为合格（默认移除命中词）</p></div></div><div class="label-list" data-list="bad">${bad.map(labelClauseRow).join('')||'<p class="muted-empty">无</p>'}</div></section>
   </div>`;
 }
 function labelPatchHtml(){
@@ -290,7 +290,9 @@ function bindLabel(){
   $$('[data-label-clear]').forEach(btn=>btn.addEventListener('click',async()=>{delete state.label.decisions[btn.dataset.labelClear];state.label.patch=null;renderLabelRegions();await saveLabelDecisions()}));
 }
 function renderLabelRegions(){
+  const scroll={};$$('#labelColumns .label-list').forEach(el=>{if(el.dataset.list)scroll[el.dataset.list]=el.scrollTop});
   patchJobRegion('#labelColumns',labelColumnsHtml(),JSON.stringify([state.label.decisions,state.label.sel]));
+  $$('#labelColumns .label-list').forEach(el=>{if(el.dataset.list&&scroll[el.dataset.list]!=null)el.scrollTop=scroll[el.dataset.list]});
   patchJobRegion('#labelPatch',labelPatchHtml(),JSON.stringify(state.label.patch));
   bindLabel();bindLabelSelection();
   const meta=$('#labelStats');if(meta){const changed=Object.keys(state.label.decisions).length;meta.textContent=`${changed} 条已改判`}
