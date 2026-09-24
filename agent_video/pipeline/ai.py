@@ -23,11 +23,30 @@ from pathlib import Path
 from typing import Any
 
 from agent_video.ai import (AntigravityCli, CodexCli, OpenCodeCli,
-                            ProviderResponseError, WorkBuddyCli)
+                            DEFAULT_AI_TIMEOUT_SECONDS, ProviderResponseError,
+                            WorkBuddyCli)
 
 from .errors import AIReturnError, PipelineConfigError
 
-DEFAULT_TIMEOUT = 90
+def _default_timeout() -> int:
+    """单次 AI 调用上限，秒。
+
+    与旧 provider 层同源（``DEFAULT_AI_TIMEOUT_SECONDS``）：WorkBuddy 在素材
+    较大、并发较高时单批可能远超 6 分钟，过短的上限会把正常但较慢的调用误判
+    为失败。可用 ``PIPELINE_AI_TIMEOUT`` 覆盖。
+    """
+    raw = os.environ.get("PIPELINE_AI_TIMEOUT")
+    if raw:
+        try:
+            value = int(float(raw))
+        except ValueError:
+            value = 0
+        if value > 0:
+            return value
+    return DEFAULT_AI_TIMEOUT_SECONDS
+
+
+DEFAULT_TIMEOUT = _default_timeout()
 PROVIDER_ORDER = ("opencode", "codex", "workbuddy", "antigravity")
 
 DECISION_SCHEMA: dict[str, Any] = {
