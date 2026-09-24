@@ -156,6 +156,15 @@ class Store:
                   value_json TEXT NOT NULL,
                   updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS label_sessions (
+                  id TEXT PRIMARY KEY,
+                  source_path TEXT NOT NULL,
+                  status TEXT NOT NULL DEFAULT 'ready',
+                  clauses_json TEXT NOT NULL DEFAULT '[]',
+                  decisions_json TEXT NOT NULL DEFAULT '{}',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
                 """
             )
 
@@ -295,6 +304,56 @@ class Store:
         with self.connect() as con:
             row = con.execute("SELECT * FROM artifacts WHERE id=?", (artifact_id,)).fetchone()
         return dict(row) if row else None
+
+    def create_label_session(self, *, source_path: str) -> str:
+        session_id = f"label_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+        now = utc_now()
+        with self.connect() as con:
+            con.execute(
+                "INSERT INTO label_sessions(id,source_path,status,clauses_json,decisions_json,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (session_id, source_path, "ready", "[]", "{}", now, now),
+            )
+        return session_id
+
+    def set_label_clauses(self, session_id: str, clauses: list[dict[str, Any]],
+                          status: str = "ready") -> None:
+        with self.connect() as con:
+            con.execute(
+                "UPDATE label_sessions SET clauses_json=?, status=?, updated_at=? WHERE id=?",
+                (_json(clauses), status, utc_now(), session_id),
+            )
+
+    def set_label_decisions(self, session_id: str, decisions: dict[str, Any]) -> None:
+        with self.connect() as con:
+            con.execute(
+                "UPDATE label_sessions SET decisions_json=?, updated_at=? WHERE id=?",
+                (_json(decisions), utc_now(), session_id),
+            )
+
+    @staticmethod
+    def _decode_label(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["clauses"] = json.loads(item.pop("clauses_json") or "[]")
+        item["decisions"] = json.loads(item.pop("decisions_json") or "{}")
+        return item
+
+    def get_label_session(self, session_id: str) -> dict[str, Any] | None:
+        with self.connect() as con:
+            row = con.execute("SELECT * FROM label_sessions WHERE id=?", (session_id,)).fetchone()
+        return self._decode_label(row) if row else None
+
+    def list_label_sessions(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as con:
+            rows = con.execute(
+                "SELECT * FROM label_sessions ORDER BY created_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [self._decode_label(row) for row in rows]
+
+    def delete_label_session(self, session_id: str) -> bool:
+        with self.connect() as con:
+            cur = con.execute("DELETE FROM label_sessions WHERE id=?", (session_id,))
+            return cur.rowcount > 0
 
     def set_setting(self, key: str, value: Any) -> None:
         with self.connect() as con:

@@ -59,3 +59,25 @@
 
 @media(max-width:980px){.shell{grid-template-columns:76px 1fr}.sidebar{padding-left:10px;padding-right:10px}}
 @media(max-width:680px){.shell{display:block}.sidebar{left:-220px;width:196px}.stage-metrics{grid-template-columns:1fr 1fr}.stage-detail-head,.service-warning{align-items:flex-start;flex-direction:column}.workflow-meta{display:none}}
+
+/* S2 labeling workbench. */
+.label-source{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.label-source input{min-width:320px;flex:1;padding:9px 11px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--panel-2);color:var(--text)}
+.label-sessions{display:flex;gap:10px;flex-wrap:wrap;padding:10px 2px 2px;color:var(--muted);font-size:12px}
+.label-columns{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:14px 0}
+.label-list{display:grid;gap:8px;max-height:640px;overflow:auto;padding:4px 2px}
+.lb-row{border:1px solid var(--line-soft);border-radius:var(--radius-sm);background:var(--panel-2);padding:9px 11px}
+.lb-row.changed{border-color:var(--accent);box-shadow:inset 3px 0 var(--accent)}
+.lb-row header{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px}
+.lb-time{color:var(--dim);font-size:11px;font-variant-numeric:tabular-nums}
+.lb-reason{padding:1px 7px;border-radius:99px;background:#2b1b1d;color:var(--red);font-size:11px}
+.lb-hit{padding:1px 7px;border-radius:99px;background:#2b2413;color:var(--amber);font-size:11px}
+.lb-changed{padding:1px 7px;border-radius:99px;background:#16260f;color:var(--accent);font-size:11px}
+.lb-text{margin:0 0 7px;line-height:1.9;font-size:15px;user-select:none}
+.lb-c{cursor:text;padding:1px 0;border-radius:3px}
+.lb-c.on{background:var(--accent);color:var(--accent-ink)}
+.lb-row footer{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.lb-sel{color:var(--muted);font-size:12px}
+.lb-sel em{color:var(--dim);font-style:normal}
+.lb-sel code,.info-item code{padding:1px 6px;border-radius:5px;background:#0c1117;border:1px solid var(--line);font-size:12px}
+@media(max-width:980px){.label-columns{grid-template-columns:1fr}}

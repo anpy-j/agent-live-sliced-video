@@ -21,6 +21,10 @@ except ImportError:  # pragma: no cover - Windows fallback keeps single-process 
     fcntl = None  # type: ignore[assignment]
 
 from .db import Store, utc_now
+from .labeling import (
+    activate_overrides, apply_patch, build_patch, prepare as prepare_labels,
+    profile_summary,
+)
 from .mcp import McpEndpoint, tool_specs
 from .runner import JobRunner
 
@@ -36,6 +40,7 @@ class Application:
         self.store = Store(self.data_dir / "agent.db")
         self.runner = JobRunner(self.store, self.root)
         self._defaults()
+        self.label_profile = activate_overrides()
         self.mcp = McpEndpoint(self.invoke_tool)
 
     def _defaults(self) -> None:
@@ -358,6 +363,65 @@ try {{
         self.store.set_setting("mcp_token", token)
         return token
 
+    # ------------------------------------------------------------------ labeling
+    def label_profile_info(self) -> dict[str, Any]:
+        return {**profile_summary(), "active": self.label_profile}
+
+    def list_label_sessions(self) -> dict[str, Any]:
+        sessions = self.store.list_label_sessions()
+        return {"sessions": [
+            {key: value for key, value in session.items() if key != "clauses"}
+            | {"clause_count": len(session.get("clauses") or [])}
+            for session in sessions
+        ]}
+
+    def get_label_session(self, session_id: str) -> dict[str, Any]:
+        session = self.store.get_label_session(session_id)
+        if not session:
+            raise KeyError("标注会话不存在")
+        return session
+
+    def create_label_session(self, payload: dict[str, Any]) -> dict[str, Any]:
+        source = Path(str(payload.get("source_path", ""))).expanduser().resolve()
+        if not source.is_file():
+            raise ValueError(f"素材文件不存在: {source}")
+        session_id = self.store.create_label_session(source_path=str(source))
+        workdir = self.workspace_root / "labels" / session_id
+        try:
+            clauses = prepare_labels(str(source), str(workdir))
+        except Exception:
+            self.store.delete_label_session(session_id)
+            raise
+        self.store.set_label_clauses(session_id, clauses)
+        return self.get_label_session(session_id)
+
+    def save_label_decisions(self, session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self.store.get_label_session(session_id):
+            raise KeyError("标注会话不存在")
+        decisions = payload.get("decisions")
+        if not isinstance(decisions, dict):
+            raise ValueError("decisions 必须是对象")
+        self.store.set_label_decisions(session_id, decisions)
+        return self.get_label_session(session_id)
+
+    def delete_label_session(self, session_id: str) -> dict[str, Any]:
+        return {"deleted": self.store.delete_label_session(session_id)}
+
+    def label_patch(self, session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        session = self.store.get_label_session(session_id)
+        if not session:
+            raise KeyError("标注会话不存在")
+        decisions = payload.get("decisions")
+        if not isinstance(decisions, dict):
+            decisions = session.get("decisions") or {}
+        patch = build_patch(session.get("clauses") or [], decisions)
+        result: dict[str, Any] = {"patch": patch, "profile": profile_summary()}
+        if payload.get("apply"):
+            result["applied"] = apply_patch(patch)
+            self.label_profile = activate_overrides()
+            result["profile"] = profile_summary()
+        return result
+
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "SliceAgent/0.1"
@@ -391,6 +455,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json_response(self.app.skill())
             if path == "/api/mcp":
                 return self.json_response(self.app.mcp_info(self.headers.get("Host", "127.0.0.1:8787")))
+            if path == "/api/label/profile":
+                return self.json_response(self.app.label_profile_info())
+            if path == "/api/label/sessions":
+                return self.json_response(self.app.list_label_sessions())
+            if path.startswith("/api/label/sessions/"):
+                session_id = path.removeprefix("/api/label/sessions/").strip("/")
+                try:
+                    return self.json_response(self.app.get_label_session(session_id))
+                except KeyError as exc:
+                    return self.json_response({"error": str(exc)}, 404)
             if path.startswith("/api/artifacts/") and path.endswith("/content"):
                 artifact_id = path.split("/")[3]
                 return self.send_artifact(artifact_id)
@@ -427,6 +501,11 @@ class Handler(BaseHTTPRequestHandler):
                         return self.json_response(self.app.open_deliverable_folder(job_id))
             if path == "/api/mcp/token":
                 return self.json_response({"token": self.app.rotate_token()})
+            if path == "/api/label/sessions":
+                return self.json_response(self.app.create_label_session(payload), 201)
+            if path.startswith("/api/label/sessions/") and path.endswith("/patch"):
+                session_id = path[len("/api/label/sessions/"):-len("/patch")].strip("/")
+                return self.json_response(self.app.label_patch(session_id, payload))
             if path == "/mcp":
                 if not self.authorized_mcp():
                     return self.json_response({"error": "Unauthorized"}, 401)
@@ -450,6 +529,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json_response(self.app.update_settings(payload))
             if path == "/api/skill":
                 return self.json_response(self.app.save_skill(str(payload.get("content", ""))))
+            if path.startswith("/api/label/sessions/"):
+                session_id = path.removeprefix("/api/label/sessions/").strip("/")
+                return self.json_response(self.app.save_label_decisions(session_id, payload))
             return self.json_response({"error": "Not found"}, 404)
         except ValueError as exc:
             self.json_response({"error": str(exc)}, 400)
@@ -459,6 +541,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         try:
             path = self.path.partition("?")[0]
+            if path.startswith("/api/label/sessions/"):
+                session_id = path.removeprefix("/api/label/sessions/").strip("/")
+                if not session_id:
+                    raise ValueError("session_id 不能为空")
+                return self.json_response(self.app.delete_label_session(session_id))
             if path.startswith("/api/jobs/"):
                 job_id = path.removeprefix("/api/jobs/").strip("/")
                 if not job_id:

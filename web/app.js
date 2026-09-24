@@ -1,9 +1,10 @@
 const $ = (selector, root=document) => root.querySelector(selector);
 const $$ = (selector, root=document) => [...root.querySelectorAll(selector)];
 const app = $('#app');
-const state = { dashboard:null, job:null, poll:null, mcp:null, selectedStage:null };
+const state = { dashboard:null, job:null, poll:null, mcp:null, selectedStage:null, label:{session:null,decisions:{},sel:{},patch:null} };
 const labels = {queued:'排队中',running:'执行中',completed:'已完成',failed:'执行失败',cancelled:'已取消',pending:'等待',succeeded:'完成'};
 const stageLabels = {asr:'语音转写与切分',filter:'规则粗筛',judge:'AI 可用性判定',order:'AI 排序编排',render:'渲染成片'};
+const reasonLabels = {too_short:'文本过短',non_chinese:'中文占比低',duration_gate:'时长不足',hard_vocab:'违禁词',stage_chatter:'场控话术',malformed_speech:'病句/口误',duplicate:'重复',invalid_bounds:'时间异常'};
 const icons = {
   video:'<svg viewBox="0 0 24 24"><rect x="3" y="5" width="14" height="14" rx="2"/><path d="m17 10 4-2v8l-4-2z"/></svg>',
   file:'<svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v5h5M9 13h6M9 17h6"/></svg>',
@@ -218,8 +219,123 @@ async function renderSettings(){
   });
 }
 
-function openNewJob(){$('#newJobError').textContent='';$('#newJobDialog').showModal();}
-function bindCommon(){
+function labelClauseText(clause){return [...(clause.text||'')];}
+function labelSelToken(clauseId){const s=state.label.sel[clauseId];const clause=state.label.session?.clauses?.find(c=>String(c.id)===String(clauseId));if(!s||!clause)return '';return labelClauseText(clause).slice(s.a,s.b+1).join('').replace(/[\s，。！？、,.!?；;：:]/g,'');}
+function labelClauseRow(clause){
+  const d=state.label.decisions[clause.id]||{};
+  const changed=d.label!==undefined&&d.label!==clause.usable;
+  const s=state.label.sel[clause.id];
+  const chars=labelClauseText(clause).map((ch,i)=>`<i class="lb-c${s&&i>=s.a&&i<=s.b?' on':''}" data-clause="${clause.id}" data-i="${i}">${ch===' '?'&nbsp;':escapeHtml(ch)}</i>`).join('');
+  const token=labelSelToken(clause.id);
+  const reason=clause.usable?'':`<span class="lb-reason">${escapeHtml(reasonLabels[clause.reason]||clause.reason||'')}</span>`;
+  const hit=clause.hit?`<span class="lb-hit">命中「${escapeHtml(clause.hit)}」</span>`:'';
+  const badge=changed?`<span class="lb-changed">已改判为${d.label?'合格':'不合格'}</span>`:'';
+  return `<article class="lb-row${changed?' changed':''}" data-row="${clause.id}">
+    <header><span class="lb-time">${(clause.start||0).toFixed(1)}–${(clause.end||0).toFixed(1)}s</span>${reason}${hit}${badge}</header>
+    <p class="lb-text">${chars}</p>
+    <footer><span class="lb-sel">圈词：${token?`<code>${escapeHtml(token)}</code>`:'<em>拖选文字</em>'}</span>
+      <button class="button ghost small" data-label-toggle="${clause.id}">标为${clause.usable?'不合格':'合格'}</button>
+      ${d.label!==undefined?`<button class="link-button" data-label-clear="${clause.id}">撤销改判</button>`:''}
+    </footer></article>`;
+}
+function labelColumnsHtml(){
+  const session=state.label.session;
+  if(!session)return `<div class="empty">${icons.empty}<h3>尚未打开标注会话</h3><p>选择一段直播素材，跑一次 S1+S2，再人工核对粗筛结果。</p></div>`;
+  const clauses=session.clauses||[];
+  const ok=clauses.filter(c=>c.usable),bad=clauses.filter(c=>!c.usable);
+  return `<div class="label-columns">
+    <section class="panel"><div class="panel-head"><div><h2>S2 判合格</h2><p>${ok.length} 条 · 实际不该用就圈出误放行的词并标为不合格</p></div></div><div class="label-list">${ok.map(labelClauseRow).join('')||'<p class="muted-empty">无</p>'}</div></section>
+    <section class="panel"><div class="panel-head"><div><h2>S2 判不合格</h2><p>${bad.length} 条 · 实际可用就标为合格（默认移除命中词）</p></div></div><div class="label-list">${bad.map(labelClauseRow).join('')||'<p class="muted-empty">无</p>'}</div></section>
+  </div>`;
+}
+function labelPatchHtml(){
+  const result=state.label.patch;
+  if(!result)return '<p class="muted-empty">改判后点“生成补丁预览”，把人工结论翻译成词表增删。</p>';
+  const patch=result.patch||{},un=patch.unresolved||[];
+  const row=(title,arr)=>`<div class="info-item"><span>${title}</span><b>${arr&&arr.length?arr.map(x=>`<code>${escapeHtml(x)}</code>`).join(' '):'—'}</b></div>`;
+  return `<div class="info-list">${row('新增硬禁词',patch.hard_add)}${row('移除硬禁词',patch.hard_remove)}${row('新增硬禁正则',patch.hard_regex_add)}${row('移除硬禁正则',patch.hard_regex_remove)}</div>
+  ${un.length?`<div class="node-section-title"><b>无法自动成规</b><span>${un.length} 条</span></div><div class="label-list">${un.map(u=>`<article class="lb-row"><header><span class="lb-time">#${escapeHtml(u.id)}</span><span class="lb-reason">${escapeHtml(reasonLabels[u.reason]||u.reason||'')}</span></header><p class="lb-text">${escapeHtml(u.text)}</p><footer><span class="lb-sel">${escapeHtml(u.detail)}</span></footer></article>`).join('')}</div>`:''}
+  ${result.applied?`<div class="service-warning"><b>补丁已应用并热加载</b><span>硬禁词 ${result.applied.summary.hard} · 硬禁正则 ${result.applied.summary.hard_regex}（${escapeHtml(result.applied.path)}）</span></div>`:''}`;
+}
+function labelProfileHtml(profile){
+  const o=profile.overrides||{},s=profile.summary||{};
+  return `<div class="info-list">
+    <div class="info-item"><span>当前词表来源</span><code>${escapeHtml(s.profile||'通用默认（未加载覆盖）')}</code></div>
+    <div class="info-item"><span>生效硬禁词 / 正则</span><b>${s.hard||0} / ${s.hard_regex||0}</b></div>
+    <div class="info-item"><span>标注新增</span><b>${(o.hard_add||[]).map(x=>`<code>${escapeHtml(x)}</code>`).join(' ')||'—'}</b></div>
+    <div class="info-item"><span>标注移除</span><b>${(o.hard_remove||[]).map(x=>`<code>${escapeHtml(x)}</code>`).join(' ')||'—'}</b></div>
+  </div>`;
+}
+function paintLabelSelection(){
+  const session=state.label.session;if(!session)return;
+  $$('.lb-c').forEach(el=>{const s=state.label.sel[el.dataset.clause];el.classList.toggle('on',!!s&&+el.dataset.i>=s.a&&+el.dataset.i<=s.b)});
+  $$('[data-row]').forEach(row=>{const id=row.dataset.row,span=row.querySelector('.lb-sel'),token=labelSelToken(id);if(span)span.innerHTML=`圈词：${token?`<code>${escapeHtml(token)}</code>`:'<em>拖选文字</em>'}`});
+}
+function bindLabelSelection(){
+  let dragging=false,active=null;
+  $$('.lb-c').forEach(el=>{
+    el.addEventListener('mousedown',e=>{e.preventDefault();dragging=true;active=el.dataset.clause;const i=+el.dataset.i;state.label.sel[active]={a:i,b:i};paintLabelSelection()});
+    el.addEventListener('mouseenter',()=>{if(!dragging||el.dataset.clause!==active)return;const s=state.label.sel[active];if(!s)return;let i=+el.dataset.i;if(i<s.a)s.a=i;else s.b=i;paintLabelSelection()});
+  });
+  document.addEventListener('mouseup',()=>{dragging=false;active=null});
+}
+function bindLabel(){
+  $$('[data-label-toggle]').forEach(btn=>btn.addEventListener('click',async()=>{
+    const id=btn.dataset.labelToggle,clause=state.label.session.clauses.find(c=>String(c.id)===String(id));if(!clause)return;
+    const target=!clause.usable;
+    const current=state.label.decisions[id];
+    if(current&&current.label===target){delete state.label.decisions[id]}else{state.label.decisions[id]={label:target,tokens:labelSelToken(id)?[labelSelToken(id)]:[],regex:false}}
+    state.label.patch=null;renderLabelRegions();await saveLabelDecisions();
+  }));
+  $$('[data-label-clear]').forEach(btn=>btn.addEventListener('click',async()=>{delete state.label.decisions[btn.dataset.labelClear];state.label.patch=null;renderLabelRegions();await saveLabelDecisions()}));
+}
+function renderLabelRegions(){
+  patchJobRegion('#labelColumns',labelColumnsHtml(),JSON.stringify([state.label.decisions,state.label.sel]));
+  patchJobRegion('#labelPatch',labelPatchHtml(),JSON.stringify(state.label.patch));
+  bindLabel();bindLabelSelection();
+  const meta=$('#labelStats');if(meta){const changed=Object.keys(state.label.decisions).length;meta.textContent=`${changed} 条已改判`}
+}
+async function saveLabelDecisions(){
+  const session=state.label.session;if(!session)return;
+  try{await api(`/api/label/sessions/${session.id}`,{method:'PUT',body:JSON.stringify({decisions:state.label.decisions})})}catch(err){toast(err.message)}
+}
+async function renderLabel(){
+  setCrumb('S2 标注');loading();
+  const [sessions,profile]=await Promise.all([api('/api/label/sessions'),api('/api/label/profile')]);
+  const session=state.label.session;
+  app.innerHTML=`<div class="hero"><div><span class="eyebrow">S2 RULE TUNING</span><h1>S2 标注工作台</h1><p>对素材跑 S1+S2，人工核对粗筛结论；圈出判错的词，生成并应用词表补丁（仅作用于规则粗筛）。</p></div><div class="detail-actions"><button class="button ghost" id="labelDiscard">删除会话</button><button class="button primary" id="labelPreview">生成补丁预览</button><button class="button primary" id="labelApply">应用补丁</button></div></div>
+  <div class="panel"><div class="panel-head"><div><h2>标注素材</h2><p id="labelStats">${session?`${session.id} · ${session.clauses.length} 条子句`:'选择直播素材开始'}</p></div><div class="label-source"><input id="labelSource" placeholder="选择视频或粘贴绝对路径" value="${session?escapeHtml(session.source_path):''}"><button class="button ghost small" id="labelBrowse">浏览</button><button class="button primary small" id="labelStart">开始标注</button></div></div>
+    ${sessions.sessions.length?`<div class="label-sessions">历史会话：${sessions.sessions.slice(0,8).map(s=>`<button class="link-button" data-open-label="${escapeHtml(s.id)}">${escapeHtml(s.created_at||s.id)}（${s.clause_count}）</button>`).join('')}</div>`:''}
+  </div>
+  <div id="labelColumns">${labelColumnsHtml()}</div>
+  <div class="panel"><div class="panel-head"><div><h2>规则补丁预览</h2><p>只把「人工圈词」翻译成词表增删，结构性命中不入规则</p></div></div><div id="labelPatch">${labelPatchHtml()}</div></div>
+  <div class="panel"><div class="panel-head"><div><h2>当前生效词表</h2><p>补丁应用后立即热加载，直接影响后续 S2 粗筛</p></div></div><div id="labelProfile">${labelProfileHtml(profile)}</div></div>`;
+  bindLabel();bindLabelSelection();
+  $('#labelBrowse')?.addEventListener('click',async()=>{try{const r=await api('/api/files/pick',{method:'POST',body:JSON.stringify({kind:'video'})});if(!r.cancelled)$('#labelSource').value=r.path}catch(err){toast(err.message)}});
+  $('#labelStart')?.addEventListener('click',async()=>{
+    const source=$('#labelSource').value.trim();if(!source)return toast('请先选择素材');
+    const btn=$('#labelStart');btn.disabled=true;btn.textContent='转写中…';
+    try{const created=await api('/api/label/sessions',{method:'POST',body:JSON.stringify({source_path:source})});state.label={session:created,decisions:created.decisions||{},sel:{},patch:null};toast(`已生成 ${created.clauses.length} 条子句`);await renderLabel()}
+    catch(err){toast(err.message)}finally{btn.disabled=false;btn.textContent='开始标注'}
+  });
+  $('#labelPreview')?.addEventListener('click',async()=>{
+    if(!state.label.session)return toast('请先开始标注');
+    try{state.label.patch=await api(`/api/label/sessions/${state.label.session.id}/patch`,{method:'POST',body:JSON.stringify({decisions:state.label.decisions,apply:false})});renderLabelRegions();const p=state.label.patch.patch;toast(`补丁：+${p.hard_add.length} / -${p.hard_remove.length}，${p.unresolved.length} 条待人工`)}catch(err){toast(err.message)}
+  });
+  $('#labelApply')?.addEventListener('click',async()=>{
+    if(!state.label.session)return toast('请先开始标注');
+    if(!confirm('将把补丁写入词表覆盖并立即生效，影响后续 S2 粗筛。继续吗？'))return;
+    try{state.label.patch=await api(`/api/label/sessions/${state.label.session.id}/patch`,{method:'POST',body:JSON.stringify({decisions:state.label.decisions,apply:true})});renderLabelRegions();const prof=await api('/api/label/profile');const box=$('#labelProfile');if(box)box.innerHTML=labelProfileHtml(prof);toast('补丁已应用')}catch(err){toast(err.message)}
+  });
+  $('#labelDiscard')?.addEventListener('click',async()=>{
+    if(!state.label.session)return toast('没有可删除的会话');
+    if(!confirm('仅删除这次标注会话，已应用的词表补丁不受影响。继续吗？'))return;
+    try{await api(`/api/label/sessions/${state.label.session.id}`,{method:'DELETE'});state.label={session:null,decisions:{},sel:{},patch:null};toast('会话已删除');await renderLabel()}catch(err){toast(err.message)}
+  });
+  $$('[data-open-label]').forEach(btn=>btn.addEventListener('click',async()=>{try{const session=await api(`/api/label/sessions/${btn.dataset.openLabel}`);state.label={session,decisions:session.decisions||{},sel:{},patch:null};await renderLabel()}catch(err){toast(err.message)}}));
+}
+
+function openNewJob(){$('#newJobError').textContent='';$('#newJobDialog').showModal();}function bindCommon(){
   $$('[data-new-job]').forEach(x=>x.addEventListener('click',openNewJob));
   $$('[data-open-job]').forEach(x=>x.addEventListener('click',()=>{location.hash=`#/jobs/${x.dataset.openJob}`}));
   $$('[data-open-folder]').forEach(x=>x.addEventListener('click',async e=>{
@@ -242,6 +358,7 @@ async function route(){
   try{
     if(hash.startsWith('#/jobs/'))return await renderJob(hash.split('/')[2]);
     if(hash==='#/queue')return await renderQueue();
+    if(hash==='#/label')return await renderLabel();
     if(hash==='#/skill')return await renderSkill();
     if(hash==='#/mcp')return await renderMcp();
     if(hash==='#/settings')return await renderSettings();

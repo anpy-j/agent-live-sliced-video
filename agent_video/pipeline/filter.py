@@ -15,8 +15,7 @@ import difflib
 import re
 from typing import Any
 
-from agent_video.engine.scripts import textnorm
-from agent_video.engine.scripts.badvocab import BAD_RE
+from agent_video.engine.scripts import badvocab, textnorm
 from agent_video.engine.scripts.prep import is_cjk
 
 DEFAULT_MIN_DURATION = 1.0
@@ -38,7 +37,7 @@ def _rule_reason(clause: dict[str, Any], min_duration: float) -> str | None:
         return "non_chinese"
     if cjk / max(1, len(text)) < 0.5:
         return "non_chinese"
-    if BAD_RE.search(text):
+    if badvocab.BAD_RE.search(text):
         return "hard_vocab"
     rejection = textnorm.content_rejection(text)
     if rejection == "stage_chatter":
@@ -84,3 +83,14 @@ def filter_clauses(clauses: list[dict[str, Any]],
         else:
             kept.append(key)
     return clauses
+
+
+def reject_hit(clause: dict[str, Any]) -> str | None:
+    """返回导致淘汰的**字面命中**（可回填词表），结构性命中返回 None。
+
+    只有 ``hard_vocab`` 的命中来自可配置词表；话术/病句命中来自 textnorm
+    内置正则，不能靠词表增删，返回 None 以便标注端标为「无法自动成规」。
+    """
+    if str(clause.get("reason") or "") != "hard_vocab":
+        return None
+    return badvocab.hit(str(clause.get("text") or ""))

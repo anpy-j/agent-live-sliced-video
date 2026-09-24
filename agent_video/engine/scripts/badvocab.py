@@ -123,15 +123,42 @@ def _build(profile):
     return hard, review, hard_re, review_re
 
 
-PROFILE = load_profile()
-HARD, REVIEW, HARD_RES, REVIEW_RES = _build(PROFILE)
-SECONDARY_PRODUCTS = str(PROFILE.get("secondary_products") or SECONDARY_PRODUCTS)
-SECONDARY_ATTRIBUTES = str(PROFILE.get("secondary_attributes") or SECONDARY_ATTRIBUTES)
+PROFILE: dict = {}
+HARD: list = []
+REVIEW: list = []
+HARD_RES: list = []
+REVIEW_RES: list = []
+BAD_RE: re.Pattern = re.compile(r"(?!x)x")
+REVIEW_RE: re.Pattern = re.compile(r"(?!x)x")
 
-BAD_RE = re.compile("|".join([re.escape(p) for p in HARD]
-                             + [f"(?:{p})" for p in HARD_RES]), re.I)
-REVIEW_RE = re.compile("|".join([re.escape(p) for p in REVIEW]
-                                + [f"(?:{p})" for p in REVIEW_RES]), re.I)
+
+def _refresh():
+    """按当前 ``DOUYIN_VOCAB_PROFILE`` 重建全局词表与正则。"""
+    global PROFILE, HARD, REVIEW, HARD_RES, REVIEW_RES, BAD_RE, REVIEW_RE
+    global SECONDARY_PRODUCTS, SECONDARY_ATTRIBUTES
+    PROFILE = load_profile()
+    HARD, REVIEW, HARD_RES, REVIEW_RES = _build(PROFILE)
+    SECONDARY_PRODUCTS = str(PROFILE.get("secondary_products") or SECONDARY_PRODUCTS)
+    SECONDARY_ATTRIBUTES = str(PROFILE.get("secondary_attributes") or SECONDARY_ATTRIBUTES)
+    BAD_RE = re.compile("|".join([re.escape(p) for p in HARD]
+                                 + [f"(?:{p})" for p in HARD_RES]), re.I)
+    REVIEW_RE = re.compile("|".join([re.escape(p) for p in REVIEW]
+                                    + [f"(?:{p})" for p in REVIEW_RES]), re.I)
+
+
+def reload_profile(path=None):
+    """重新加载词表，供规则热更新用。
+
+    ``path`` 非空时先写入 ``DOUYIN_VOCAB_PROFILE`` 环境变量再加载；
+    调用方模块（如 ``filter``）必须通过 ``badvocab.BAD_RE`` 动态取用才会生效。
+    """
+    if path is not None:
+        os.environ["DOUYIN_VOCAB_PROFILE"] = str(path)
+    _refresh()
+    return summary()
+
+
+_refresh()
 
 
 def hit(text):
