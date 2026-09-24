@@ -218,5 +218,34 @@ class WorkBuddyCliTest(unittest.TestCase):
         cancel.assert_called_once_with("task-1", "issue-1", Path("/tmp"))
 
 
+class FindObjectExtractionTest(unittest.TestCase):
+    """_find_object 必须挑出模型答案，而不是被回显的请求 schema 骗到。"""
+
+    SCHEMA = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {"decisions": {"type": "array", "items": {"type": "object"}}},
+        "required": ["decisions"],
+    }
+
+    def test_finds_answer_nested_in_response_string(self):
+        envelope = {"status": "SUCCESS",
+                    "response": '{"decisions":[{"id":0,"usable":true,"reason":"ok"}]}',
+                    "json_schema": self.SCHEMA}
+        found = AntigravityCli._find_object(envelope, ("decisions",))
+        self.assertEqual(found, {"decisions": [{"id": 0, "usable": True, "reason": "ok"}]})
+
+    def test_schema_echo_alone_is_not_an_answer(self):
+        envelope = {"conversation_id": "x", "status": "SUCCESS", "response": "",
+                    "json_schema": self.SCHEMA}
+        self.assertIsNone(AntigravityCli._find_object(envelope, ("decisions",)))
+
+    def test_prefers_real_answer_over_schema_echo(self):
+        envelope = {"json_schema": self.SCHEMA,
+                    "result": {"decisions": [{"id": 1, "usable": False, "reason": "no"}]}}
+        found = AntigravityCli._find_object(envelope, ("decisions",))
+        self.assertEqual(found, {"decisions": [{"id": 1, "usable": False, "reason": "no"}]})
+
+
 if __name__ == "__main__":
     unittest.main()

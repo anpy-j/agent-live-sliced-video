@@ -22,3 +22,6 @@ AGENTS.md
 
 # local runtime logs
 .runtime/
+
+# opencode agent runtime
+.opencode/

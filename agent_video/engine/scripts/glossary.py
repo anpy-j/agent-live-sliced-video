@@ -26,6 +26,11 @@ TERM_FIXES = [
     (r"秀底", "袖底"),
     (r"航风", "行缝"),
     (r"先货", "现货"),
+    (r"搭半球", "搭半裙"),
+    (r"渣感", "扎感"),
+    (r"桑残丝", "桑蚕丝"),
+    (r"打体衫", "打底衫"),
+    (r"出篇", "出片"),
 ]
 
 _COMPILED = [(re.compile(pattern), replacement) for pattern, replacement in TERM_FIXES]

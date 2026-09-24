@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 import threading
 import uuid
 from contextlib import contextmanager
@@ -10,13 +11,24 @@ from pathlib import Path
 from typing import Any, Iterator
 
 
+# 精简管线的唯一阶段序列：ASR → 规则筛 → AI 判定 → AI 排序 → 渲染。
 STAGE_DEFINITIONS = [
-    ("material_index", "素材索引", 20),
-    ("edit_plan", "AI 文本编排", 40),
-    ("validation", "文本校验与原声锁定", 65),
-    ("visual_mix", "多模态画面混剪", 80),
-    ("delivery", "一次高清渲染", 100),
+    ("asr", "语音转写与切分", 20),
+    ("filter", "规则粗筛", 40),
+    ("judge", "AI 可用性判定", 60),
+    ("order", "AI 排序编排", 80),
+    ("render", "渲染成片", 100),
 ]
+
+_LEAN_STAGE_IDS = {stage_id for stage_id, _, _ in STAGE_DEFINITIONS}
+
+# 旧管线遗留在 jobs 表里的独占列；出现即代表磁盘上是旧 schema。
+_LEGACY_JOB_COLUMNS = {
+    "brief", "mode", "engine_state", "model_name", "token_input", "token_output",
+    "model_provider", "visual_model_provider", "visual_model_name", "products_json",
+    "materials_json", "colors_json", "subtitle_path", "delivery_mode",
+    "creative_strategy", "target_min_seconds", "target_max_seconds", "semantic_engine",
+}
 
 
 def utc_now() -> str:
@@ -47,7 +59,42 @@ class Store:
             finally:
                 con.close()
 
+    def _archive_legacy_store(self) -> None:
+        """旧管线的 jobs/stages 与精简 schema 不兼容，归档后重建，避免旧字段泄漏。
+
+        只重命名数据库文件（保留为 agent.db.legacy-<时间戳>），不删除任何产物。
+        """
+        if not self.path.exists() or self.path.stat().st_size == 0:
+            return
+        try:
+            con = sqlite3.connect(self.path, timeout=5)
+        except sqlite3.Error:
+            return
+        try:
+            tables = {row[0] for row in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            if "jobs" not in tables:
+                return
+            columns = {row[1] for row in con.execute("PRAGMA table_info(jobs)")}
+            stage_ids = ({row[0] for row in con.execute("SELECT DISTINCT stage_id FROM stages")}
+                         if "stages" in tables else set())
+        except sqlite3.Error:
+            return
+        finally:
+            con.close()
+        if not (columns & _LEGACY_JOB_COLUMNS or stage_ids - _LEAN_STAGE_IDS):
+            return
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        archive = self.path.with_name(f"{self.path.name}.legacy-{stamp}")
+        for suffix in ("", "-wal", "-shm"):
+            source = Path(f"{self.path}{suffix}")
+            if source.exists():
+                source.rename(Path(f"{archive}{suffix}"))
+        print(f"[db] 检测到旧管线数据库，已归档为 {archive.name} 并重建精简 schema",
+              file=sys.stderr)
+
     def init(self) -> None:
+        self._archive_legacy_store()
         with self.connect() as con:
             con.executescript(
                 """
@@ -55,32 +102,15 @@ class Store:
                   id TEXT PRIMARY KEY,
                   title TEXT NOT NULL,
                   source_path TEXT NOT NULL,
-                  brief TEXT NOT NULL DEFAULT '',
                   status TEXT NOT NULL,
                   current_stage TEXT,
                   progress REAL NOT NULL DEFAULT 0,
-                  mode TEXT NOT NULL DEFAULT 'standard',
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL,
                   started_at TEXT,
                   finished_at TEXT,
                   workspace TEXT NOT NULL,
-                  error TEXT,
-                  engine_state TEXT,
-                  model_provider TEXT NOT NULL DEFAULT 'manual',
-                  model_name TEXT,
-                  visual_model_provider TEXT NOT NULL DEFAULT 'manual',
-                  visual_model_name TEXT,
-                  products_json TEXT NOT NULL DEFAULT '[]',
-                  materials_json TEXT NOT NULL DEFAULT '[]',
-                  colors_json TEXT NOT NULL DEFAULT '[]',
-                  subtitle_path TEXT,
-                  delivery_mode TEXT NOT NULL DEFAULT 'merged',
-                  creative_strategy TEXT NOT NULL DEFAULT 'auto',
-                  target_min_seconds INTEGER NOT NULL DEFAULT 0,
-                  target_max_seconds INTEGER NOT NULL DEFAULT 0,
-                  token_input INTEGER NOT NULL DEFAULT 0,
-                  token_output INTEGER NOT NULL DEFAULT 0
+                  error TEXT
                 );
                 CREATE TABLE IF NOT EXISTS stages (
                   job_id TEXT NOT NULL,
@@ -126,86 +156,34 @@ class Store:
                   value_json TEXT NOT NULL,
                   updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS label_sessions (
+                  id TEXT PRIMARY KEY,
+                  source_path TEXT NOT NULL,
+                  status TEXT NOT NULL DEFAULT 'ready',
+                  clauses_json TEXT NOT NULL DEFAULT '[]',
+                  decisions_json TEXT NOT NULL DEFAULT '{}',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
                 """
             )
-            columns = {row[1] for row in con.execute("PRAGMA table_info(jobs)").fetchall()}
-            if "model_provider" not in columns:
-                con.execute("ALTER TABLE jobs ADD COLUMN model_provider TEXT NOT NULL DEFAULT 'manual'")
-            if "visual_model_provider" not in columns:
-                con.execute("ALTER TABLE jobs ADD COLUMN visual_model_provider TEXT NOT NULL DEFAULT 'manual'")
-            if "visual_model_name" not in columns:
-                con.execute("ALTER TABLE jobs ADD COLUMN visual_model_name TEXT")
-            if "products_json" not in columns:
-                con.execute("ALTER TABLE jobs ADD COLUMN products_json TEXT NOT NULL DEFAULT '[]'")
-            if "materials_json" not in columns:
-                con.execute("ALTER TABLE jobs ADD COLUMN materials_json TEXT NOT NULL DEFAULT '[]'")
-            if "colors_json" not in columns:
-                con.execute("ALTER TABLE jobs ADD COLUMN colors_json TEXT NOT NULL DEFAULT '[]'")
-            if "subtitle_path" not in columns:
-                con.execute("ALTER TABLE jobs ADD COLUMN subtitle_path TEXT")
-            if "delivery_mode" not in columns:
-                con.execute("ALTER TABLE jobs ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'merged'")
-            if "creative_strategy" not in columns:
-                con.execute("ALTER TABLE jobs ADD COLUMN creative_strategy TEXT NOT NULL DEFAULT 'auto'")
-            if "target_min_seconds" not in columns:
-                con.execute("ALTER TABLE jobs ADD COLUMN target_min_seconds INTEGER NOT NULL DEFAULT 0")
-            if "target_max_seconds" not in columns:
-                con.execute("ALTER TABLE jobs ADD COLUMN target_max_seconds INTEGER NOT NULL DEFAULT 0")
-            if "semantic_engine" not in columns:
-                con.execute("ALTER TABLE jobs ADD COLUMN semantic_engine TEXT NOT NULL DEFAULT 'auto'")
-            con.execute("UPDATE jobs SET current_stage='validation' "
-                        "WHERE current_stage IN ('rough_cut','pre_render_review')")
-            con.execute("UPDATE events SET stage_id='validation' "
-                        "WHERE stage_id IN ('rough_cut','pre_render_review')")
-            con.execute("UPDATE artifacts SET stage_id='validation' "
-                        "WHERE stage_id IN ('rough_cut','pre_render_review')")
-            con.execute("DELETE FROM stages WHERE stage_id IN ('rough_cut','pre_render_review')")
-            con.execute("UPDATE stages SET name='文本校验与原声锁定', position=65 "
-                        "WHERE stage_id='validation'")
-            con.execute("UPDATE stages SET name='AI 文本编排', position=40 "
-                        "WHERE stage_id='edit_plan'")
-            con.execute("UPDATE stages SET name='一次高清渲染' "
-                        "WHERE stage_id='delivery'")
-            con.execute("INSERT OR IGNORE INTO stages(job_id,stage_id,name,position) "
-                        "SELECT id,'visual_mix','多模态画面混剪',80 FROM jobs")
-            con.execute("UPDATE stages SET status='succeeded',progress=1,"
-                        "message='旧任务在升级前已完成' WHERE stage_id='visual_mix' "
-                        "AND job_id IN (SELECT id FROM jobs WHERE status='completed')")
 
-    def create_job(self, *, title: str, source_path: str, brief: str, mode: str,
-                   workspace: str, model_provider: str = "manual",
-                   model_name: str | None = None, visual_model_provider: str = "manual",
-                   visual_model_name: str | None = None, products: list[str] | None = None,
-                   materials: list[str] | None = None, colors: list[str] | None = None,
-                   subtitle_path: str | None = None,
-                   delivery_mode: str = "merged", creative_strategy: str = "auto",
-                   target_min_seconds: int = 0, target_max_seconds: int = 0,
-                   semantic_engine: str = "auto") -> str:
+    def create_job(self, *, title: str, source_path: str, workspace: str) -> str:
         job_id = f"job_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
         now = utc_now()
+        first_stage = STAGE_DEFINITIONS[0][0]
         with self.connect() as con:
             con.execute(
-                "INSERT INTO jobs(id,title,source_path,brief,status,current_stage,progress,mode,created_at,updated_at,workspace,model_provider,model_name,visual_model_provider,visual_model_name,products_json,materials_json,colors_json,subtitle_path,delivery_mode,creative_strategy,target_min_seconds,target_max_seconds,semantic_engine) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (job_id, title, source_path, brief, "queued", "material_index", 0, mode, now, now,
-                 workspace, model_provider, model_name, visual_model_provider, visual_model_name,
-                 _json(products or []), _json(materials or []), _json(colors or []),
-                 subtitle_path, delivery_mode, creative_strategy, target_min_seconds, target_max_seconds,
-                 semantic_engine),
+                "INSERT INTO jobs(id,title,source_path,status,current_stage,progress,created_at,updated_at,workspace) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                (job_id, title, source_path, "queued", first_stage, 0, now, now, workspace),
             )
             con.executemany(
                 "INSERT INTO stages(job_id,stage_id,name,position) VALUES(?,?,?,?)",
                 [(job_id, stage_id, name, position) for stage_id, name, position in STAGE_DEFINITIONS],
             )
         self.add_event(job_id, None, "info", "job_created", "任务已进入队列",
-                       {"mode": mode, "model_provider": model_provider, "model_name": model_name,
-                        "visual_model_provider": visual_model_provider,
-                        "visual_model_name": visual_model_name, "products": products or [],
-                        "materials": materials or [], "colors": colors or [],
-                        "subtitle_path": subtitle_path, "delivery_mode": delivery_mode,
-                        "creative_strategy": creative_strategy,
-                        "target_min_seconds": target_min_seconds,
-                        "target_max_seconds": target_max_seconds,
-                        "semantic_engine": semantic_engine})
+                       {"source_path": source_path})
         return job_id
 
     def list_jobs(self, limit: int = 100) -> list[dict[str, Any]]:
@@ -216,8 +194,7 @@ class Store:
     def list_recoverable_jobs(self) -> list[dict[str, Any]]:
         with self.connect() as con:
             rows = con.execute(
-                "SELECT * FROM jobs WHERE status IN "
-                "('queued','running','waiting_input','failed') ORDER BY created_at"
+                "SELECT * FROM jobs WHERE status IN ('queued','running') ORDER BY created_at"
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -230,9 +207,6 @@ class Store:
             events = con.execute("SELECT * FROM events WHERE job_id=? ORDER BY id DESC LIMIT 200", (job_id,)).fetchall()
             artifacts = con.execute("SELECT * FROM artifacts WHERE job_id=? ORDER BY created_at DESC", (job_id,)).fetchall()
         job = dict(row)
-        for field in ("products_json", "materials_json", "colors_json"):
-            raw = job.pop(field, "[]")
-            job[field.removesuffix("_json")] = json.loads(raw or "[]")
         job["stages"] = [self._decode_row(x, "result_json") for x in stages]
         job["events"] = [self._decode_row(x, "payload_json") for x in events]
         job["artifacts"] = [dict(x) for x in artifacts]
@@ -267,10 +241,9 @@ class Store:
         now = utc_now()
         with self.connect() as con:
             con.execute(
-                "UPDATE jobs SET status='queued', current_stage='material_index', progress=0, "
-                "error=NULL, started_at=NULL, finished_at=NULL, updated_at=?, engine_state=NULL, "
-                "token_input=0, token_output=0 WHERE id=?",
-                (now, job_id),
+                "UPDATE jobs SET status='queued', current_stage=?, progress=0, "
+                "error=NULL, started_at=NULL, finished_at=NULL, updated_at=? WHERE id=?",
+                (STAGE_DEFINITIONS[0][0], now, job_id),
             )
             con.execute(
                 "UPDATE stages SET status='pending', progress=0, message='', started_at=NULL, "
@@ -294,32 +267,17 @@ class Store:
         now = utc_now()
         self.update_stage(job_id, stage_id, status="running", progress=0.03, message=message,
                           started_at=now, finished_at=None, error=None)
-        self.update_job(job_id, status="running", current_stage=stage_id, started_at=now)
+        self.update_job(job_id, status="running", current_stage=stage_id, progress=0,
+                        started_at=now)
         self.add_event(job_id, stage_id, "info", "stage_started", message)
 
     def stage_done(self, job_id: str, stage_id: str, message: str,
                    result: dict[str, Any] | None = None) -> None:
         position = next((x[2] for x in STAGE_DEFINITIONS if x[0] == stage_id), 0)
         self.update_stage(job_id, stage_id, status="succeeded", progress=1, message=message,
-                          finished_at=utc_now(), result=result)
+                          finished_at=utc_now(), result=result, error=None)
         self.update_job(job_id, progress=position)
         self.add_event(job_id, stage_id, "success", "stage_completed", message, result)
-
-    def stage_wait(self, job_id: str, stage_id: str, message: str,
-                   result: dict[str, Any] | None = None) -> None:
-        self.update_stage(job_id, stage_id, status="waiting_input", progress=0.65,
-                          message=message, result=result)
-        self.update_job(job_id, status="waiting_input", current_stage=stage_id)
-        self.add_event(job_id, stage_id, "warning", "input_required", message, result)
-
-    def stage_recover(self, job_id: str, stage_id: str, message: str,
-                      result: dict[str, Any] | None = None) -> None:
-        """Record a recoverable problem without creating a terminal failure state."""
-        self.update_stage(job_id, stage_id, status="running", message=message, error=None,
-                          finished_at=None, result=result)
-        self.update_job(job_id, status="running", current_stage=stage_id, error=None,
-                        finished_at=None)
-        self.add_event(job_id, stage_id, "warning", "stage_recovering", message, result)
 
     def add_event(self, job_id: str, stage_id: str | None, level: str, kind: str,
                   message: str, payload: Any = None) -> None:
@@ -347,16 +305,55 @@ class Store:
             row = con.execute("SELECT * FROM artifacts WHERE id=?", (artifact_id,)).fetchone()
         return dict(row) if row else None
 
-    def delete_artifacts(self, job_id: str, stage_ids: set[str]) -> None:
-        """Remove stale artifact registrations when a review sends work upstream."""
-        if not stage_ids:
-            return
-        placeholders = ",".join("?" for _ in stage_ids)
+    def create_label_session(self, *, source_path: str) -> str:
+        session_id = f"label_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+        now = utc_now()
         with self.connect() as con:
             con.execute(
-                f"DELETE FROM artifacts WHERE job_id=? AND stage_id IN ({placeholders})",
-                [job_id, *sorted(stage_ids)],
+                "INSERT INTO label_sessions(id,source_path,status,clauses_json,decisions_json,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (session_id, source_path, "ready", "[]", "{}", now, now),
             )
+        return session_id
+
+    def set_label_clauses(self, session_id: str, clauses: list[dict[str, Any]],
+                          status: str = "ready") -> None:
+        with self.connect() as con:
+            con.execute(
+                "UPDATE label_sessions SET clauses_json=?, status=?, updated_at=? WHERE id=?",
+                (_json(clauses), status, utc_now(), session_id),
+            )
+
+    def set_label_decisions(self, session_id: str, decisions: dict[str, Any]) -> None:
+        with self.connect() as con:
+            con.execute(
+                "UPDATE label_sessions SET decisions_json=?, updated_at=? WHERE id=?",
+                (_json(decisions), utc_now(), session_id),
+            )
+
+    @staticmethod
+    def _decode_label(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["clauses"] = json.loads(item.pop("clauses_json") or "[]")
+        item["decisions"] = json.loads(item.pop("decisions_json") or "{}")
+        return item
+
+    def get_label_session(self, session_id: str) -> dict[str, Any] | None:
+        with self.connect() as con:
+            row = con.execute("SELECT * FROM label_sessions WHERE id=?", (session_id,)).fetchone()
+        return self._decode_label(row) if row else None
+
+    def list_label_sessions(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as con:
+            rows = con.execute(
+                "SELECT * FROM label_sessions ORDER BY created_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [self._decode_label(row) for row in rows]
+
+    def delete_label_session(self, session_id: str) -> bool:
+        with self.connect() as con:
+            cur = con.execute("DELETE FROM label_sessions WHERE id=?", (session_id,))
+            return cur.rowcount > 0
 
     def set_setting(self, key: str, value: Any) -> None:
         with self.connect() as con:
@@ -375,5 +372,5 @@ class Store:
         counts: dict[str, int] = {}
         for job in jobs:
             counts[job["status"]] = counts.get(job["status"], 0) + 1
-        active = sum(counts.get(x, 0) for x in ("queued", "running", "waiting_input"))
+        active = sum(counts.get(x, 0) for x in ("queued", "running"))
         return {"jobs": jobs, "counts": counts, "active": active, "total": len(jobs)}

@@ -425,6 +425,99 @@ class CliProvider:
             return None
         return None
 
+    # Envelope keys that merely echo back the request/JSON schema; recursing into
+    # them would let a schema descriptor masquerade as the model's answer.
+    _SCHEMA_ECHO_KEYS = frozenset({"json_schema", "input_schema", "schema", "parameters"})
+
+    @classmethod
+    def _looks_like_schema(cls, value: dict[str, Any],
+                           required_keys: tuple[str, ...]) -> bool:
+        """True when a candidate is actually a JSON Schema node, not an answer.
+
+        CLI envelopes (e.g. the Antigravity CLI) echo the request schema, whose
+        top level carries the same required key names as the answer.  A genuine
+        answer holds data; a schema node holds descriptors like ``type``.
+        """
+        for key in required_keys:
+            field = value.get(key)
+            if isinstance(field, dict) and ({"type", "properties", "items"} & set(field)):
+                return True
+        return False
+
+    @classmethod
+    def _find_object(cls, value: Any, required_keys: tuple[str, ...]) -> dict[str, Any] | None:
+        """Locate the first object that carries every required top-level key.
+
+        Generic sibling of ``_find_plan`` for the lean pipeline's own schemas
+        (``decisions`` / ``main_product`` + ``ordered_ids``).  It only claims an
+        object when all required keys are present, so it never mistakes a partial
+        wrapper for the answer.
+        """
+        if not required_keys:
+            return None
+        if isinstance(value, dict):
+            if (all(key in value for key in required_keys)
+                    and not cls._looks_like_schema(value, required_keys)):
+                return value
+            for key in ("structured_output", "result", "output", "output_text",
+                        "content", "data", "message"):
+                if key in value:
+                    found = cls._find_object(value[key], required_keys)
+                    if found:
+                        return found
+            for key, nested in value.items():
+                if key in cls._SCHEMA_ECHO_KEYS:
+                    continue
+                found = cls._find_object(nested, required_keys)
+                if found:
+                    return found
+        elif isinstance(value, list):
+            for nested in value:
+                found = cls._find_object(nested, required_keys)
+                if found:
+                    return found
+        elif isinstance(value, str):
+            text = value.strip()
+            clean = text
+            if clean.startswith("```"):
+                clean = re.sub(r"^```(?:json)?\s*|\s*```$", "", clean,
+                               flags=re.IGNORECASE).strip()
+            try:
+                found = cls._find_object(json.loads(clean), required_keys)
+                if found:
+                    return found
+            except (json.JSONDecodeError, TypeError):
+                pass
+            for match in re.finditer(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text,
+                                     flags=re.IGNORECASE):
+                try:
+                    found = cls._find_object(json.loads(match.group(1)), required_keys)
+                    if found:
+                        return found
+                except (json.JSONDecodeError, TypeError):
+                    continue
+            match = re.search(r"(\{[\s\S]*\})", text)
+            if match:
+                try:
+                    found = cls._find_object(json.loads(match.group(1)), required_keys)
+                    if found:
+                        return found
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            return None
+        return None
+
+    def generate_json(self, *, model: str, prompt: str, schema: dict[str, Any], cwd: Path,
+                      on_process: Callable[[subprocess.Popen[str]], None] | None = None,
+                      timeout: int = DEFAULT_AI_TIMEOUT_SECONDS) -> dict[str, Any]:
+        """One stateless JSON call against an arbitrary schema.
+
+        The lean pipeline uses this instead of ``generate_plan`` so it can carry
+        its own two schemas without the plan-shaped post-processing.  Returns
+        ``{"data": <schema-shaped object>, "raw", "stderr", "seconds", "usage"}``.
+        """
+        raise ValueError(f"{self.display_name} 暂不支持自定义 schema 的 JSON 调用")
+
     @classmethod
     def _find_usage(cls, value: Any) -> dict[str, int]:
         result = {"input_tokens": 0, "output_tokens": 0}
@@ -517,6 +610,33 @@ class WorkBuddyCli(CliProvider):
         return {"plan": plan, "raw": envelope, "stderr": stderr.strip(), "seconds": seconds,
                 "usage": self._find_usage(envelope)}
 
+    def generate_json(self, *, model: str, prompt: str, schema: dict[str, Any], cwd: Path,
+                      on_process: Callable[[subprocess.Popen[str]], None] | None = None,
+                      timeout: int = DEFAULT_AI_TIMEOUT_SECONDS) -> dict[str, Any]:
+        self._ensure_available()
+        self.validate_model(model)
+        required = tuple(schema.get("required") or ())
+        command = [
+            str(self.executable), "-p", "--output-format", "json",
+            "--json-schema", json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
+            "--model", model, "--max-turns", "4", "--tools", "StructuredOutput",
+            "--permission-mode", "dontAsk", "--no-session-persistence",
+        ]
+        started = time.monotonic()
+        stdout, stderr, seconds = self._complete(
+            command, cwd=cwd, on_process=on_process, timeout=timeout, started=started,
+            stdin_text=prompt)
+        envelope = self._parse_json(stdout)
+        data = self._find_object(envelope, required)
+        if not data:
+            raise ProviderResponseError(
+                "WorkBuddy 已返回结果，但没有找到所需的 JSON 对象",
+                {"stdout": stdout[-100000:], "stderr": stderr[-20000:],
+                 "envelope": envelope, "seconds": seconds, "model": model},
+            )
+        return {"data": data, "raw": envelope, "stderr": stderr.strip(), "seconds": seconds,
+                "usage": self._find_usage(envelope)}
+
 
 class AntigravityCli(CliProvider):
     provider_id = "antigravity"
@@ -570,6 +690,35 @@ class AntigravityCli(CliProvider):
         if not plan:
             raise RuntimeError("Antigravity 已返回结果，但没有找到 main_product 和 picks")
         return {"plan": plan, "raw": envelope, "stderr": stderr.strip(), "seconds": seconds,
+                "usage": self._find_usage(envelope)}
+
+    def generate_json(self, *, model: str, prompt: str, schema: dict[str, Any], cwd: Path,
+                      on_process: Callable[[subprocess.Popen[str]], None] | None = None,
+                      timeout: int = DEFAULT_AI_TIMEOUT_SECONDS) -> dict[str, Any]:
+        self._ensure_available()
+        self.validate_model(model)
+        required = tuple(schema.get("required") or ())
+        command = [
+            str(self.executable), "-p", prompt, "--output-format", "json",
+            "--json-schema", json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
+            "--print-timeout", f"{timeout}s", "--sandbox", "--disable-slash-commands",
+        ]
+        if model != "auto":
+            command.extend(["--model", model])
+        started = time.monotonic()
+        with tempfile.TemporaryDirectory(prefix="livecut-antigravity-") as temp_dir:
+            stdout, stderr, seconds = self._complete(
+                command, cwd=Path(temp_dir), on_process=on_process, timeout=timeout,
+                started=started)
+        envelope = self._parse_json(stdout)
+        data = self._find_object(envelope, required)
+        if not data:
+            raise ProviderResponseError(
+                "Antigravity 已返回结果，但没有找到所需的 JSON 对象",
+                {"stdout": stdout[-100000:], "stderr": stderr[-20000:],
+                 "envelope": envelope, "seconds": seconds, "model": model},
+            )
+        return {"data": data, "raw": envelope, "stderr": stderr.strip(), "seconds": seconds,
                 "usage": self._find_usage(envelope)}
 
 
@@ -658,6 +807,52 @@ class CodexCli(CliProvider):
             raise RuntimeError("Codex 已返回结果，但没有找到 main_product 和 picks")
         return {"plan": normalized, "raw": {"result": plan, "events": events},
                 "stderr": stderr.strip(), "seconds": seconds, "usage": self._find_usage(events)}
+
+    def generate_json(self, *, model: str, prompt: str, schema: dict[str, Any], cwd: Path,
+                      on_process: Callable[[subprocess.Popen[str]], None] | None = None,
+                      timeout: int = DEFAULT_AI_TIMEOUT_SECONDS) -> dict[str, Any]:
+        self._ensure_available()
+        self.validate_model(model)
+        required = tuple(schema.get("required") or ())
+        started = time.monotonic()
+        with tempfile.TemporaryDirectory(prefix="livecut-codex-") as temp_dir:
+            temp = Path(temp_dir)
+            schema_path = temp / "pipeline-schema.json"
+            output_path = temp / "pipeline-output.json"
+            schema_path.write_text(json.dumps(schema, ensure_ascii=False), encoding="utf-8")
+            command = [
+                str(self.executable), "exec", "--json", "--color", "never",
+                "--sandbox", "read-only", "--ephemeral", "--skip-git-repo-check",
+                "--ignore-user-config", "--output-schema", str(schema_path),
+                "--output-last-message", str(output_path), "-C", str(temp),
+            ]
+            if model != "auto":
+                command.extend(["--model", model])
+            command.append(prompt)
+            stdout, stderr, seconds = self._complete(
+                command, cwd=temp, on_process=on_process, timeout=timeout, started=started)
+            if not output_path.is_file():
+                raise ProviderResponseError(
+                    "Codex 已结束，但没有生成结构化结果",
+                    {"stdout": stdout[-100000:], "stderr": stderr[-20000:],
+                     "seconds": seconds, "model": model},
+                )
+            payload = self._parse_json(output_path.read_text(encoding="utf-8"))
+            events = []
+            for line in stdout.splitlines():
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        data = self._find_object(payload, required)
+        if not data:
+            raise ProviderResponseError(
+                "Codex 已返回结果，但没有找到所需的 JSON 对象",
+                {"result": payload, "stderr": stderr[-20000:], "seconds": seconds, "model": model},
+            )
+        return {"data": data, "raw": {"result": payload, "events": events},
+                "stderr": stderr.strip(), "seconds": seconds, "usage": self._find_usage(events)}
+
 
 class OpenCodeCli(CliProvider):
     provider_id = "opencode"
@@ -773,6 +968,50 @@ class OpenCodeCli(CliProvider):
                  "events": events[-100:], "seconds": seconds, "model": model},
             )
         return {"plan": plan, "raw": {"events": events}, "stderr": stderr.strip(),
+                "seconds": seconds, "usage": self._find_usage(events)}
+
+    def generate_json(self, *, model: str, prompt: str, schema: dict[str, Any], cwd: Path,
+                      on_process: Callable[[subprocess.Popen[str]], None] | None = None,
+                      timeout: int = DEFAULT_AI_TIMEOUT_SECONDS) -> dict[str, Any]:
+        self._ensure_available()
+        self.validate_model(model)
+        required = tuple(schema.get("required") or ())
+        schema_json = json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
+        constrained_prompt = f"""你现在是一个只返回 JSON 的接口，不是聊天助手。
+
+最高优先级输出契约：
+1. 第一个字符必须是 {{，最后一个字符必须是 }}。
+2. 顶层必须包含以下字段，字段名不得翻译、改名或省略：{", ".join(required)}。
+3. 所有字段必须严格符合下方 Schema，不得增加、改名或省略必填字段。
+4. 不得输出分析、解释、道歉、Markdown、代码围栏或 JSON 之外的任何字符。
+
+{prompt}
+
+最终响应只允许是一个符合以下 Schema 的 JSON 对象：
+{schema_json}"""
+        started = time.monotonic()
+        with tempfile.TemporaryDirectory(prefix="livecut-opencode-") as temp_dir:
+            temp = Path(temp_dir)
+            command = [
+                str(self.executable), "run", "--format", "json", "--pure",
+                "--agent", "livecut", "--dir", str(temp),
+            ]
+            if model != "auto":
+                command.extend(["--model", model])
+            command.append(constrained_prompt)
+            stdout, stderr, seconds = self._complete(
+                command, cwd=temp, on_process=on_process, timeout=timeout, started=started,
+                env_overrides={"OPENCODE_CONFIG_CONTENT": self._runtime_config()},
+            )
+        events, _ = self._parse_events(stdout)
+        data = self._find_object(events, required)
+        if not data:
+            raise ProviderResponseError(
+                "OpenCode 已返回结果，但没有找到所需的 JSON 对象",
+                {"stdout": stdout[-100000:], "stderr": stderr[-20000:],
+                 "events": events[-100:], "seconds": seconds, "model": model},
+            )
+        return {"data": data, "raw": {"events": events}, "stderr": stderr.strip(),
                 "seconds": seconds, "usage": self._find_usage(events)}
 
 
