@@ -18,7 +18,7 @@ from typing import Any
 from agent_video.engine.scripts import badvocab, textnorm
 from agent_video.engine.scripts.prep import is_cjk
 
-DEFAULT_MIN_DURATION = 1.0
+DEFAULT_MIN_DURATION = 0.8
 DEFAULT_MAX_SIMILARITY = 0.9
 _NORMALIZE_RE = re.compile(r"[^\u4e00-\u9fffA-Za-z0-9]+")
 

@@ -12,7 +12,7 @@
 靠中点最近的边界，避免把词从中间劈开（旧实现会在 6.0s 处硬砍，产生
 「不要高温高 / 温洗羊毛会洗坏的」这类断词）。
 
-最短 ``1.0s``：更短的孤片并入相邻子句，合并后不得超过上限，也不跨句末标点。
+最短 ``0.8s``：更短的孤片并入相邻子句，合并后不得超过上限，也不跨句末标点。
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from agent_video.engine.scripts.prep import simp
 FINAL_PUNCT = "。！？!?…"
 CLAUSE_PUNCT = "，,、；;：:"
 DEFAULT_MAX_DURATION = 6.0
-DEFAULT_MIN_DURATION = 1.0
+DEFAULT_MIN_DURATION = 0.8
 DEFAULT_SILENCE_GAP = 0.30
 
 
