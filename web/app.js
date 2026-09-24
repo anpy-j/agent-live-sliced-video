@@ -255,7 +255,7 @@ function labelPatchHtml(){
   const row=(title,arr)=>`<div class="info-item"><span>${title}</span><b>${arr&&arr.length?arr.map(x=>`<code>${escapeHtml(x)}</code>`).join(' '):'—'}</b></div>`;
   return `<div class="info-list">${row('新增硬禁词',patch.hard_add)}${row('移除硬禁词',patch.hard_remove)}${row('新增硬禁正则',patch.hard_regex_add)}${row('移除硬禁正则',patch.hard_regex_remove)}</div>
   ${un.length?`<div class="node-section-title"><b>无法自动成规</b><span>${un.length} 条</span></div><div class="label-list">${un.map(u=>`<article class="lb-row"><header><span class="lb-time">#${escapeHtml(u.id)}</span><span class="lb-reason">${escapeHtml(reasonLabels[u.reason]||u.reason||'')}</span></header><p class="lb-text">${escapeHtml(u.text)}</p><footer><span class="lb-sel">${escapeHtml(u.detail)}</span></footer></article>`).join('')}</div>`:''}
-  ${result.applied?`<div class="service-warning"><b>补丁已应用并热加载</b><span>硬禁词 ${result.applied.summary.hard} · 硬禁正则 ${result.applied.summary.hard_regex}（${escapeHtml(result.applied.path)}）</span></div>`:''}`;
+  ${result.applied?`<div class="service-warning"><b>补丁已入库并热加载</b><span>生效后硬禁词 ${result.applied.summary.hard} · 硬禁正则 ${result.applied.summary.hard_regex}（账号级基础词表 + 标注补丁）</span></div>`:''}`;
 }
 function labelProfileHtml(profile){
   const o=profile.overrides||{},s=profile.summary||{};
@@ -324,7 +324,7 @@ async function renderLabel(){
   });
   $('#labelApply')?.addEventListener('click',async()=>{
     if(!state.label.session)return toast('请先开始标注');
-    if(!confirm('将把补丁写入词表覆盖并立即生效，影响后续 S2 粗筛。继续吗？'))return;
+    if(!confirm('将把补丁写入数据库并立即生效（账号级基础词表 + 标注补丁），影响后续 S2 粗筛。继续吗？'))return;
     try{state.label.patch=await api(`/api/label/sessions/${state.label.session.id}/patch`,{method:'POST',body:JSON.stringify({decisions:state.label.decisions,apply:true})});renderLabelRegions();const prof=await api('/api/label/profile');const box=$('#labelProfile');if(box)box.innerHTML=labelProfileHtml(prof);toast('补丁已应用')}catch(err){toast(err.message)}
   });
   $('#labelDiscard')?.addEventListener('click',async()=>{

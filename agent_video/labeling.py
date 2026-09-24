@@ -6,14 +6,13 @@ S2 是确定性粗筛（``pipeline.filter``），规则全部来自 ``badvocab``
 
 1. ``prepare``：对素材跑 S1（ASR+切分）与 S2，给出每条子句的判定、原因与命中词；
 2. ``build_patch``：对比人工判定与 S2 判定，把**人工圈出的词**翻译成词表增删；
-3. ``apply_patch``：把补丁合并进 ``profiles/label-overrides.json`` 并热加载词表。
+3. ``activate``：把「账号级基础词表 + 标注补丁」合成当前生效词表并热加载。
 
-只处理可由词表解释的差异；结构性命中（时长/重复/中文字符占比）无法靠词表修复，
-一律进 ``unresolved``。工作台**不自动应用**，由调用方显式调用 ``apply_patch``。
+补丁由调用方（服务端）持久化，工作台只负责翻译与合成。只处理可由词表解释的差异；
+结构性命中（时长/重复/中文字符占比）无法靠词表修复，一律进 ``unresolved``。
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -30,20 +29,22 @@ _REGEX_REASONS = {"stage_chatter", "malformed_speech"}
 Patch = dict[str, list]
 
 
-def overrides_path() -> Path:
-    return Path(__file__).resolve().parent / "engine" / "profiles" / "label-overrides.json"
+def base_profile() -> dict[str, Any]:
+    """账号级基础词表（``profiles/douyin-strict.json``）。"""
+    path = badvocab.default_profile_path()
+    return badvocab.load_profile(path) if path else {}
 
 
-def activate_overrides() -> dict[str, Any]:
-    """服务启动时调用：若存在标注补丁，设为当前词表配置并热加载。"""
-    path = overrides_path()
-    if path.is_file():
-        badvocab.reload_profile(path)
-    return {"path": str(path), "active": path.is_file()}
+def activate(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+    """把「账号级基础词表 + 标注补丁」合成为当前生效词表并热加载。"""
+    merged = badvocab.merge_profiles(base_profile(), overrides or {})
+    badvocab.set_profile(merged, badvocab.default_profile_path())
+    return {"base": badvocab.default_profile_path(), "overrides": overrides or {},
+            "summary": badvocab.summary()}
 
 
-def profile_summary() -> dict[str, Any]:
-    return {"summary": badvocab.summary(), "overrides": load_overrides()}
+def profile_summary(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {"summary": badvocab.summary(), "overrides": overrides or {}}
 
 
 def prepare(source_path: str, workdir: str, *, backend: str | None = None,
@@ -58,17 +59,6 @@ def prepare(source_path: str, workdir: str, *, backend: str | None = None,
     for clause in clauses:
         clause["hit"] = reject_hit(clause)
     return clauses
-
-
-def load_overrides() -> dict[str, Any]:
-    path = overrides_path()
-    if not path.is_file():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
 
 
 def _unresolved(clause: dict[str, Any], decision: dict[str, Any],
@@ -151,13 +141,3 @@ def merge_patch(current: dict[str, Any], patch: Patch) -> dict[str, Any]:
         "hard_regex_remove": sorted(remove_regex),
         "source": "label-workbench",
     }
-
-
-def apply_patch(patch: Patch) -> dict[str, Any]:
-    """把补丁写进覆盖配置并热加载词表。"""
-    merged = merge_patch(load_overrides(), patch)
-    path = overrides_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
-    badvocab.reload_profile(path)
-    return {"path": str(path), "overrides": merged, "summary": badvocab.summary()}

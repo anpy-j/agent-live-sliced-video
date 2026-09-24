@@ -22,7 +22,7 @@ except ImportError:  # pragma: no cover - Windows fallback keeps single-process 
 
 from .db import Store, utc_now
 from .labeling import (
-    activate_overrides, apply_patch, build_patch, prepare as prepare_labels,
+    activate as activate_labels, build_patch, merge_patch, prepare as prepare_labels,
     profile_summary,
 )
 from .mcp import McpEndpoint, tool_specs
@@ -40,7 +40,8 @@ class Application:
         self.store = Store(self.data_dir / "agent.db")
         self.runner = JobRunner(self.store, self.root)
         self._defaults()
-        self.label_profile = activate_overrides()
+        self.label_overrides = self.store.get_setting("label_overrides", {}) or {}
+        self.label_profile = activate_labels(self.label_overrides)
         self.mcp = McpEndpoint(self.invoke_tool)
 
     def _defaults(self) -> None:
@@ -365,7 +366,7 @@ try {{
 
     # ------------------------------------------------------------------ labeling
     def label_profile_info(self) -> dict[str, Any]:
-        return {**profile_summary(), "active": self.label_profile}
+        return {**profile_summary(self.label_overrides), "active": self.label_profile}
 
     def list_label_sessions(self) -> dict[str, Any]:
         sessions = self.store.list_label_sessions()
@@ -415,11 +416,16 @@ try {{
         if not isinstance(decisions, dict):
             decisions = session.get("decisions") or {}
         patch = build_patch(session.get("clauses") or [], decisions)
-        result: dict[str, Any] = {"patch": patch, "profile": profile_summary()}
+        result: dict[str, Any] = {"patch": patch,
+                                  "profile": profile_summary(self.label_overrides)}
         if payload.get("apply"):
-            result["applied"] = apply_patch(patch)
-            self.label_profile = activate_overrides()
-            result["profile"] = profile_summary()
+            merged = merge_patch(self.label_overrides, patch)
+            self.store.set_setting("label_overrides", merged)
+            self.label_overrides = merged
+            self.label_profile = activate_labels(merged)
+            result["applied"] = {"overrides": merged,
+                                 "summary": self.label_profile["summary"]}
+            result["profile"] = profile_summary(merged)
         return result
 
 

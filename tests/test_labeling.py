@@ -1,10 +1,7 @@
 # -*- coding: utf-8 -*-
-"""S2 标注工作台单元测试：词表热加载、补丁翻译、结构性命中不误改词表。"""
-import json
+"""S2 标注工作台单元测试：词表合成/热加载、补丁翻译、结构性命中不误改词表。"""
 import os
-import tempfile
 import unittest
-from pathlib import Path
 
 from agent_video import labeling
 from agent_video.engine.scripts import badvocab
@@ -16,45 +13,43 @@ def clause(cid, text, start, end, usable=True, reason="", hit=None):
             "usable": usable, "reason": reason, "hit": hit}
 
 
-class ReloadProfileTest(unittest.TestCase):
+class ActivateProfileTest(unittest.TestCase):
+    """「账号级基础词表 + 标注补丁」合成为当前生效词表。"""
+
     def setUp(self):
         self._env = os.environ.get("DOUYIN_VOCAB_PROFILE")
-        self._tmp = tempfile.TemporaryDirectory()
-        self.path = Path(self._tmp.name) / "label-overrides.json"
-        self._orig = labeling.overrides_path
-        labeling.overrides_path = lambda: self.path
+        os.environ.pop("DOUYIN_VOCAB_PROFILE", None)
 
     def tearDown(self):
-        labeling.overrides_path = self._orig
         if self._env is None:
             os.environ.pop("DOUYIN_VOCAB_PROFILE", None)
         else:
             os.environ["DOUYIN_VOCAB_PROFILE"] = self._env
         badvocab.reload_profile()
-        self._tmp.cleanup()
 
-    def test_apply_patch_makes_new_word_reject(self):
+    def test_base_strict_profile_rejects_review_word(self):
+        labeling.activate({})
+        clauses = [clause(1, "这个价格很划算", 0.0, 2.0)]
+        filter_clauses(clauses)
+        self.assertFalse(clauses[0]["usable"])
+        self.assertEqual(clauses[0]["reason"], "hard_vocab")
+
+    def test_override_adds_new_word(self):
+        labeling.activate({"hard_add": ["贼舒服"]})
         clauses = [clause(1, "这个面料贼舒服", 0.0, 2.0)]
         filter_clauses(clauses)
-        self.assertTrue(clauses[0]["usable"])
+        self.assertFalse(clauses[0]["usable"])
 
-        labeling.apply_patch({"hard_add": ["贼舒服"], "hard_remove": []})
-        clauses2 = [clause(1, "这个面料贼舒服", 0.0, 2.0)]
-        filter_clauses(clauses2)
-        self.assertFalse(clauses2[0]["usable"])
-        self.assertEqual(clauses2[0]["reason"], "hard_vocab")
-
-    def test_remove_word_from_hard_list(self):
-        labeling.apply_patch({"hard_add": [], "hard_remove": ["链接"]})
+    def test_override_removes_base_word(self):
+        labeling.activate({"hard_remove": ["链接"]})
         clauses = [clause(1, "这里有链接", 0.0, 2.0)]
         filter_clauses(clauses)
         self.assertTrue(clauses[0]["usable"])
 
-    def test_overrides_roundtrip(self):
-        labeling.apply_patch({"hard_add": ["甲"], "hard_regex_add": [r"\d+次"]})
-        data = json.loads(self.path.read_text(encoding="utf-8"))
-        self.assertIn("甲", data["hard_add"])
-        self.assertIn(r"\d+次", data["hard_regex_add"])
+    def test_summary_reports_base_source_and_more_words(self):
+        summary = labeling.activate({})["summary"]
+        self.assertTrue(str(summary["profile"]).endswith("douyin-strict.json"))
+        self.assertGreater(summary["hard"], 38)
 
 
 class BuildPatchTest(unittest.TestCase):
@@ -104,6 +99,11 @@ class MergePatchTest(unittest.TestCase):
         self.assertNotIn("甲", merged["hard_add"])
         self.assertIn("乙", merged["hard_add"])
         self.assertIn("甲", merged["hard_remove"])
+
+    def test_second_patch_accumulates(self):
+        first = labeling.merge_patch({}, {"hard_add": ["甲"], "hard_remove": []})
+        second = labeling.merge_patch(first, {"hard_add": ["乙"], "hard_remove": []})
+        self.assertEqual(set(second["hard_add"]), {"甲", "乙"})
 
 
 class RejectHitTest(unittest.TestCase):

@@ -60,8 +60,10 @@ HARD_REGEX = [
 REVIEW_REGEX = [r"多少\s*钱", r"多钱", r"几\s*折"]
 
 # 副商品判定的默认词表（女装场景）。换类目时用配置覆盖。
-SECONDARY_PRODUCTS = "牛仔裤|裤子|半裙|裙子|外套|衬衫|打底(?:衫)?|内搭|鞋子|包包"
-SECONDARY_ATTRIBUTES = "中腰|低腰|矮腰|高腰|裤长|弹力|尺码|版型|面料|材质|颜色"
+_DEFAULT_SECONDARY_PRODUCTS = "牛仔裤|裤子|半裙|裙子|外套|衬衫|打底(?:衫)?|内搭|鞋子|包包"
+_DEFAULT_SECONDARY_ATTRIBUTES = "中腰|低腰|矮腰|高腰|裤长|弹力|尺码|版型|面料|材质|颜色"
+SECONDARY_PRODUCTS = _DEFAULT_SECONDARY_PRODUCTS
+SECONDARY_ATTRIBUTES = _DEFAULT_SECONDARY_ATTRIBUTES
 
 DEFAULT_PROFILE_NAME = "douyin-strict.json"
 
@@ -123,7 +125,29 @@ def _build(profile):
     return hard, review, hard_re, review_re
 
 
+_LAYER_KEYS = ("hard_add", "review_add", "hard_regex_add", "review_regex_add",
+               "hard_remove", "review_remove", "hard_regex_remove", "review_regex_remove")
+
+
+def merge_profiles(*profiles):
+    """把多份词表配置按顺序叠加成一份（用于「账号级基础 + 标注补丁」）。"""
+    out: dict = {}
+    for profile in profiles:
+        if not isinstance(profile, dict):
+            continue
+        for key in _LAYER_KEYS:
+            values = _as_list(profile.get(key))
+            if values:
+                bucket = out.setdefault(key, [])
+                bucket.extend(value for value in values if value not in bucket)
+        for key in ("secondary_products", "secondary_attributes"):
+            if profile.get(key):
+                out[key] = str(profile[key])
+    return out
+
+
 PROFILE: dict = {}
+PROFILE_SOURCE: str | None = None
 HARD: list = []
 REVIEW: list = []
 HARD_RES: list = []
@@ -132,29 +156,42 @@ BAD_RE: re.Pattern = re.compile(r"(?!x)x")
 REVIEW_RE: re.Pattern = re.compile(r"(?!x)x")
 
 
-def _refresh():
-    """按当前 ``DOUYIN_VOCAB_PROFILE`` 重建全局词表与正则。"""
-    global PROFILE, HARD, REVIEW, HARD_RES, REVIEW_RES, BAD_RE, REVIEW_RE
+def _apply(profile, source=None):
+    """用一份已确定的配置重建全局词表与正则。"""
+    global PROFILE, PROFILE_SOURCE, HARD, REVIEW, HARD_RES, REVIEW_RES, BAD_RE, REVIEW_RE
     global SECONDARY_PRODUCTS, SECONDARY_ATTRIBUTES
-    PROFILE = load_profile()
+    PROFILE = profile if isinstance(profile, dict) else {}
+    PROFILE_SOURCE = source
     HARD, REVIEW, HARD_RES, REVIEW_RES = _build(PROFILE)
-    SECONDARY_PRODUCTS = str(PROFILE.get("secondary_products") or SECONDARY_PRODUCTS)
-    SECONDARY_ATTRIBUTES = str(PROFILE.get("secondary_attributes") or SECONDARY_ATTRIBUTES)
+    SECONDARY_PRODUCTS = str(PROFILE.get("secondary_products") or _DEFAULT_SECONDARY_PRODUCTS)
+    SECONDARY_ATTRIBUTES = str(PROFILE.get("secondary_attributes")
+                               or _DEFAULT_SECONDARY_ATTRIBUTES)
     BAD_RE = re.compile("|".join([re.escape(p) for p in HARD]
                                  + [f"(?:{p})" for p in HARD_RES]), re.I)
     REVIEW_RE = re.compile("|".join([re.escape(p) for p in REVIEW]
                                     + [f"(?:{p})" for p in REVIEW_RES]), re.I)
 
 
-def reload_profile(path=None):
-    """重新加载词表，供规则热更新用。
+def _refresh():
+    path = os.environ.get("DOUYIN_VOCAB_PROFILE")
+    _apply(load_profile(path), path)
 
-    ``path`` 非空时先写入 ``DOUYIN_VOCAB_PROFILE`` 环境变量再加载；
-    调用方模块（如 ``filter``）必须通过 ``badvocab.BAD_RE`` 动态取用才会生效。
+
+def reload_profile(path=None):
+    """按文件（或 ``DOUYIN_VOCAB_PROFILE``）重新加载词表，供规则热更新用。
+
+    ``path`` 非空时先写入环境变量再加载；调用方模块（如 ``filter``）必须通过
+    ``badvocab.BAD_RE`` 动态取用才会生效。
     """
     if path is not None:
         os.environ["DOUYIN_VOCAB_PROFILE"] = str(path)
     _refresh()
+    return summary()
+
+
+def set_profile(profile, source=None):
+    """直接使用一份**已合并**的配置（不读文件/环境变量），并热加载。"""
+    _apply(profile, source)
     return summary()
 
 
@@ -174,6 +211,6 @@ def review_hits(text):
 
 def summary():
     """词表生效状况，写进 pipeline 摘要供排查（只报数量与来源，不泄词表内容）。"""
-    return {"profile": os.environ.get("DOUYIN_VOCAB_PROFILE") or None,
+    return {"profile": PROFILE_SOURCE,
             "hard": len(HARD), "review": len(REVIEW),
             "hard_regex": len(HARD_RES), "review_regex": len(REVIEW_RES)}
