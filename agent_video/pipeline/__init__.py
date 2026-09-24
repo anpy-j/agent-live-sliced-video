@@ -15,6 +15,7 @@ from .filter import filter_clauses
 from .render import build_segments, render_video, select_visual
 from .run import run_pipeline
 from .split import split_clauses
+from .units import build_units, order_candidates
 
 __all__ = [
     "AIReturnError",
@@ -28,7 +29,9 @@ __all__ = [
     "TargetUnreachable",
     "ai_call",
     "build_segments",
+    "build_units",
     "filter_clauses",
+    "order_candidates",
     "render_video",
     "run_pipeline",
     "select_visual",

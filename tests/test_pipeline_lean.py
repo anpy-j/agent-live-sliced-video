@@ -9,8 +9,9 @@ from agent_video.pipeline import ai as pipeline_ai
 from agent_video.pipeline.ai import DECISION_SCHEMA, ORDER_SCHEMA
 from agent_video.pipeline.errors import AIReturnError, PipelineConfigError
 from agent_video.pipeline.filter import filter_clauses, normalize
-from agent_video.pipeline.run import _validate_decisions, _validate_order
+from agent_video.pipeline.run import _judge_batches, _validate_decisions, _validate_order
 from agent_video.pipeline.split import split_clauses
+from agent_video.pipeline.units import build_units, order_candidates
 
 
 def word(text, start, end):
@@ -79,6 +80,72 @@ class SplitTest(unittest.TestCase):
         self.assertIsNone(clauses[0]["order"])
 
 
+class SentenceUnitTest(unittest.TestCase):
+    def clause(self, cid, text, start=0.0, end=2.0, usable=True, unit=None):
+        return {"id": cid, "text": text, "start": start, "end": end,
+                "usable": usable, "reason": "", "order": None, "split_from": None,
+                "unit": unit}
+
+    def test_contiguous_fragments_form_one_unit(self):
+        clauses = [self.clause(0, "同样的是T恤", 0.0, 2.0),
+                   self.clause(1, "我们会给到三到五年", 2.0, 4.0)]
+        units = build_units(clauses, merge_min=4.0, merge_max=8.0, silence_gap=0.30)
+        self.assertEqual(len(units), 1)
+        self.assertEqual([m["id"] for m in units[0]["members"]], [0, 1])
+        self.assertEqual(units[0]["text"], "同样的是T恤我们会给到三到五年")
+        self.assertEqual([clause["unit"] for clause in clauses], [0, 0])
+
+    def test_sentence_final_punctuation_hard_stops(self):
+        clauses = [self.clause(0, "这句已经完整。", 0.0, 2.0),
+                   self.clause(1, "下一句继续说", 2.0, 4.0)]
+        units = build_units(clauses, merge_min=4.0)
+        self.assertEqual(len(units), 2)
+
+    def test_silence_gap_hard_stops(self):
+        clauses = [self.clause(0, "前半句在这里", 0.0, 2.0),
+                   self.clause(1, "后半句在别处", 2.5, 4.5)]
+        units = build_units(clauses, merge_min=4.0, silence_gap=0.30)
+        self.assertEqual(len(units), 2)
+
+    def test_unit_never_exceeds_merge_max(self):
+        clauses = [self.clause(0, "一", 0.0, 3.5),
+                   self.clause(1, "二", 3.5, 6.5),
+                   self.clause(2, "三", 6.5, 9.5)]
+        units = build_units(clauses, merge_min=4.0, merge_max=8.0)
+        self.assertEqual([m["id"] for m in units[0]["members"]], [0, 1])
+        self.assertEqual([m["id"] for m in units[1]["members"]], [2])
+
+    def test_order_candidates_split_around_unusable_member(self):
+        clauses = [self.clause(0, "a", 0.0, 2.0, usable=True, unit=0),
+                   self.clause(1, "b", 2.0, 3.0, usable=False, unit=0),
+                   self.clause(2, "c", 3.0, 5.0, usable=True, unit=0),
+                   self.clause(3, "d", 6.0, 8.0, usable=True, unit=1)]
+        candidates = order_candidates(clauses)
+        self.assertEqual([c["id"] for c in candidates], [0, 2, 3])
+        self.assertEqual(candidates[0]["members"], [0])
+        self.assertEqual(candidates[1]["members"], [2])
+
+
+class JudgeBatchTest(unittest.TestCase):
+    def unit(self, uid, size):
+        return {"id": uid, "members": [{"id": uid * 100 + i} for i in range(size)]}
+
+    def test_batches_are_capped_by_clause_count(self):
+        units = [self.unit(0, 50), self.unit(1, 50), self.unit(2, 50)]
+        batches = list(_judge_batches(units, 120))
+        self.assertEqual([sum(len(u["members"]) for u in b) for b in batches], [100, 50])
+
+    def test_oversized_unit_still_gets_its_own_batch(self):
+        units = [self.unit(0, 10), self.unit(1, 200), self.unit(2, 10)]
+        batches = list(_judge_batches(units, 120))
+        self.assertEqual([sum(len(u["members"]) for u in b) for b in batches], [10, 200, 10])
+
+    def test_every_clause_covered_exactly_once(self):
+        units = [self.unit(i, 30) for i in range(10)]
+        ids = [m["id"] for b in _judge_batches(units, 120) for u in b for m in u["members"]]
+        self.assertEqual(sorted(ids), sorted(m["id"] for u in units for m in u["members"]))
+
+
 class FilterTest(unittest.TestCase):
     def clause(self, cid, text, start=0.0, end=2.0):
         return {"id": cid, "text": text, "start": start, "end": end,
@@ -133,12 +200,23 @@ class DecisionContractTest(unittest.TestCase):
         with self.assertRaises(AIReturnError):
             _validate_decisions(data, self.candidates())
 
-    def test_extra_id_is_rejected(self):
+    def test_extra_id_is_ignored(self):
         data = {"decisions": [{"id": 0, "usable": True, "reason": "ok"},
                               {"id": 1, "usable": True, "reason": "ok"},
                               {"id": 2, "usable": True, "reason": "ok"}]}
+        result = _validate_decisions(data, self.candidates())
+        self.assertEqual(sorted(result), [0, 1])
+
+    def test_gap_filling_extra_ids_are_ignored_but_missing_still_fatal(self):
+        candidates = [{"id": 10, "text": "a"}, {"id": 12, "text": "b"}]
+        ok = {"decisions": [{"id": 10, "usable": True, "reason": "ok"},
+                            {"id": 11, "usable": True, "reason": "ok"},
+                            {"id": 12, "usable": False, "reason": "ok"}]}
+        self.assertEqual(sorted(_validate_decisions(ok, candidates)), [10, 12])
+        bad = {"decisions": [{"id": 10, "usable": True, "reason": "ok"},
+                             {"id": 11, "usable": True, "reason": "ok"}]}
         with self.assertRaises(AIReturnError):
-            _validate_decisions(data, self.candidates())
+            _validate_decisions(bad, candidates)
 
     def test_non_boolean_usable_is_rejected(self):
         data = {"decisions": [{"id": 0, "usable": "yes", "reason": "ok"},
@@ -169,6 +247,20 @@ class OrderContractTest(unittest.TestCase):
         with self.assertRaises(AIReturnError):
             _validate_order({"main_product": "马甲", "ordered_ids": [9]},
                             self.candidates(), (5.0, 7.0), 1.0)
+
+    def test_long_unit_may_push_total_over_the_upper_bound(self):
+        candidates = [{"id": 0, "text": "a", "start": 0.0, "end": 12.0}]
+        main, ids, total = _validate_order(
+            {"main_product": "马甲", "ordered_ids": [0]}, candidates, (5.0, 7.0), 1.0)
+        self.assertEqual(ids, [0])
+        self.assertAlmostEqual(total, 12.0)
+
+    def test_overshoot_beyond_long_unit_overflow_is_rejected(self):
+        candidates = [{"id": 0, "text": "a", "start": 0.0, "end": 12.0},
+                      {"id": 1, "text": "b", "start": 12.0, "end": 15.0}]
+        with self.assertRaises(AIReturnError):
+            _validate_order({"main_product": "马甲", "ordered_ids": [0, 1]},
+                            candidates, (5.0, 7.0), 1.0)
 
 
 class AiPrimitiveTest(unittest.TestCase):

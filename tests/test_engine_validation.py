@@ -29,6 +29,12 @@ class EngineValidationTest(unittest.TestCase):
         self.assertEqual(correct_terms("剩下那个5叫安伦"), "剩下那个5叫氨纶")
         self.assertEqual(correct_terms("买个背信都不止这100多块钱"), "买个背心都不止这100多块钱")
         self.assertEqual(correct_terms("3000多件的一件提取"), "3000多件的一件起批")
+        self.assertEqual(correct_terms("你随便搭半球就可以了"),
+                         "你随便搭半裙就可以了")
+        self.assertEqual(correct_terms("对待你的一个渣感"), "对待你的一个扎感")
+        self.assertEqual(correct_terms("整个做到桑残丝羊毛"), "整个做到桑蚕丝羊毛")
+        self.assertEqual(correct_terms("他要穿一下打体衫的"), "他要穿一下打底衫的")
+        self.assertEqual(correct_terms("你都很出篇明白吗"), "你都很出片明白吗")
 
     def test_glossary_keeps_correct_text_and_is_idempotent(self):
         from agent_video.engine.scripts.glossary import correct_terms

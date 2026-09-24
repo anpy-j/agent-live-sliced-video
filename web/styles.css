@@ -80,4 +80,8 @@
 .lb-sel{color:var(--muted);font-size:12px}
 .lb-sel em{color:var(--dim);font-style:normal}
 .lb-sel code,.info-item code{padding:1px 6px;border-radius:5px;background:#0c1117;border:1px solid var(--line);font-size:12px}
+.clause-tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:2px 0 12px}
+.clause-list{max-height:760px}
+.clause-list .lb-text{user-select:text;font-size:14px;margin-bottom:0}
+.lb-row.no{box-shadow:inset 3px 0 var(--red)}
 @media(max-width:980px){.label-columns{grid-template-columns:1fr}}

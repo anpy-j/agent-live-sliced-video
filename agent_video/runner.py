@@ -226,6 +226,7 @@ class JobRunner:
         artifacts = [
             ("asr", "json", "子句时间线", workspace / "timeline.json", "application/json"),
             ("filter", "json", "规则筛结果", workspace / "clauses.filtered.json", "application/json"),
+            ("judge", "json", "AI 判定结果", workspace / "clauses.judged.json", "application/json"),
             ("render", "json", "渲染清单", workspace / "manifest.json", "application/json"),
             ("render", "video", "成片", workspace / "deliverables" / "final.mp4", "video/mp4"),
         ]

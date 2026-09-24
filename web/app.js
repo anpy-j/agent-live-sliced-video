@@ -1,7 +1,7 @@
 const $ = (selector, root=document) => root.querySelector(selector);
 const $$ = (selector, root=document) => [...root.querySelectorAll(selector)];
 const app = $('#app');
-const state = { dashboard:null, job:null, poll:null, mcp:null, selectedStage:null, label:{session:null,decisions:{},sel:{},patch:null} };
+const state = { dashboard:null, job:null, poll:null, mcp:null, selectedStage:null, label:{session:null,decisions:{},sel:{},patch:null}, clausesJob:null, clausesData:null, clausesFilter:'s2' };
 const labels = {queued:'排队中',running:'执行中',completed:'已完成',failed:'执行失败',cancelled:'已取消',pending:'等待',succeeded:'完成'};
 const stageLabels = {asr:'语音转写与切分',filter:'规则粗筛',judge:'AI 可用性判定',order:'AI 排序编排',render:'渲染成片'};
 const reasonLabels = {too_short:'文本过短',non_chinese:'中文占比低',duration_gate:'时长不足',hard_vocab:'违禁词',stage_chatter:'场控话术',malformed_speech:'病句/口误',duplicate:'重复',invalid_bounds:'时间异常'};
@@ -91,6 +91,48 @@ function artifactsKey(job){return JSON.stringify(job.artifacts.map(x=>[x.id,x.si
 function eventsHtml(job){return job.events.map(e=>`<div class="event ${escapeHtml(e.level)}"><time>${formatTime(e.created_at)} · ${escapeHtml(e.stage_id?stageLabel(e.stage_id):'任务')}</time><p>${escapeHtml(e.message)}</p></div>`).join('')||'<div class="empty">暂无事件</div>';}
 function eventsKey(job){return JSON.stringify(job.events.map(x=>x.id));}
 
+const clauseFilters = [
+  {key:'s2', label:'S2 放行', countKey:'s2_passed'},
+  {key:'s3', label:'S3 判可用', countKey:'usable'},
+  {key:'s2rej', label:'S2 剔除', countKey:'s2_rejected'},
+  {key:'all', label:'全部', countKey:'total'}
+];
+function reasonText(code){return reasonLabels[code]||code||'';}
+function filterClauses(clauses,key){
+  if(key==='s2')return clauses.filter(c=>c.s2_usable);
+  if(key==='s3')return clauses.filter(c=>c.usable);
+  if(key==='s2rej')return clauses.filter(c=>!c.s2_usable);
+  return clauses;
+}
+function clauseRow(c){
+  let badge;
+  if(c.usable)badge='<span class="lb-changed">AI 判可用</span>';
+  else if(!c.s2_usable)badge=`<span class="lb-reason">S2 · ${escapeHtml(reasonText(c.s2_reason))}</span>`;
+  else badge=`<span class="lb-reason">S3 · ${escapeHtml(reasonText(c.reason)||'判为不可用')}</span>`;
+  const order=c.order!=null?`<span class="lb-hit">成片第 ${c.order+1} 段</span>`:'';
+  return `<article class="lb-row ${c.usable?'changed':'no'}"><header><span class="lb-time">${c.start.toFixed(1)}–${c.end.toFixed(1)}s · #${escapeHtml(String(c.id))}</span>${badge}${order}</header><p class="lb-text">${escapeHtml(c.text)}</p></article>`;
+}
+function paintJobClauses(){
+  const box=$('#jobClauses');const data=state.clausesData;if(!box||!data)return;
+  if(!data.ready){box.innerHTML='<p class="muted-empty">尚未生成 S2/S3 结果（流程到达规则粗筛后可用）。</p>';return;}
+  const counts=data.counts||{},filter=state.clausesFilter||'s2';
+  const rows=filterClauses(data.clauses,filter);
+  box.innerHTML=`<div class="clause-tools">${clauseFilters.map(f=>`<button type="button" class="tab-button ${f.key===filter?'active':''}" data-clause-filter="${f.key}">${f.label} <em>${counts[f.countKey]??0}</em></button>`).join('')}<span class="lb-sel">共 <b>${counts.total}</b> 条子句 · S2 放行 <b>${counts.s2_passed}</b> · S3 判可用 <b>${counts.usable}</b> · S3 淘汰 <b>${counts.rejected_by_s3}</b></span></div>
+  <div class="label-list clause-list">${rows.map(clauseRow).join('')||'<p class="muted-empty">该分类下没有子句。</p>'}</div>`;
+  $$('[data-clause-filter]',box).forEach(btn=>btn.addEventListener('click',()=>{state.clausesFilter=btn.dataset.clauseFilter;paintJobClauses()}));
+}
+async function loadJobClauses(jobId){
+  const box=$('#jobClauses');if(!box)return;
+  if(state.clausesJob===jobId&&state.clausesData){paintJobClauses();return;}
+  box.innerHTML='<div class="loading"><div class="spinner"></div>读取子句判定结果</div>';
+  try{
+    const data=await api(`/api/jobs/${jobId}/clauses`);
+    if(location.hash!==`#/jobs/${jobId}`)return;
+    state.clausesJob=jobId;state.clausesData=data;state.clausesFilter='s2';
+    paintJobClauses();
+  }catch(err){box.innerHTML=`<p class="muted-empty">${escapeHtml(err.message)}</p>`;}
+}
+
 function jobControlsHtml(job){
   const folder=job.deliverables||{};
   return `${status(job.status)}
@@ -152,6 +194,10 @@ async function refreshJob(jobId){
   const heartbeat=$('[data-relative-time]');if(heartbeat)heartbeat.dataset.relativeTime=job.updated_at||'';
   if(patchJobRegion('#jobArtifacts',artifactsHtml(job),artifactsKey(job)))bindArtifactPreviews($('#jobArtifacts'));
   patchJobRegion('#jobEvents',eventsHtml(job),eventsKey(job));
+  const clauseSig=(job.stages||[]).map(s=>`${s.stage_id}:${s.status}`).join(',');
+  if(state.clausesJob!==jobId||(state.clausesData&&state.clausesStageSig!==clauseSig)){state.clausesData=null}
+  state.clausesStageSig=clauseSig;
+  loadJobClauses(jobId);
   scheduleJobPoll(jobId,job);
 }
 async function renderJob(jobId){
@@ -162,8 +208,9 @@ async function renderJob(jobId){
   <div class="panel"><div class="panel-head"><div><h2>整体流程</h2><p id="jobProgressMeta">${Math.round(job.progress||0)}% · 当前节点 ${escapeHtml(stageLabel(job.current_stage)||'—')}</p></div><div class="workflow-meta"><span class="connection-state" id="jobConnectionState"><i></i>实时连接正常</span><span class="panel-hint">点击节点查看详情</span></div></div><div class="workflow" id="jobWorkflow" data-render-key="${escapeHtml(workflowKey(job))}">${workflowHtml(job)}</div></div>
   <div class="detail-grid"><div><div class="panel stage-detail" id="jobStageDetail" data-render-key="${escapeHtml(stageDetailKey(job))}">${stageDetailHtml(job)}</div>
   <div class="panel"><div class="panel-head"><div><h2>任务产物</h2><p>图片、时间线、日志与视频均可打开</p></div></div><div id="jobArtifacts" data-render-key="${escapeHtml(artifactsKey(job))}">${artifactsHtml(job)}</div></div></div>
+  <div class="panel"><div class="panel-head"><div><h2>子句核验</h2><p>展示 S1 全部子句、S2 规则放行与 S3 AI 判定结果，供人工逐条核对</p></div></div><div id="jobClauses"></div></div>
   <div class="panel"><div class="panel-head"><div><h2>实时事件</h2><p>后台局部更新，不影响滚动和操作</p></div></div><div class="timeline" id="jobEvents" data-render-key="${escapeHtml(eventsKey(job))}">${eventsHtml(job)}</div></div></div>`;
-  bindJobControls(jobId);bindStageSelection(jobId);bindArtifactPreviews(app);updateLiveTimes();scheduleJobPoll(jobId,job);
+  bindJobControls(jobId);bindStageSelection(jobId);bindArtifactPreviews(app);updateLiveTimes();scheduleJobPoll(jobId,job);loadJobClauses(jobId);
 }
 
 async function previewArtifact(id,mime,title){

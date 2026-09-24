@@ -31,7 +31,7 @@ class RuleFilterEmpty(PipelineError):
 
 
 class AIReturnError(PipelineError):
-    """任一次 AI 调用返回不合契约（非 JSON / 缺 id / 多余 id / 时长不达标）。"""
+    """任一次 AI 调用返回不合契约（非 JSON / 缺 id / 时长不达标）。"""
 
     stage = "ai"
 

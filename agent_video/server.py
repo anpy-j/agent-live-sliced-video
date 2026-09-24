@@ -156,6 +156,58 @@ class Application:
             if output.is_file() else [],
         }
 
+    @staticmethod
+    def _read_workspace_json(path: Path) -> dict[str, Any]:
+        if not path.is_file():
+            return {}
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+
+    def job_clauses(self, job_id: str) -> dict[str, Any]:
+        """S2 放行与 S3 判定明细，供流程页人工核验（只读任务工作目录产物）。"""
+        job = self.store.get_job(job_id)
+        if not job:
+            raise KeyError("任务不存在")
+        workspace = Path(str(job.get("workspace") or ""))
+        timeline = self._read_workspace_json(workspace / "timeline.json")
+        filtered = self._read_workspace_json(workspace / "clauses.filtered.json")
+        timeline_clauses = timeline.get("clauses") if isinstance(timeline, dict) else None
+        filtered_clauses = filtered.get("clauses") if isinstance(filtered, dict) else None
+        base = timeline_clauses or filtered_clauses or []
+        s2_map = {c.get("id"): c for c in (filtered_clauses or []) if isinstance(c, dict)}
+        final_map = {c.get("id"): c for c in (timeline_clauses or []) if isinstance(c, dict)}
+        clauses: list[dict[str, Any]] = []
+        for source in base:
+            if not isinstance(source, dict):
+                continue
+            cid = source.get("id")
+            s2 = s2_map.get(cid, source)
+            final = final_map.get(cid, source)
+            clauses.append({
+                "id": cid,
+                "start": round(float(final.get("start") or 0.0), 3),
+                "end": round(float(final.get("end") or 0.0), 3),
+                "text": str(final.get("text") or ""),
+                "s2_usable": bool(s2.get("usable", False)),
+                "s2_reason": str(s2.get("reason") or "") if not s2.get("usable") else "",
+                "usable": bool(final.get("usable", False)),
+                "reason": str(final.get("reason") or ""),
+                "order": final.get("order"),
+            })
+        clauses.sort(key=lambda c: (c["start"], c["id"] if isinstance(c["id"], int) else 0))
+        s2_passed = sum(1 for c in clauses if c["s2_usable"])
+        usable = sum(1 for c in clauses if c["usable"])
+        return {
+            "job_id": job_id,
+            "ready": bool(clauses),
+            "counts": {"total": len(clauses), "s2_passed": s2_passed,
+                       "s2_rejected": len(clauses) - s2_passed, "usable": usable,
+                       "rejected_by_s3": max(0, s2_passed - usable)},
+            "clauses": clauses,
+        }
+
     def open_deliverable_folder(self, job_id: str) -> dict[str, Any]:
         """在系统文件管理器中打开任务成片文件夹；路径只从任务记录推导。"""
         job = self.store.get_job(job_id)
@@ -448,6 +500,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json_response(self.app.store.dashboard())
             if path == "/api/jobs":
                 return self.json_response({"jobs": self.app.store.list_jobs()})
+            if path.startswith("/api/jobs/") and path.endswith("/clauses"):
+                job_id = path[len("/api/jobs/"):-len("/clauses")].strip("/")
+                if not job_id:
+                    return self.json_response({"error": "job_id 不能为空"}, 400)
+                try:
+                    return self.json_response(self.app.job_clauses(job_id))
+                except KeyError as exc:
+                    return self.json_response({"error": str(exc)}, 404)
             if path.startswith("/api/jobs/"):
                 job_id = path.removeprefix("/api/jobs/").strip("/")
                 job = self.app.store.get_job(job_id)

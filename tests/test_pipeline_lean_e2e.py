@@ -90,6 +90,27 @@ class LeanPipelineEndToEndTest(unittest.TestCase):
         self.assertEqual([clause["order"] for clause in timeline["clauses"]],
                          list(range(5)))
 
+        with open(os.path.join(self.workdir, "clauses.judged.json"), encoding="utf-8") as handle:
+            judged = json.load(handle)
+        self.assertTrue(all(clause["usable"] for clause in judged["clauses"]))
+        self.assertEqual(len(judged["clauses"]), len(timeline["clauses"]))
+
+    def test_contiguous_fragments_merge_and_long_unit_extends_duration(self):
+        words = [
+            {"w": "同样的是T恤", "s": 0.0, "e": 1.5},
+            {"w": "我们会给到你三到五年", "s": 1.5, "e": 3.5},
+            {"w": "没有任何变化因为", "s": 3.5, "e": 5.5},
+            {"w": "整个领子袖口全部做罗纹", "s": 5.5, "e": 8.5},
+            {"w": "而且它非常好搭", "s": 8.5, "e": 11.0},
+        ]
+        with patch.object(pipeline_run, "ai_call", side_effect=fake_ai):
+            manifest = self.run_pipeline(transcript=([], words),
+                                         target_seconds=(8.0, 9.0), merge_max=13.0)
+        self.assertEqual(manifest["sentence_units"], 1)
+        self.assertEqual(manifest["clauses"], 2)
+        self.assertEqual(len(manifest["segments"]), 1)
+        self.assertGreater(manifest["total_seconds"], manifest["target_seconds"]["max"])
+
     def test_select_visual_seam_changes_segment_bounds(self):
         def offset(clause):
             return clause["start"] + 0.05, clause["end"]

@@ -1,4 +1,5 @@
 import base64
+import json
 import subprocess
 import sys
 import tempfile
@@ -126,6 +127,45 @@ class JobApiTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "尚未生成"):
                 self.app.open_deliverable_folder(job["id"])
         opener.assert_not_called()
+
+    def test_job_clauses_merges_s2_and_s3_verdicts(self):
+        job_id = self.app.create_job({"title": "核验", "source_path": str(self.video)})["id"]
+        workspace = Path(self.app.store.get_job(job_id)["workspace"])
+        timeline = [
+            {"id": 0, "start": 0.0, "end": 1.0, "text": "第一句", "usable": False,
+             "reason": "场控引导语", "order": None},
+            {"id": 1, "start": 1.0, "end": 2.0, "text": "第二句", "usable": True,
+             "reason": "mock", "order": 0},
+            {"id": 2, "start": 2.0, "end": 3.0, "text": "上链接", "usable": False,
+             "reason": "hard_vocab", "order": None},
+        ]
+        filtered = [
+            {"id": 0, "start": 0.0, "end": 1.0, "text": "第一句", "usable": True, "reason": ""},
+            {"id": 1, "start": 1.0, "end": 2.0, "text": "第二句", "usable": True, "reason": ""},
+            {"id": 2, "start": 2.0, "end": 3.0, "text": "上链接", "usable": False,
+             "reason": "hard_vocab"},
+        ]
+        (workspace / "timeline.json").write_text(
+            json.dumps({"clauses": timeline}, ensure_ascii=False), encoding="utf-8")
+        (workspace / "clauses.filtered.json").write_text(
+            json.dumps({"clauses": filtered}, ensure_ascii=False), encoding="utf-8")
+
+        data = self.app.job_clauses(job_id)
+        self.assertTrue(data["ready"])
+        self.assertEqual(data["counts"], {"total": 3, "s2_passed": 2, "s2_rejected": 1,
+                                          "usable": 1, "rejected_by_s3": 1})
+        by_id = {c["id"]: c for c in data["clauses"]}
+        self.assertTrue(by_id[0]["s2_usable"])
+        self.assertFalse(by_id[0]["usable"])
+        self.assertEqual(by_id[0]["reason"], "场控引导语")
+        self.assertEqual(by_id[2]["s2_reason"], "hard_vocab")
+        self.assertEqual(by_id[1]["order"], 0)
+
+    def test_job_clauses_handles_missing_job_or_artifacts(self):
+        with self.assertRaises(KeyError):
+            self.app.job_clauses("does-not-exist")
+        job_id = self.app.create_job({"title": "空", "source_path": str(self.video)})["id"]
+        self.assertFalse(self.app.job_clauses(job_id)["ready"])
 
     def test_server_job_restart_and_delete(self):
         job_id = self.app.create_job({"title": "测试API", "source_path": str(self.video)})["id"]

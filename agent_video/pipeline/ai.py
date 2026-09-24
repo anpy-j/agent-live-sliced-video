@@ -152,7 +152,10 @@ def _call_llm(model: str, prompt: str, json_schema: dict[str, Any],
             provider.validate_model(chosen_model)
         except ValueError as exc:
             raise PipelineConfigError(str(exc)) from exc
-    with tempfile.TemporaryDirectory(prefix="lean-pipeline-ai-") as temp_dir:
+    # ignore_cleanup_errors：调用目录可能位于易失的临时根（如任务沙箱）下，被外部
+    # 清理后 rmtree 会 FileNotFoundError；这不该把一次已完成的调用判成失败。
+    with tempfile.TemporaryDirectory(prefix="lean-pipeline-ai-",
+                                     ignore_cleanup_errors=True) as temp_dir:
         try:
             result = provider.generate_json(
                 model=chosen_model, prompt=prompt, schema=json_schema,
