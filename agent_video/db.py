@@ -110,7 +110,9 @@ class Store:
                   started_at TEXT,
                   finished_at TEXT,
                   workspace TEXT NOT NULL,
-                  error TEXT
+                  error TEXT,
+                  job_type TEXT NOT NULL DEFAULT 'direct',
+                  timeline_meta_json TEXT
                 );
                 CREATE TABLE IF NOT EXISTS stages (
                   job_id TEXT NOT NULL,
@@ -167,36 +169,59 @@ class Store:
                 );
                 """
             )
+            columns = {row[1] for row in con.execute("PRAGMA table_info(jobs)")}
+            if "job_type" not in columns:
+                con.execute("ALTER TABLE jobs ADD COLUMN job_type TEXT NOT NULL DEFAULT 'direct'")
+            if "timeline_meta_json" not in columns:
+                con.execute("ALTER TABLE jobs ADD COLUMN timeline_meta_json TEXT")
 
-    def create_job(self, *, title: str, source_path: str, workspace: str) -> str:
+    def create_job(self, *, title: str, source_path: str, workspace: str,
+                   job_type: str = "direct", timeline_meta: dict[str, Any] | None = None) -> str:
         job_id = f"job_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
         now = utc_now()
         first_stage = STAGE_DEFINITIONS[0][0]
+        meta_json = _json(timeline_meta) if timeline_meta else None
         with self.connect() as con:
             con.execute(
-                "INSERT INTO jobs(id,title,source_path,status,current_stage,progress,created_at,updated_at,workspace) "
-                "VALUES(?,?,?,?,?,?,?,?,?)",
-                (job_id, title, source_path, "queued", first_stage, 0, now, now, workspace),
+                "INSERT INTO jobs(id,title,source_path,status,current_stage,progress,created_at,updated_at,workspace,job_type,timeline_meta_json) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (job_id, title, source_path, "queued", first_stage, 0, now, now, workspace, job_type, meta_json),
             )
             con.executemany(
                 "INSERT INTO stages(job_id,stage_id,name,position) VALUES(?,?,?,?)",
                 [(job_id, stage_id, name, position) for stage_id, name, position in STAGE_DEFINITIONS],
             )
-        self.add_event(job_id, None, "info", "job_created", "任务已进入队列",
-                       {"source_path": source_path})
+        event_payload: dict[str, Any] = {"source_path": source_path, "job_type": job_type}
+        if timeline_meta:
+            event_payload["timeline_id"] = timeline_meta.get("timeline_id")
+            event_payload["duration"] = timeline_meta.get("total_duration")
+            event_payload["segments"] = len(timeline_meta.get("segments") or [])
+        self.add_event(job_id, None, "info", "job_created", "任务已进入队列", event_payload)
         return job_id
 
     def list_jobs(self, limit: int = 100) -> list[dict[str, Any]]:
         with self.connect() as con:
             rows = con.execute("SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
-        return [dict(row) for row in rows]
+        jobs = []
+        for row in rows:
+            j = dict(row)
+            raw_meta = j.pop("timeline_meta_json", None)
+            j["timeline_meta"] = json.loads(raw_meta) if raw_meta else None
+            jobs.append(j)
+        return jobs
 
     def list_recoverable_jobs(self) -> list[dict[str, Any]]:
         with self.connect() as con:
             rows = con.execute(
                 "SELECT * FROM jobs WHERE status IN ('queued','running') ORDER BY created_at"
             ).fetchall()
-        return [dict(row) for row in rows]
+        jobs = []
+        for row in rows:
+            j = dict(row)
+            raw_meta = j.pop("timeline_meta_json", None)
+            j["timeline_meta"] = json.loads(raw_meta) if raw_meta else None
+            jobs.append(j)
+        return jobs
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         with self.connect() as con:
@@ -207,6 +232,8 @@ class Store:
             events = con.execute("SELECT * FROM events WHERE job_id=? ORDER BY id DESC LIMIT 200", (job_id,)).fetchall()
             artifacts = con.execute("SELECT * FROM artifacts WHERE job_id=? ORDER BY created_at DESC", (job_id,)).fetchall()
         job = dict(row)
+        raw_meta = job.pop("timeline_meta_json", None)
+        job["timeline_meta"] = json.loads(raw_meta) if raw_meta else None
         job["stages"] = [self._decode_row(x, "result_json") for x in stages]
         job["events"] = [self._decode_row(x, "payload_json") for x in events]
         job["artifacts"] = [dict(x) for x in artifacts]

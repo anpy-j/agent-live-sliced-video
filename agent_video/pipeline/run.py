@@ -21,7 +21,7 @@ from .ai import DEFAULT_TIMEOUT, DECISION_SCHEMA, ORDER_SCHEMA, ai_call
 from .errors import (AIReturnError, AsrError, PipelineError, RuleFilterEmpty,
                      TargetUnreachable)
 from .filter import filter_clauses
-from .render import build_segments, render_video
+from .render import build_segments, build_virtual_segments, render_video
 from .split import DEFAULT_MAX_DURATION, DEFAULT_MIN_DURATION, split_clauses
 from .units import (DEFAULT_MERGE_MAX, DEFAULT_MERGE_MIN, DEFAULT_SILENCE_GAP,
                     build_units, order_candidates)
@@ -186,7 +186,8 @@ def run_pipeline(media: str, workdir: str, *,
                  | None = None,
                  render_size: tuple[int, int] | None = None,
                  preset: str | None = None,
-                 on_stage: StageCallback | None = None) -> dict[str, Any]:
+                 on_stage: StageCallback | None = None,
+                 virtual_timeline: Any | None = None) -> dict[str, Any]:
     """跑完 S1→S2→S3→S4→S6，返回结果摘要并落盘 timeline/manifest/final.mp4。
 
     ``on_stage(stage_id, status, message)`` 在每一步开始/结束时回调，供上层
@@ -205,19 +206,49 @@ def run_pipeline(media: str, workdir: str, *,
 
     # S1 —— ASR + 子句切分（确定性）
     _emit(on_stage, "asr", "start", "语音转写与子句切分")
-    if transcript is not None:
-        sentences, words = transcript
-        duration = max([float(word["e"]) for word in words] + [0.0])
-    elif asr_fn is not None:
-        sentences, words, duration = asr_fn(media, workdir)
+    if virtual_timeline is not None:
+        source_name = virtual_timeline.title
+        if transcript is not None:
+            sentences, words = transcript
+            duration = virtual_timeline.total_duration
+        elif asr_fn is not None:
+            sentences, words, duration = asr_fn(media, workdir)
+        else:
+            from ..timeline import extract_virtual_timeline_audio
+            virtual_wav = extract_virtual_timeline_audio(
+                virtual_timeline, os.path.join(workdir, "virtual_audio.wav"), workdir)
+            sentences, words = asr_mod.transcribe(virtual_wav, workdir,
+                                                  backend=asr_backend, model=asr_model)
+            duration = virtual_timeline.total_duration
     else:
-        sentences, words, duration = _default_asr(media, workdir, asr_backend, asr_model)
+        source_name = media
+        if transcript is not None:
+            sentences, words = transcript
+            duration = max([float(word["e"]) for word in words] + [0.0])
+        elif asr_fn is not None:
+            sentences, words, duration = asr_fn(media, workdir)
+        else:
+            sentences, words, duration = _default_asr(media, workdir, asr_backend, asr_model)
+
     clauses = split_clauses(words, sentences, max_duration=max_duration,
                             min_duration=min_duration)
     if not clauses:
         raise AsrError("S1 没有产出任何子句（无标记过的词级时间戳）")
-    timeline: dict[str, Any] = {"source": media, "duration": round(float(duration), 3),
-                                "clauses": clauses}
+
+    if virtual_timeline is not None:
+        for clause in clauses:
+            virtual_timeline.map_clause(clause)
+        timeline: dict[str, Any] = {
+            "source": source_name,
+            "duration": round(float(duration), 3),
+            "timeline_id": virtual_timeline.timeline_id,
+            "clauses": clauses,
+            "virtual_timeline": virtual_timeline.to_dict(),
+        }
+    else:
+        timeline: dict[str, Any] = {"source": media, "duration": round(float(duration), 3),
+                                    "clauses": clauses}
+
     _dump(os.path.join(workdir, "timeline.json"), timeline)
     _dump(os.path.join(workdir, "clauses.json"), timeline)
     _emit(on_stage, "asr", "done", f"切出 {len(clauses)} 个子句")
@@ -226,7 +257,7 @@ def run_pipeline(media: str, workdir: str, *,
     _emit(on_stage, "filter", "start", "规则粗筛（违禁/价格/场控/去重）")
     filter_clauses(clauses, min_duration=min_duration)
     _dump(os.path.join(workdir, "clauses.filtered.json"),
-          {"source": media, "duration": timeline["duration"], "clauses": clauses})
+          {"source": source_name, "duration": timeline["duration"], "clauses": clauses})
     usable = [clause for clause in clauses if clause["usable"]]
     if not usable:
         raise RuleFilterEmpty(f"S2 规则筛后无可用子句（共 {len(clauses)} 条全部被剔除）")
@@ -257,7 +288,7 @@ def run_pipeline(media: str, workdir: str, *,
         clause["reason"] = str(decision.get("reason") or "")
     _dump(os.path.join(workdir, "timeline.json"), timeline)
     _dump(os.path.join(workdir, "clauses.judged.json"),
-          {"source": media, "duration": timeline["duration"], "clauses": usable})
+          {"source": source_name, "duration": timeline["duration"], "clauses": usable})
     judged = [clause for clause in clauses if clause["usable"]]
     if not judged:
         raise AIReturnError("S3 判定后没有任何可用子句")
@@ -293,15 +324,24 @@ def run_pipeline(media: str, workdir: str, *,
 
     # S6 —— 渲染（确定性）
     _emit(on_stage, "render", "start", "ffmpeg 逐段剪切并拼接")
-    segments = build_segments(ordered_clauses, select_visual_fn)
     output = os.path.join(workdir, "deliverables", "final.mp4")
-    render_video(media, segments, output, workdir,
-                 width=render_size[0] if render_size else None,
-                 height=render_size[1] if render_size else None,
-                 preset=preset)
+    if virtual_timeline is not None:
+        segments = build_virtual_segments(ordered_clauses, virtual_timeline)
+        render_video(media, segments, output, workdir,
+                     width=render_size[0] if render_size else None,
+                     height=render_size[1] if render_size else None,
+                     preset=preset, virtual_timeline=virtual_timeline)
+    else:
+        segments = build_segments(ordered_clauses, select_visual_fn)
+        render_video(media, segments, output, workdir,
+                     width=render_size[0] if render_size else None,
+                     height=render_size[1] if render_size else None,
+                     preset=preset)
 
     manifest = {
-        "source": media,
+        "source": source_name,
+        "timeline_id": virtual_timeline.timeline_id if virtual_timeline else None,
+        "virtual_timeline": virtual_timeline.to_dict() if virtual_timeline else None,
         "duration": timeline["duration"],
         "main_product": main_product,
         "ai_calls": ai_calls,
@@ -382,6 +422,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--width", type=int)
     parser.add_argument("--height", type=int)
     parser.add_argument("--preset")
+    parser.add_argument("--timeline", help="剪映草稿目录/draft_content.json 或虚拟时间线 JSON 文件")
     parser.add_argument("--words-json", help="复用已有词级时间戳，跳过 ASR")
     parser.add_argument("--sentences-json", help="复用已有句级分段（仅用于 split_from）")
     parser.add_argument("--mock-ai", action="store_true",
@@ -397,6 +438,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.ai_provider:
         os.environ["PIPELINE_AI_PROVIDER"] = args.ai_provider
 
+    virtual_timeline = None
+    if args.timeline:
+        from ..timeline import load_virtual_timeline
+        virtual_timeline = load_virtual_timeline(args.timeline)
+
     transcript = None
     if args.words_json or args.sentences_json:
         transcript = asr_mod.load_transcript(args.words_json, args.sentences_json)
@@ -411,7 +457,7 @@ def main(argv: list[str] | None = None) -> int:
             asr_backend=args.backend,
             asr_model=args.model, transcript=transcript,
             render_size=(args.width, args.height) if args.width and args.height else None,
-            preset=args.preset)
+            preset=args.preset, virtual_timeline=virtual_timeline)
     except PipelineError as exc:
         print(f"[{exc.stage}] {exc}", file=sys.stderr)
         return 2

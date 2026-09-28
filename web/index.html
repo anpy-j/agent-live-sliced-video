@@ -41,18 +41,42 @@
   <dialog id="newJobDialog" class="modal">
     <form id="newJobForm">
       <header class="modal-head">
-        <div class="modal-title"><span class="eyebrow">NEW PRODUCTION</span><h2>创建剪辑任务</h2><p>关联一段直播素材，加入队列后自动完成转写、粗筛、AI 判定与排序，最后渲染成 45–60 秒成片。</p></div>
+        <div class="modal-title"><span class="eyebrow">NEW PRODUCTION</span><h2>创建剪辑任务</h2><p>支持原素材直接切片或剪映虚拟时间线切片，加入队列后自动完成分析、判定与渲染。</p></div>
         <button class="icon-button" type="button" data-close-new-job aria-label="关闭"><svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
       </header>
       <div class="modal-body">
-        <section class="form-section">
+        <div class="mode-cards" style="grid-template-columns: 1fr 1fr">
+          <label class="mode-card" id="modeCardDirect">
+            <input type="radio" name="job_mode_select" value="direct" checked>
+            <b>原素材直接切片</b>
+            <small>选择本机视频素材，直接进行转写与切片（原有业务流程）</small>
+          </label>
+          <label class="mode-card" id="modeCardTimeline">
+            <input type="radio" name="job_mode_select" value="timeline">
+            <b>剪映虚拟时间线</b>
+            <small>导入剪映草稿/时间线，AI 仅在筛选范围内编排并双时间轴换算</small>
+          </label>
+        </div>
+
+        <section class="form-section" id="sectionDirectMode">
           <header class="section-head"><i>1</i><div><b>直播素材</b><small>选择本机视频并命名成片</small></div></header>
           <div class="file-drop" id="fileDrop">
             <span class="file-drop-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="14" height="14" rx="2"/><path d="m17 10 4-2v8l-4-2z"/></svg></span>
-            <div class="file-drop-body"><input name="source_path" required placeholder="选择视频或粘贴绝对路径"><small>点击浏览从系统文件选择器关联本机视频，也可直接粘贴绝对路径；文件不会被复制。</small></div>
+            <div class="file-drop-body"><input name="source_path" placeholder="选择视频或粘贴绝对路径"><small>点击浏览从系统文件选择器关联本机视频，也可直接粘贴绝对路径；文件不会被复制。</small></div>
             <button class="button ghost small" type="button" id="pickSourceButton">浏览</button>
           </div>
           <label class="field">成片名称<input name="title" placeholder="留空则使用素材文件名"><small>最终输出为“成片名称.mp4”。</small></label>
+        </section>
+
+        <section class="form-section" id="sectionTimelineMode" style="display:none">
+          <header class="section-head"><i>1</i><div><b>剪映虚拟时间线</b><small>选择剪映草稿目录、draft_content.json 或时间线 JSON</small></div></header>
+          <div class="file-drop" id="timelineFileDrop">
+            <span class="file-drop-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6.5 12 2l8 4.5v11L12 22l-8-4.5z"/><path d="m9 8 7 4-7 4z"/></svg></span>
+            <div class="file-drop-body"><input name="draft_path" id="timelineDraftInput" placeholder="选择剪映草稿目录或时间线 JSON"><small>AI 仅在剪映保留的 30–40 分钟内分析，底层原素材文件自动隐藏。</small></div>
+            <button class="button ghost small" type="button" id="pickTimelineButton">浏览草稿</button>
+          </div>
+          <div id="timelineInspectResult" class="timeline-inspect-card" style="display:none"></div>
+          <label class="field">成片名称<input name="timeline_title" id="timelineTitleInput" placeholder="留空则使用时间线标题（如：F家限定 / 时间线01）"><small>最终输出为“成片名称.mp4”。</small></label>
         </section>
       </div>
       <footer class="modal-actions">

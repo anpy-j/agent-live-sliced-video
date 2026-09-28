@@ -64,15 +64,16 @@ def output_size(path, width, height):
     return 1440, 2560
 
 
-def video_filter(width, height, fps, allow_upscale):
+def video_filter(width, height, fps, allow_upscale, speed=1.0):
     if allow_upscale:
         scale = (f"scale={width}:{height}:force_original_aspect_ratio=decrease,")
     else:
         ratio = f"min(1\\,min({width}/iw\\,{height}/ih))"
         scale = (f"scale=w='trunc(iw*{ratio}/2)*2':"
                  f"h='trunc(ih*{ratio}/2)*2',")
+    pts = f"setpts=(PTS-STARTPTS)/{speed:.6f}" if abs(speed - 1.0) > 1e-4 else "setpts=PTS-STARTPTS"
     return (scale + f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,"
-            f"fps={fps:.6f},setsar=1,setpts=PTS-STARTPTS")
+            f"fps={fps:.6f},setsar=1,{pts}")
 
 
 def main():
@@ -116,14 +117,17 @@ def main():
 
     filters = []
     for index in range(len(timeline)):
-        filters.append(f"[{index}:v]{video_filter(args.width, args.height, fps, args.allow_upscale)}"
+        speed = float(timeline[index].get("speed", 1.0))
+        filters.append(f"[{index}:v]{video_filter(args.width, args.height, fps, args.allow_upscale, speed=speed)}"
                        f"[v{index}]")
-        duration = float(timeline[index]["end"]) - float(timeline[index]["start"])
+        raw_duration = float(timeline[index]["end"]) - float(timeline[index]["start"])
+        duration = raw_duration / speed if speed > 0 else raw_duration
         edge = max(0.0, min(args.audio_edge_ms / 1000.0, duration / 4.0))
         fades = (f",afade=t=in:st=0:d={edge:.4f},"
                  f"afade=t=out:st={max(0.0, duration - edge):.4f}:d={edge:.4f}") if edge else ""
+        tempo = f"atempo={speed:.6f}," if abs(speed - 1.0) > 1e-4 else ""
         filters.append(
-            f"[{index}:a]aresample=async=1:first_pts=0,"
+            f"[{index}:a]{tempo}aresample=async=1:first_pts=0,"
             f"aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS"
             f"{fades}[a{index}]"
         )

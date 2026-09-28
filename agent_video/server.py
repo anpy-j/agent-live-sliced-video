@@ -81,6 +81,12 @@ class Application:
         return ""
 
     def create_job(self, payload: dict[str, Any]) -> dict[str, Any]:
+        job_type = str(payload.get("job_type") or "direct").lower()
+        if job_type == "timeline" or "timeline_data" in payload or payload.get("draft_path"):
+            return self._create_timeline_job(payload)
+        return self._create_direct_job(payload)
+
+    def _create_direct_job(self, payload: dict[str, Any]) -> dict[str, Any]:
         source = Path(str(payload.get("source_path", ""))).expanduser().resolve()
         if not source.is_file():
             raise ValueError(f"素材文件不存在: {source}")
@@ -90,13 +96,78 @@ class Application:
         source_workspace = self._source_workspace(source)
         placeholder = source_workspace / "edits" / "pending"
         job_id = self.store.create_job(title=title, source_path=str(source),
-                                       workspace=str(placeholder))
+                                       workspace=str(placeholder), job_type="direct")
         edit_name = f"{job_id}-{self._path_slug(title, 48)}"
         workspace = source_workspace / "edits" / edit_name
         workspace.mkdir(parents=True, exist_ok=True)
         self.store.update_job(job_id, workspace=str(workspace))
         self.runner.enqueue(job_id)
         return self.store.get_job(job_id) or {"id": job_id}
+
+    def _create_timeline_job(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from .timeline import load_virtual_timeline
+        target = (payload.get("draft_path") or payload.get("timeline_path") or
+                  payload.get("source_path") or payload.get("timeline_data"))
+        if not target:
+            raise ValueError("请指定剪映草稿目录或虚拟时间线文件")
+
+        try:
+            vt = load_virtual_timeline(target)
+        except Exception as exc:
+            raise ValueError(f"加载虚拟时间线失败: {exc}") from exc
+
+        if not vt.segments:
+            raise ValueError("虚拟时间线不包含任何有效片段")
+
+        title = str(payload.get("title") or vt.title).strip()[:120]
+        if not title:
+            title = vt.title or "虚拟时间线剪辑"
+
+        digest = hashlib.sha256(json.dumps(
+            vt.to_dict(), sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:12]
+        root = self.workspace_root / "timelines" / f"{self._path_slug(vt.timeline_id)}-{digest}"
+        (root / "shared").mkdir(parents=True, exist_ok=True)
+        (root / "edits").mkdir(parents=True, exist_ok=True)
+
+        dur_mins = max(1, int(round(vt.total_duration / 60)))
+        source_display = f"{vt.title}（约 {dur_mins} 分钟）"
+        placeholder = root / "edits" / "pending"
+        job_id = self.store.create_job(title=title, source_path=source_display,
+                                       workspace=str(placeholder), job_type="timeline",
+                                       timeline_meta=vt.to_dict())
+        edit_name = f"{job_id}-{self._path_slug(title, 48)}"
+        workspace = root / "edits" / edit_name
+        workspace.mkdir(parents=True, exist_ok=True)
+        # 将解析好的 virtual_timeline.json 写入任务 workspace
+        vt_file = workspace / "virtual_timeline.json"
+        vt_file.write_text(json.dumps(vt.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+        self.store.update_job(job_id, workspace=str(workspace))
+        self.runner.enqueue(job_id)
+        return self.store.get_job(job_id) or {"id": job_id}
+
+    def inspect_timeline(self, payload: dict[str, Any] | str) -> dict[str, Any]:
+        from .timeline import load_virtual_timeline
+        if isinstance(payload, str):
+            target = payload
+        else:
+            target = (payload.get("path") or payload.get("draft_path") or
+                      payload.get("source_path") or payload.get("timeline_data"))
+        if not target:
+            raise ValueError("请提供时间线或草稿路径")
+        vt = load_virtual_timeline(target)
+        dur_mins = max(1, int(round(vt.total_duration / 60)))
+        return {
+            "valid": True,
+            "timeline_id": vt.timeline_id,
+            "title": vt.title,
+            "total_duration": round(vt.total_duration, 3),
+            "timeline_duration": round(vt.total_duration, 3),
+            "source_duration": round(vt.source_duration, 3),
+            "duration_text": f"约 {dur_mins} 分钟",
+            "segment_count": len(vt.segments),
+            "sources": vt.source_paths,
+            "source_count": len(vt.source_paths),
+        }
 
     @staticmethod
     def _path_slug(value: str, limit: int = 64) -> str:
@@ -226,7 +297,8 @@ class Application:
         return {"opened": True, "folder": str(folder)}
 
     def _pick_file_macos(self, kind: str = "video") -> dict[str, Any]:
-        script = 'POSIX path of (choose file with prompt "选择直播视频素材")'
+        prompt = "选择剪映草稿或虚拟时间线文件" if kind in {"timeline", "draft", "json"} else "选择直播视频素材"
+        script = f'POSIX path of (choose file with prompt "{prompt}")'
         result = subprocess.run(["/usr/bin/osascript", "-e", script], capture_output=True,
                                 text=True, encoding="utf-8", errors="replace", timeout=300)
         if result.returncode:
@@ -243,9 +315,13 @@ class Application:
         powershell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
         if not powershell:
             raise ValueError("未找到 PowerShell，无法打开 Windows 文件选择器")
-        title = "选择直播视频素材"
-        filter_spec = ("视频文件 (*.mp4;*.mov;*.mkv;*.m4v;*.avi;*.webm;*.ts)|"
-                       "*.mp4;*.mov;*.mkv;*.m4v;*.avi;*.webm;*.ts|所有文件 (*.*)|*.*")
+        if kind in {"timeline", "draft", "json"}:
+            title = "选择剪映草稿或虚拟时间线"
+            filter_spec = ("时间线/草稿 (*.json;draft_content.json)|*.json;draft_content.json|所有文件 (*.*)|*.*")
+        else:
+            title = "选择直播视频素材"
+            filter_spec = ("视频文件 (*.mp4;*.mov;*.mkv;*.m4v;*.avi;*.webm;*.ts)|"
+                           "*.mp4;*.mov;*.mkv;*.m4v;*.avi;*.webm;*.ts|所有文件 (*.*)|*.*")
         script = rf"""
 Add-Type -AssemblyName System.Windows.Forms
 $owner = New-Object System.Windows.Forms.Form
@@ -297,6 +373,10 @@ try {{
     @staticmethod
     def _picked_file_result(raw_path: str, kind: str = "video") -> dict[str, Any]:
         path = Path(raw_path).resolve()
+        if kind in {"timeline", "draft", "json"}:
+            if not path.is_file() and not path.is_dir():
+                raise ValueError("请选择存在的草稿目录或时间线文件")
+            return {"cancelled": False, "path": str(path), "name": path.stem or path.name}
         allowed = {".mp4", ".mov", ".mkv", ".m4v", ".avi", ".webm", ".ts"}
         if not path.is_file() or path.suffix.lower() not in allowed:
             raise ValueError("请选择 MP4、MOV、MKV、M4V、AVI、WebM 或 TS 视频")
@@ -547,6 +627,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/files/pick":
                 kind = str(payload.get("kind") or "video")
                 return self.json_response(self.app.pick_file(kind=kind))
+            if path == "/api/timeline/inspect":
+                return self.json_response(self.app.inspect_timeline(payload))
             if path == "/api/jobs":
                 return self.json_response(self.app.create_job(payload), 201)
             if path.startswith("/api/jobs/"):

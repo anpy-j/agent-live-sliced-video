@@ -35,7 +35,7 @@ function jobFlags(job){return {active:['queued','running'].includes(job.status)}
 function jobRows(jobs){
   if(!jobs.length)return `<div class="empty">${icons.empty}<h3>还没有剪辑任务</h3><p>添加第一段直播素材，系统会自动完成转写、粗筛、判定、排序与渲染。</p><button class="button primary" data-new-job>新建剪辑任务</button></div>`;
   return `<table class="jobs-table"><thead><tr><th>任务</th><th>当前节点</th><th>进度</th><th>状态</th><th>操作</th></tr></thead><tbody>${jobs.map(j=>{const folder=j.deliverables||{};return `<tr>
-    <td><div class="job-name"><span class="job-thumb">${icons.video}</span><div><b>${escapeHtml(j.title)}</b><small>${escapeHtml(j.source_path)}</small></div></div></td>
+    <td><div class="job-name"><span class="job-thumb">${icons.video}</span><div><b>${escapeHtml(j.title)}</b>${j.job_type==='timeline'?'<span class="timeline-tag">虚拟时间线</span>':''}<small>${escapeHtml(j.source_path)}</small></div></div></td>
     <td><small>${escapeHtml(j.current_stage?stageLabel(j.current_stage):'—')}</small></td>
     <td><div class="progress"><div class="progress-line"><i style="width:${Math.max(2,Math.min(100,j.progress||0))}%"></i></div><small>${Math.round(j.progress||0)}% · ${formatTime(j.updated_at)}</small></div></td>
     <td>${status(j.status)}</td>
@@ -204,7 +204,7 @@ async function renderJob(jobId){
   setCrumb('任务详情');loading();const job=await api(`/api/jobs/${jobId}`);
   state.job=job;state.selectedStage=job.current_stage||job.stages[0]?.stage_id;
   app.innerHTML=`<a href="#/queue" class="back-link">${icons.arrow}返回队列</a>
-  <div class="detail-head"><div class="detail-title"><span class="eyebrow">${escapeHtml(job.id)}</span><h1>${escapeHtml(job.title)}</h1><p>${escapeHtml(job.source_path)}</p></div><div class="detail-actions" id="jobControls" data-render-key="${escapeHtml(deliverablesControlsKey(job))}">${jobControlsHtml(job)}</div></div>
+  <div class="detail-head"><div class="detail-title"><span class="eyebrow">${escapeHtml(job.id)}</span><h1>${escapeHtml(job.title)}${job.job_type==='timeline'?'<span class="timeline-tag">虚拟时间线</span>':''}</h1><p>${escapeHtml(job.source_path)}</p></div><div class="detail-actions" id="jobControls" data-render-key="${escapeHtml(deliverablesControlsKey(job))}">${jobControlsHtml(job)}</div></div>
   <div class="panel"><div class="panel-head"><div><h2>整体流程</h2><p id="jobProgressMeta">${Math.round(job.progress||0)}% · 当前节点 ${escapeHtml(stageLabel(job.current_stage)||'—')}</p></div><div class="workflow-meta"><span class="connection-state" id="jobConnectionState"><i></i>实时连接正常</span><span class="panel-hint">点击节点查看详情</span></div></div><div class="workflow" id="jobWorkflow" data-render-key="${escapeHtml(workflowKey(job))}">${workflowHtml(job)}</div></div>
   <div class="detail-grid"><div><div class="panel stage-detail" id="jobStageDetail" data-render-key="${escapeHtml(stageDetailKey(job))}">${stageDetailHtml(job)}</div>
   <div class="panel"><div class="panel-head"><div><h2>任务产物</h2><p>图片、时间线、日志与视频均可打开</p></div></div><div id="jobArtifacts" data-render-key="${escapeHtml(artifactsKey(job))}">${artifactsHtml(job)}</div></div></div>
@@ -419,17 +419,85 @@ $('#newJobButton').addEventListener('click',openNewJob);
 $$('[data-close-new-job]').forEach(button=>button.addEventListener('click',()=>$('#newJobDialog').close()));
 $('#newJobDialog').addEventListener('cancel',e=>{e.preventDefault();$('#newJobDialog').close()});
 $('#newJobDialog').addEventListener('click',e=>{if(e.target===$('#newJobDialog'))$('#newJobDialog').close()});
-$('#newJobForm [name="title"]').addEventListener('input',e=>{e.target.dataset.userEdited=e.target.value?'true':''});
+function setJobMode(mode){
+  const isTimeline = mode === 'timeline';
+  const secDirect = $('#sectionDirectMode'), secTimeline = $('#sectionTimelineMode');
+  if(secDirect) secDirect.style.display = isTimeline ? 'none' : 'grid';
+  if(secTimeline) secTimeline.style.display = isTimeline ? 'grid' : 'none';
+}
+$$('input[name="job_mode_select"]').forEach(radio => radio.addEventListener('change', e => {
+  setJobMode(e.target.value);
+  $('#newJobError').textContent = '';
+}));
+
+async function inspectTimeline(path){
+  if(!path) return;
+  const resultBox = $('#timelineInspectResult');
+  const titleInput = $('#timelineTitleInput');
+  const error = $('#newJobError');
+  try {
+    const data = await api('/api/timeline/inspect', {method:'POST', body: JSON.stringify({path})});
+    resultBox.innerHTML = `<div class="timeline-inspect-head"><span class="timeline-inspect-title">${escapeHtml(data.title)}</span><span class="timeline-inspect-badge">${escapeHtml(data.duration_text)} · ${data.segment_count} 个片段</span></div><div class="timeline-inspect-meta">底层素材：${data.source_count} 个文件（对 AI 与成片展示隐藏）</div>`;
+    resultBox.style.display = 'grid';
+    if(titleInput && titleInput.dataset.userEdited !== 'true') titleInput.value = data.title;
+    error.textContent = '';
+  } catch(err) {
+    resultBox.style.display = 'none';
+    error.textContent = err.message;
+  }
+}
+
+$('#newJobForm [name="title"]')?.addEventListener('input', e=>{e.target.dataset.userEdited=e.target.value?'true':''});
+$('#timelineTitleInput')?.addEventListener('input', e=>{e.target.dataset.userEdited=e.target.value?'true':''});
+$('#timelineDraftInput')?.addEventListener('change', e=>inspectTimeline(e.target.value.trim()));
+
 $('#pickSourceButton').addEventListener('click',async e=>{
   const button=e.currentTarget,source=$('#newJobForm [name="source_path"]'),title=$('#newJobForm [name="title"]');
   button.disabled=true;button.textContent='选择中…';$('#newJobError').textContent='';
-  try{const result=await api('/api/files/pick',{method:'POST',body:'{}'});if(result.cancelled)return;source.value=result.path;if(title.dataset.userEdited!=='true')title.value=result.name;}
+  try{const result=await api('/api/files/pick',{method:'POST',body:JSON.stringify({kind:'video'})});if(result.cancelled)return;source.value=result.path;if(title.dataset.userEdited!=='true')title.value=result.name;}
   catch(err){$('#newJobError').textContent=err.message}finally{button.disabled=false;button.textContent='浏览';}
 });
 $('#fileDrop').addEventListener('click',e=>{if(!e.target.closest('#pickSourceButton'))$('#pickSourceButton').click()});
+
+$('#pickTimelineButton')?.addEventListener('click', async e=>{
+  const button=e.currentTarget, input=$('#timelineDraftInput');
+  button.disabled=true;button.textContent='选择中…';$('#newJobError').textContent='';
+  try{
+    const result=await api('/api/files/pick',{method:'POST',body:JSON.stringify({kind:'timeline'})});
+    if(result.cancelled) return;
+    input.value = result.path;
+    await inspectTimeline(result.path);
+  } catch(err){$('#newJobError').textContent=err.message}
+  finally{button.disabled=false;button.textContent='浏览草稿';}
+});
+$('#timelineFileDrop')?.addEventListener('click', e=>{if(!e.target.closest('#pickTimelineButton'))$('#pickTimelineButton').click();});
+
 $('#newJobForm').addEventListener('submit',async e=>{
   e.preventDefault();const submit=$('#createJobSubmit'),error=$('#newJobError');submit.disabled=true;submit.textContent='正在创建…';error.textContent='';
-  try{const f=new FormData(e.target);const data=await api('/api/jobs',{method:'POST',body:JSON.stringify({source_path:f.get('source_path'),title:f.get('title')||''})});$('#newJobDialog').close();e.target.reset();$('#newJobForm [name="title"]').dataset.userEdited='';location.hash=`#/jobs/${data.id}`;toast('任务已加入队列');}
+  try{
+    const mode = $('input[name="job_mode_select"]:checked')?.value || 'direct';
+    let payload;
+    if(mode === 'timeline'){
+      const draftPath = $('#timelineDraftInput').value.trim();
+      if(!draftPath){ error.textContent = '请选择剪映草稿目录或时间线 JSON'; submit.disabled=false; submit.textContent='加入队列'; return; }
+      const title = $('#timelineTitleInput').value.trim();
+      payload = {job_type: 'timeline', draft_path: draftPath, title: title};
+    } else {
+      const sourcePath = $('#newJobForm [name="source_path"]').value.trim();
+      if(!sourcePath){ error.textContent = '请选择视频或粘贴绝对路径'; submit.disabled=false; submit.textContent='加入队列'; return; }
+      const title = $('#newJobForm [name="title"]').value.trim();
+      payload = {job_type: 'direct', source_path: sourcePath, title: title};
+    }
+    const data=await api('/api/jobs',{method:'POST',body:JSON.stringify(payload)});
+    $('#newJobDialog').close();
+    e.target.reset();
+    $('#newJobForm [name="title"]').dataset.userEdited='';
+    if($('#timelineTitleInput')) $('#timelineTitleInput').dataset.userEdited='';
+    $('#timelineInspectResult').style.display='none';
+    setJobMode('direct');
+    location.hash=`#/jobs/${data.id}`;
+    toast('任务已加入队列');
+  }
   catch(err){error.textContent=err.message}finally{submit.disabled=false;submit.textContent='加入队列';}
 });
 $('#previewDialog .preview-close').addEventListener('click',()=>{$('#previewDialog video')?.pause();$('#previewDialog').close()});

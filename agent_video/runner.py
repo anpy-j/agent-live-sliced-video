@@ -181,7 +181,19 @@ class JobRunner:
 
         try:
             with self._ai_environment():
-                manifest = run_pipeline(str(source), str(workspace), on_stage=on_stage)
+                if job.get("job_type") == "timeline":
+                    from .timeline import load_virtual_timeline
+                    vt_file = workspace / "virtual_timeline.json"
+                    if vt_file.is_file():
+                        vt = load_virtual_timeline(vt_file)
+                    elif job.get("timeline_meta"):
+                        vt = load_virtual_timeline(job["timeline_meta"])
+                    else:
+                        vt = load_virtual_timeline(source)
+                    manifest = run_pipeline(str(source), str(workspace),
+                                            on_stage=on_stage, virtual_timeline=vt)
+                else:
+                    manifest = run_pipeline(str(source), str(workspace), on_stage=on_stage)
         except JobCancelled:
             self._finish(job_id, "cancelled", "任务已取消")
         except PipelineError as exc:

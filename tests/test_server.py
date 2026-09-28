@@ -189,6 +189,53 @@ class JobApiTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "ai_engine"):
             self.app.update_settings({"ai_engine": "gpt"})
 
+    def test_inspect_and_create_timeline_job(self):
+        draft_file = self.root / "draft_content.json"
+        draft_content = {
+            "materials": {"videos": [{"id": "v1", "path": str(self.video)}]},
+            "tracks": [{
+                "type": "video",
+                "segments": [{
+                    "id": "s1",
+                    "material_id": "v1",
+                    "source_timerange": {"start": 0, "duration": 60000000},
+                    "target_timerange": {"start": 0, "duration": 60000000},
+                }]
+            }]
+        }
+        draft_file.write_text(json.dumps(draft_content, ensure_ascii=False), encoding="utf-8")
+
+        # Test inspect
+        inspect_res = self.app.inspect_timeline(str(draft_file))
+        self.assertEqual(inspect_res["segment_count"], 1)
+        self.assertEqual(inspect_res["timeline_duration"], 60.0)
+        self.assertEqual(inspect_res["source_duration"], 60.0)
+
+        # Test create timeline job
+        job = self.app.create_job({
+            "job_type": "timeline",
+            "timeline_path": str(draft_file),
+            "title": "F家限定 / 时间线01 · 约 1 分钟",
+        })
+        self.assertEqual(job["job_type"], "timeline")
+        self.assertEqual(job["title"], "F家限定 / 时间线01 · 约 1 分钟")
+        self.assertIsNotNone(job.get("timeline_meta"))
+        self.assertEqual(job["timeline_meta"]["segment_count"], 1)
+
+        # Verify virtual_timeline.json in workspace
+        ws = Path(job["workspace"])
+        vt_path = ws / "virtual_timeline.json"
+        self.assertTrue(vt_path.is_file())
+        vt_data = json.loads(vt_path.read_text(encoding="utf-8"))
+        self.assertEqual(vt_data["segments"][0]["segment_id"], "片段1")
+
+    def test_create_direct_job_backward_compatibility(self):
+        job = self.app.create_job({"source_path": str(self.video)})
+        self.assertEqual(job["job_type"], "direct")
+        self.assertEqual(job["source_path"], str(self.video))
+        self.assertIsNone(job.get("timeline_meta"))
+
 
 if __name__ == "__main__":
     unittest.main()
+

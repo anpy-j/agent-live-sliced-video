@@ -52,19 +52,83 @@ def build_segments(ordered_clauses: list[dict[str, Any]],
     return segments
 
 
+def build_virtual_segments(ordered_clauses: list[dict[str, Any]],
+                           virtual_timeline: Any) -> list[dict[str, Any]]:
+    """根据虚拟时间线与双时间轴映射，构建渲染片段列表。"""
+    segments: list[dict[str, Any]] = []
+    for clause in ordered_clauses:
+        c_start = float(clause["start"])
+        c_end = float(clause["end"])
+        slices = virtual_timeline.map_timeline_range(c_start, c_end)
+        for piece in slices:
+            segments.append({
+                "id": clause["id"],
+                "timeline_id": piece["timeline_id"],
+                "timeline_start": piece["timeline_start"],
+                "timeline_end": piece["timeline_end"],
+                "segment_id": piece["segment_id"],
+                "segment_offset": piece["segment_offset"],
+                "source_path": piece["source_path"],
+                "source_start": piece["source_start"],
+                "source_end": piece["source_end"],
+                "speed": piece.get("speed", 1.0),
+                "start": piece["source_start"],
+                "end": piece["source_end"],
+                "text": clause.get("text", ""),
+            })
+    if not segments:
+        raise RenderError("虚拟时间线映射后渲染片段为空")
+    return segments
+
+
 def render_video(media: str, segments: list[dict[str, Any]], output: str, workdir: str,
                  *, width: int | None = None, height: int | None = None,
-                 fps: float | None = None, preset: str | None = None) -> str:
-    """调用 render_multi 把片段拼成 ``output``。"""
+                 fps: float | None = None, preset: str | None = None,
+                 virtual_timeline: Any | None = None) -> str:
+    """调用 render_multi 把片段拼成 ``output``。支持单素材直接渲染与虚拟时间线多源映射渲染。"""
     if not segments:
         raise RenderError("渲染片段为空")
-    timeline_path = os.path.join(workdir, "render_timeline.json")
-    with open(timeline_path, "w", encoding="utf-8") as handle:
-        json.dump([{"src": 1, "start": row["start"], "end": row["end"]}
-                   for row in segments], handle, ensure_ascii=False, indent=1)
-    os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
-    command = [sys.executable, RENDER_MULTI, timeline_path, os.path.abspath(output),
-               "--src", f"1={os.path.abspath(media)}", "--force"]
+
+    has_custom_sources = any("source_path" in row and row["source_path"] for row in segments)
+    if has_custom_sources or virtual_timeline:
+        source_paths: list[str] = []
+        for row in segments:
+            p = row.get("source_path") or media
+            if p and p not in source_paths:
+                source_paths.append(p)
+        if not source_paths and media:
+            source_paths.append(media)
+
+        source_to_id = {path: idx + 1 for idx, path in enumerate(source_paths)}
+        timeline_rows = []
+        for row in segments:
+            src_path = row.get("source_path") or media
+            src_id = source_to_id.get(src_path, 1)
+            start = float(row.get("source_start", row["start"]))
+            end = float(row.get("source_end", row["end"]))
+            speed = float(row.get("speed", 1.0))
+            timeline_rows.append({"src": src_id, "start": start, "end": end, "speed": speed})
+
+        timeline_path = os.path.join(workdir, "render_timeline.json")
+        with open(timeline_path, "w", encoding="utf-8") as handle:
+            json.dump(timeline_rows, handle, ensure_ascii=False, indent=1)
+
+        src_args: list[str] = []
+        for path, src_id in source_to_id.items():
+            src_args.extend(["--src", f"{src_id}={os.path.abspath(path)}"])
+
+        os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
+        command = [sys.executable, RENDER_MULTI, timeline_path, os.path.abspath(output),
+                   *src_args, "--force"]
+    else:
+        timeline_path = os.path.join(workdir, "render_timeline.json")
+        with open(timeline_path, "w", encoding="utf-8") as handle:
+            json.dump([{"src": 1, "start": row["start"], "end": row["end"]}
+                       for row in segments], handle, ensure_ascii=False, indent=1)
+        os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
+        command = [sys.executable, RENDER_MULTI, timeline_path, os.path.abspath(output),
+                   "--src", f"1={os.path.abspath(media)}", "--force"]
+
     if width and height:
         command += ["--width", str(width), "--height", str(height)]
     if fps:

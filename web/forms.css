@@ -179,3 +179,46 @@
 .input-with-action{display:flex;gap:8px;align-items:center}
 .input-with-action input{flex:1;min-width:0}
 .input-with-action .button{flex:0 0 auto}
+
+.timeline-inspect-card {
+  margin-top: 4px;
+  padding: 12px 14px;
+  border: 1px solid rgba(168, 255, 53, .35);
+  border-radius: 12px;
+  background: rgba(168, 255, 53, .05);
+  display: grid;
+  gap: 6px;
+}
+.timeline-inspect-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.timeline-inspect-title {
+  font-weight: 700;
+  color: var(--accent);
+  font-size: 13px;
+}
+.timeline-inspect-badge {
+  font-size: 10.5px;
+  padding: 2px 7px;
+  border-radius: 99px;
+  background: rgba(168, 255, 53, .15);
+  color: var(--accent);
+  font-weight: 600;
+}
+.timeline-inspect-meta {
+  color: var(--dim);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.timeline-tag {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(168, 255, 53, .12);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 600;
+  margin-left: 6px;
+}
