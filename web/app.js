@@ -520,6 +520,21 @@ $$('#durationPresets .preset-chip').forEach(chip => {
 $('#newJobForm [name="target_min"]')?.addEventListener('input', syncDurationChips);
 $('#newJobForm [name="target_max"]')?.addEventListener('input', syncDurationChips);
 
+function syncTimelineDurationChips(){
+  const min=$('#newJobForm [name="timeline_target_min"]')?.value;
+  const max=$('#newJobForm [name="timeline_target_max"]')?.value;
+  $$('#timelineDurationPresets .preset-chip').forEach(c=>c.classList.toggle('active',c.dataset.min===min&&c.dataset.max===max));
+}
+$$('#timelineDurationPresets .preset-chip').forEach(chip => {
+  chip.addEventListener('click', () => {
+    $('#newJobForm [name="timeline_target_min"]').value = chip.dataset.min;
+    $('#newJobForm [name="timeline_target_max"]').value = chip.dataset.max;
+    syncTimelineDurationChips();
+  });
+});
+$('#newJobForm [name="timeline_target_min"]')?.addEventListener('input', syncTimelineDurationChips);
+$('#newJobForm [name="timeline_target_max"]')?.addEventListener('input', syncTimelineDurationChips);
+
 $('#pickTimelineButton')?.addEventListener('click', async e=>{
   const button=e.currentTarget, input=$('#timelineDraftInput');
   button.disabled=true;button.textContent='选择中…';$('#newJobError').textContent='';
@@ -549,6 +564,14 @@ $('#pickExportButton').addEventListener('click',async e=>{
 });
 $('#exportDrop').addEventListener('click',e=>{if(!e.target.closest('#pickExportButton'))$('#pickExportButton').click()});
 
+$('#pickTimelineExportButton')?.addEventListener('click',async e=>{
+  const button=e.currentTarget,input=$('#newJobForm [name="timeline_export_dir"]');
+  button.disabled=true;button.textContent='选择中…';$('#newJobError').textContent='';
+  try{const result=await api('/api/files/pick',{method:'POST',body:JSON.stringify({kind:'dir'})});if(result.cancelled)return;input.value=result.path;}
+  catch(err){$('#newJobError').textContent=err.message}finally{button.disabled=false;button.textContent='选择文件夹';}
+});
+$('#timelineExportDrop')?.addEventListener('click',e=>{if(!e.target.closest('#pickTimelineExportButton'))$('#pickTimelineExportButton').click()});
+
 $('#newJobForm').addEventListener('submit',async e=>{
   e.preventDefault();const submit=$('#createJobSubmit'),error=$('#newJobError');submit.disabled=true;submit.textContent='正在创建…';error.textContent='';
   try{
@@ -558,7 +581,21 @@ $('#newJobForm').addEventListener('submit',async e=>{
       const draftPath = $('#timelineDraftInput')?.value.trim();
       if(!draftPath){ error.textContent = '请选择剪映草稿目录或时间线 JSON'; submit.disabled=false; submit.textContent='加入队列'; return; }
       const title = $('#timelineTitleInput')?.value.trim();
-      payload = {job_type: 'timeline', draft_path: draftPath, title: title};
+      const targetMin = parseFloat($('#newJobForm [name="timeline_target_min"]')?.value) || 70;
+      const targetMax = parseFloat($('#newJobForm [name="timeline_target_max"]')?.value) || 90;
+      if (targetMin <= 0) throw new Error('最短时长必须大于 0 秒');
+      if (targetMax < targetMin) throw new Error('最长时长不能小于最短时长');
+      payload = {
+        job_type: 'timeline',
+        draft_path: draftPath,
+        title: title,
+        product_name: $('#newJobForm [name="timeline_product_name"]')?.value || '',
+        export_mode: $('#newJobForm [name="timeline_export_mode"]')?.value || 'merge',
+        export_dir: $('#newJobForm [name="timeline_export_dir"]')?.value || '',
+        target_min: targetMin,
+        target_max: targetMax,
+        target_seconds: `${targetMin}-${targetMax}`
+      };
     } else {
       const f=new FormData(e.target);
       const sourcePath = f.get('source_path')?.trim();
@@ -584,7 +621,10 @@ $('#newJobForm').addEventListener('submit',async e=>{
     e.target.reset();
     $('#newJobForm [name="target_min"]').value = '70';
     $('#newJobForm [name="target_max"]').value = '90';
+    $('#newJobForm [name="timeline_target_min"]').value = '70';
+    $('#newJobForm [name="timeline_target_max"]').value = '90';
     syncDurationChips();
+    syncTimelineDurationChips();
     $('#newJobForm [name="title"]').dataset.userEdited='';
     if($('#timelineTitleInput')) $('#timelineTitleInput').dataset.userEdited='';
     if($('#timelineInspectResult')) $('#timelineInspectResult').style.display='none';

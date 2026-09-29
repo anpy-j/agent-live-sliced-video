@@ -115,6 +115,55 @@ def test_jianying_draft_parsing_and_speed_calculation(tmp_path):
     assert pytest.approx(seg2.speed, 0.001) == 1.0
 
 
+def test_encrypted_jianying_draft_uses_local_dll_adapter(tmp_path):
+    draft_file = tmp_path / "draft_content.json"
+    draft_file.write_text("702EpVKb1iJr1rfQ", encoding="utf-8")
+    decrypted = {
+        "materials": {"videos": [{"id": "v1", "path": str(tmp_path / "raw.mp4")}]},
+        "tracks": [{
+            "type": "video",
+            "segments": [{
+                "id": "s1",
+                "material_id": "v1",
+                "source_timerange": {"start": 0, "duration": 60_000_000},
+                "target_timerange": {"start": 0, "duration": 60_000_000},
+            }],
+        }],
+    }
+    with patch("agent_video.jianying_crypto.decrypt_jianying_file", return_value=decrypted) as decrypt:
+        timeline = load_virtual_timeline(draft_file)
+    decrypt.assert_called_once_with(draft_file.resolve())
+    assert timeline.timeline_duration == 60.0
+
+
+def test_jianying_11_mixed_track_keeps_only_video_segments(tmp_path):
+    draft_data = {
+        "materials": {
+            "videos": [{"id": "video-1", "path": str(tmp_path / "raw.mp4")}],
+            "audios": [{"id": "audio-1", "path": str(tmp_path / "music.mp3")}],
+        },
+        "tracks": [{
+            "type": "mixed",
+            "segments": [
+                {
+                    "material_id": "video-1",
+                    "source_timerange": {"start": 10_000_000, "duration": 30_000_000},
+                    "target_timerange": {"duration": 30_000_000},
+                },
+                {
+                    "material_id": "audio-1",
+                    "source_timerange": {"start": 0, "duration": 30_000_000},
+                    "target_timerange": {"duration": 30_000_000},
+                },
+            ],
+        }],
+    }
+    timeline = load_virtual_timeline(draft_data)
+    assert len(timeline.segments) == 1
+    assert timeline.segments[0].source_start == 10.0
+    assert timeline.timeline_duration == 30.0
+
+
 def test_user_specified_mapping_formula():
     """
     User scenario:

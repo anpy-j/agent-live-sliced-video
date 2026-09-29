@@ -360,11 +360,20 @@ class JobApiTest(unittest.TestCase):
             "job_type": "timeline",
             "timeline_path": str(draft_file),
             "title": "F家限定 / 时间线01 · 约 1 分钟",
+            "target_min": 90,
+            "target_max": 120,
+            "export_dir": str(self.root / "timeline-exports"),
+            "product_name": "限定款",
+            "export_mode": "segments",
         })
         self.assertEqual(job["job_type"], "timeline")
         self.assertEqual(job["title"], "F家限定 / 时间线01 · 约 1 分钟")
         self.assertIsNotNone(job.get("timeline_meta"))
         self.assertEqual(job["timeline_meta"]["segment_count"], 1)
+        self.assertEqual(job["target_seconds"], "90-120")
+        self.assertEqual(job["export_dir"], str((self.root / "timeline-exports").resolve()))
+        self.assertEqual(job["product_name"], "限定款")
+        self.assertEqual(job["export_mode"], "segments")
 
         # Verify virtual_timeline.json in workspace
         ws = Path(job["workspace"])

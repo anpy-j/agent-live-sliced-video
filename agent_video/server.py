@@ -153,6 +153,32 @@ class Application:
         if not title:
             title = vt.title or "虚拟时间线剪辑"
 
+        target_min = payload.get("target_min")
+        target_max = payload.get("target_max")
+        target_seconds_str = str(payload.get("target_seconds") or "").strip()
+        if target_min is not None and target_max is not None:
+            try:
+                min_s = float(target_min)
+                max_s = float(target_max)
+                if min_s <= 0 or max_s < min_s:
+                    raise ValueError("最长时长不能小于最短时长，且必须大于 0")
+                target_seconds = f"{min_s:g}-{max_s:g}"
+            except (ValueError, TypeError) as exc:
+                raise ValueError(f"目标时长格式错误: {exc}") from exc
+        else:
+            target_seconds = target_seconds_str or "70-90"
+
+        raw_export = payload.get("export_dir")
+        if raw_export is None:
+            raw_export = self.store.get_setting("export_dir")
+        export_dir = self._resolve_export_dir(raw_export)
+        if export_dir:
+            self.store.set_setting("export_dir", export_dir)
+        product_name = str(payload.get("product_name") or "").strip()[:60] or None
+        export_mode = str(payload.get("export_mode") or "merge").strip().lower()
+        if export_mode not in {"merge", "segments"}:
+            raise ValueError("输出形态必须是 合并版(merge) 或 分段版(segments)")
+
         digest = hashlib.sha256(json.dumps(
             vt.to_dict(), sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:12]
         root = self.workspace_root / "timelines" / f"{self._path_slug(vt.timeline_id)}-{digest}"
@@ -164,7 +190,11 @@ class Application:
         placeholder = root / "edits" / "pending"
         job_id = self.store.create_job(title=title, source_path=source_display,
                                        workspace=str(placeholder), job_type="timeline",
-                                       timeline_meta=vt.to_dict())
+                                       timeline_meta=vt.to_dict(),
+                                       target_seconds=target_seconds,
+                                       export_dir=export_dir,
+                                       product_name=product_name,
+                                       export_mode=export_mode)
         edit_name = f"{job_id}-{self._path_slug(title, 48)}"
         workspace = root / "edits" / edit_name
         workspace.mkdir(parents=True, exist_ok=True)

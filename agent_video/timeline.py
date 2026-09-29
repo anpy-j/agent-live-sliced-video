@@ -235,9 +235,12 @@ def _parse_jianying_draft_dict(data: dict[str, Any], draft_dir: Path | None = No
                 pass
 
     tracks = data.get("tracks") or []
-    video_tracks = [t for t in tracks if t.get("type") == "video"]
+    # Jianying 11 can store the primary picture track as ``mixed``.  Only keep
+    # segments whose material_id resolves to a video, so audio-only mixed
+    # segments never enter the visual timeline.
+    video_tracks = [t for t in tracks if t.get("type") in {"video", "mixed"}]
     if not video_tracks:
-        raise ValueError("剪映草稿中没有找到视频轨道 (tracks.type == 'video')")
+        raise ValueError("剪映草稿中没有找到视频轨道 (tracks.type == 'video'/'mixed')")
 
     # 优先选取包含片段的主视频轨道
     main_track = video_tracks[0]
@@ -246,7 +249,10 @@ def _parse_jianying_draft_dict(data: dict[str, Any], draft_dir: Path | None = No
             main_track = t
             break
 
-    raw_segments = main_track.get("segments") or []
+    raw_segments = [
+        segment for segment in (main_track.get("segments") or [])
+        if segment.get("material_id") in video_map
+    ]
     if not raw_segments:
         raise ValueError("剪映视频轨道中没有任何片段")
 
@@ -344,7 +350,7 @@ def load_virtual_timeline(target: str | Path | dict[str, Any]) -> VirtualTimelin
         data = json.loads(content)
     except Exception as exc:
         is_jianying = (
-            path.name in ("draft_content.json", "draft_meta_info.json")
+            path.name.lower() in ("draft_content.json", "draft_meta_info.json")
             or (path.parent / "draft_content.json").is_file()
             or (path.parent / "draft_meta_info.json").is_file()
         )
@@ -353,10 +359,15 @@ def load_virtual_timeline(target: str | Path | dict[str, Any]) -> VirtualTimelin
             or not content.strip().startswith(("{", "["))
         )
         if is_jianying and is_encrypted:
-            raise ValueError(
-                f"检测到剪映高版本加密草稿 ({path.name})。剪映专业版（Jianying Pro 6.0+）对本地草稿文件实施了独占 AES 加密存储，外部程序无法直接读取其内部片段轨道。建议使用【原素材直接切片】模式直接导入原片进行 AI 全自动切片，或使用标准虚拟时间线 JSON 描述文件。"
-            ) from exc
-        raise ValueError(f"时间线文件解析失败 ({path.name}): {exc}") from exc
+            try:
+                from .jianying_crypto import decrypt_jianying_file
+                data = decrypt_jianying_file(path)
+            except Exception as decrypt_exc:
+                raise ValueError(
+                    f"剪映加密草稿 DLL 解密失败 ({path.name}): {decrypt_exc}"
+                ) from decrypt_exc
+        else:
+            raise ValueError(f"时间线文件解析失败 ({path.name}): {exc}") from exc
 
     if isinstance(data, dict):
         if "segments" in data and any("timeline_start" in s for s in data.get("segments", [])):
