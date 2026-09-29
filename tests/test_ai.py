@@ -125,7 +125,7 @@ class WorkBuddyCliTest(unittest.TestCase):
                 patch.object(provider, "validate_model"), \
                 patch.object(provider, "_complete", return_value=(valid, "", 1)) as complete:
             provider.generate_plan(model="jysd/test", prompt="业务规则", cwd=Path("/tmp"))
-        sent_prompt = complete.call_args.args[0][-1]
+        sent_prompt = complete.call_args.kwargs.get("stdin_text") or complete.call_args.args[0][-1]
         self.assertTrue(sent_prompt.startswith("你现在是一个只返回 JSON 的编排接口"))
         self.assertIn("顶层必须同时包含非空字符串 main_product 和非空数组 picks", sent_prompt)
         self.assertTrue(sent_prompt.endswith("必须返回 main_product 和 picks；只输出 JSON 对象。"))
@@ -141,6 +141,48 @@ class WorkBuddyCliTest(unittest.TestCase):
                 provider.generate_plan(model="jysd/test", prompt="业务规则", cwd=Path("/tmp"))
         self.assertEqual(raised.exception.raw["stdout"], stdout)
         self.assertEqual(raised.exception.raw["stderr"], "warning")
+
+    def test_opencode_normalize_model(self):
+        provider = OpenCodeCli(Path("/tmp/opencode"))
+        with patch.object(provider, "models", return_value=[
+            ("jysd/deepseek-v4.1-flash", "deepseek-v4.1-flash"),
+            ("openai/gpt-5.6-sol", "gpt-5.6-sol"),
+            ("jysd/glm-5.2-reasoning", "glm-5.2-reasoning"),
+        ]):
+            self.assertEqual(provider.normalize_model("auto"), "auto")
+            self.assertEqual(provider.normalize_model("jysd/deepseek-v4.1-flash"), "jysd/deepseek-v4.1-flash")
+            self.assertEqual(provider.normalize_model("deepseek-v4.1-flash"), "jysd/deepseek-v4.1-flash")
+            self.assertEqual(provider.normalize_model("gpt-5.6-sol"), "openai/gpt-5.6-sol")
+            self.assertEqual(provider.normalize_model("glm-5.2-reasoning"), "jysd/glm-5.2-reasoning")
+
+    def test_opencode_validate_model(self):
+        provider = OpenCodeCli(Path("/tmp/opencode"))
+        with patch.object(provider, "models", return_value=[
+            ("jysd/deepseek-v4.1-flash", "deepseek-v4.1-flash"),
+        ]):
+            # Both full name and alias should succeed without error
+            provider.validate_model("jysd/deepseek-v4.1-flash")
+            provider.validate_model("deepseek-v4.1-flash")
+            with self.assertRaisesRegex(ValueError, "不支持模型: nonexistent"):
+                provider.validate_model("nonexistent")
+
+    def test_opencode_generate_json_assembled_text(self):
+        provider = OpenCodeCli(Path("/tmp/opencode"))
+        events_stdout = "\n".join([
+            json.dumps({"type": "step_start"}),
+            json.dumps({"type": "text", "part": {"text": '{"decisions": [{"id": 0, '}}),
+            json.dumps({"type": "text", "part": {"text": '"usable": true, "reason": "ok"}]}'}}),
+            json.dumps({"type": "step_finish"}),
+        ])
+        with patch.object(provider, "_ensure_available"), \
+                patch.object(provider, "validate_model"), \
+                patch.object(provider, "_complete", return_value=(events_stdout, "", 1)):
+            res = provider.generate_json(
+                model="jysd/test", prompt="test",
+                schema={"type": "object", "required": ["decisions"]},
+                cwd=Path("/tmp"),
+            )
+        self.assertEqual(res["data"], {"decisions": [{"id": 0, "usable": True, "reason": "ok"}]})
 
     def test_multica_agents_are_exposed_as_model_choices(self):
         provider = MulticaCli(Path("/tmp/multica"), profile="desktop", workspace_id="workspace-1")
@@ -245,6 +287,36 @@ class FindObjectExtractionTest(unittest.TestCase):
                     "result": {"decisions": [{"id": 1, "usable": False, "reason": "no"}]}}
         found = AntigravityCli._find_object(envelope, ("decisions",))
         self.assertEqual(found, {"decisions": [{"id": 1, "usable": False, "reason": "no"}]})
+
+    def test_finds_answer_in_multi_json_response_string(self):
+        text = '{"decisions":[{"id":0,"usable":true,"reason":"ok"}]}\n{"toolAction":"done"}'
+        envelope = {"status": "SUCCESS", "response": text, "json_schema": self.SCHEMA}
+        found = AntigravityCli._find_object(envelope, ("decisions",))
+        self.assertEqual(found, {"decisions": [{"id": 0, "usable": True, "reason": "ok"}]})
+
+    def test_antigravity_command_includes_dangerously_skip_permissions(self):
+        provider = AntigravityCli(Path("/tmp/agy"))
+        with patch.object(provider, "_ensure_available"), \
+                patch.object(provider, "validate_model"), \
+                patch.object(provider, "_complete", return_value=(
+                    '{"structured_output":{"decisions":[{"id":1,"usable":true,"reason":"ok"}]}}', "", 1
+                )) as complete:
+            res = provider.generate_json(model="auto", prompt="test", schema=self.SCHEMA, cwd=Path("/tmp"))
+        cmd = complete.call_args.args[0]
+        self.assertIn("--dangerously-skip-permissions", cmd)
+        self.assertEqual(res["data"], {"decisions": [{"id": 1, "usable": True, "reason": "ok"}]})
+
+    def test_antigravity_denied_actions_reported_in_error(self):
+        from agent_video.ai import ProviderResponseError
+        provider = AntigravityCli(Path("/tmp/agy"))
+        with patch.object(provider, "_ensure_available"), \
+                patch.object(provider, "validate_model"), \
+                patch.object(provider, "_complete", return_value=(
+                    json.dumps({"status": "SUCCESS", "response": "", "denied_actions": [{"action": "command"}]}), "", 1
+                )):
+            with self.assertRaises(ProviderResponseError) as ctx:
+                provider.generate_json(model="auto", prompt="test", schema=self.SCHEMA, cwd=Path("/tmp"))
+            self.assertIn("工具权限被拒绝", str(ctx.exception))
 
 
 if __name__ == "__main__":

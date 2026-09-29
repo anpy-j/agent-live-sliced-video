@@ -54,6 +54,18 @@ class FilePickerTest(unittest.TestCase):
              patch("agent_video.server.subprocess.run", return_value=completed):
             self.assertEqual(self.app.pick_video_file(), {"cancelled": True})
 
+    def test_windows_folder_picker_returns_directory(self):
+        encoded = base64.b64encode(str(self.root).encode("utf-8")).decode("ascii")
+        completed = subprocess.CompletedProcess([], 0, stdout=encoded + "\n", stderr="")
+        with patch("agent_video.server.sys.platform", "win32"), \
+             patch("agent_video.server.shutil.which", return_value="powershell.exe"), \
+             patch("agent_video.server.subprocess.run", return_value=completed) as run:
+            result = self.app.pick_file("dir")
+
+        self.assertFalse(result["cancelled"])
+        self.assertEqual(Path(result["path"]), self.root.resolve())
+        self.assertIn("FolderBrowserDialog", run.call_args.args[0][-1])
+
     def test_macos_picker_still_returns_video_path(self):
         completed = subprocess.CompletedProcess([], 0, stdout=str(self.video) + "\n", stderr="")
         with patch("agent_video.server.sys.platform", "darwin"), \
@@ -84,8 +96,17 @@ class JobApiTest(unittest.TestCase):
         job = self.app.create_job({"source_path": str(self.video)})
         self.assertEqual(job["title"], "demo")
         self.assertEqual(job["status"], "queued")
+        self.assertEqual(job["target_seconds"], "70-90")
         self.assertEqual([stage["stage_id"] for stage in job["stages"]],
                          ["asr", "filter", "judge", "order", "render"])
+
+    def test_create_job_stores_custom_target_seconds(self):
+        job = self.app.create_job({"source_path": str(self.video), "target_min": 60, "target_max": 80})
+        self.assertEqual(job["target_seconds"], "60-80")
+
+    def test_create_job_validates_target_seconds(self):
+        with self.assertRaisesRegex(ValueError, "最长时长不能小于最短时长"):
+            self.app.create_job({"source_path": str(self.video), "target_min": 100, "target_max": 50})
 
     def test_create_job_requires_existing_source(self):
         with self.assertRaisesRegex(ValueError, "素材文件不存在"):
@@ -95,6 +116,7 @@ class JobApiTest(unittest.TestCase):
         job = self.app.create_job({"source_path": str(self.video), "products": ["衣服"],
                                    "brief": "x", "delivery_mode": "segments"})
         self.assertEqual(job["title"], "demo")
+        self.assertEqual(job["target_seconds"], "70-90")
 
     def test_deliverable_folder_opened_when_present(self):
         job = self.app.create_job({"title": "成片文件夹", "source_path": str(self.video)})
@@ -118,6 +140,73 @@ class JobApiTest(unittest.TestCase):
             opener.assert_called_once_with(str(folder))
         else:
             opener.assert_called_once()
+
+    def test_deliverable_info_matches_custom_and_legacy_names(self):
+        job = self.app.create_job({"title": "伯恩夫人0926", "source_path": str(self.video)})
+        stored = self.app.store.get_job(job["id"])
+        folder = Path(stored["workspace"]) / "deliverables"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "伯恩夫人0926.mp4").write_bytes(b"new")
+        (folder / "final.mp4").write_bytes(b"old")
+
+        info = self.app.deliverable_info(stored)
+        self.assertTrue(info["exists"])
+        names = {Path(item["path"]).name for item in info["deliverables"]}
+        self.assertIn("伯恩夫人0926.mp4", names)
+        self.assertIn("final.mp4", names)
+
+    def test_create_job_persists_export_dir_and_remembers_default(self):
+        export_dir = self.root / "exports"
+        job = self.app.create_job({"source_path": str(self.video), "title": "导出位置",
+                                   "export_dir": str(export_dir)})
+        stored = self.app.store.get_job(job["id"])
+        self.assertEqual(stored["export_dir"], str(export_dir.resolve()))
+        self.assertTrue(export_dir.is_dir())
+        self.assertEqual(self.app.store.get_setting("export_dir"),
+                         str(export_dir.resolve()))
+        self.assertEqual(self.app.settings()["export_dir"], str(export_dir.resolve()))
+
+    def test_create_job_uses_remembered_export_dir_when_unspecified(self):
+        export_dir = self.root / "remembered"
+        self.app.create_job({"source_path": str(self.video), "export_dir": str(export_dir)})
+        job = self.app.create_job({"source_path": str(self.video)})
+        stored = self.app.store.get_job(job["id"])
+        self.assertEqual(stored["export_dir"], str(export_dir.resolve()))
+
+    def test_create_job_rejects_export_path_that_is_a_file(self):
+        with self.assertRaisesRegex(ValueError, "不是文件夹"):
+            self.app.create_job({"source_path": str(self.video),
+                                 "export_dir": str(self.video)})
+
+    def test_deliverable_info_reports_export_folder(self):
+        export_dir = self.root / "exports"
+        job = self.app.create_job({"source_path": str(self.video), "title": "导出",
+                                   "export_dir": str(export_dir)})
+        stored = self.app.store.get_job(job["id"])
+        export_dir.mkdir(parents=True, exist_ok=True)
+        (export_dir / "导出.mp4").write_bytes(b"mp4")
+
+        info = self.app.deliverable_info(stored)
+        self.assertEqual(Path(info["export_folder"]), export_dir.resolve())
+        self.assertIn("导出.mp4",
+                      {Path(item["path"]).name for item in info["exported"]})
+
+    def test_create_job_stores_product_name_and_export_mode(self):
+        job = self.app.create_job({"source_path": str(self.video), "title": "商品",
+                                   "product_name": "毛衣", "export_mode": "segments"})
+        stored = self.app.store.get_job(job["id"])
+        self.assertEqual(stored["product_name"], "毛衣")
+        self.assertEqual(stored["export_mode"], "segments")
+
+    def test_create_job_defaults_export_mode_merge(self):
+        job = self.app.create_job({"source_path": str(self.video)})
+        stored = self.app.store.get_job(job["id"])
+        self.assertEqual(stored["export_mode"], "merge")
+        self.assertIsNone(stored["product_name"])
+
+    def test_create_job_rejects_unknown_export_mode(self):
+        with self.assertRaisesRegex(ValueError, "输出形态"):
+            self.app.create_job({"source_path": str(self.video), "export_mode": "both"})
 
     def test_open_deliverable_folder_requires_existing_folder(self):
         job = self.app.create_job({"title": "未出片", "source_path": str(self.video)})
@@ -183,6 +272,61 @@ class JobApiTest(unittest.TestCase):
         result = self.app.invoke_tool("retry_video_job", {"job_id": job_id})
         self.assertTrue(result["queued"])
         self.assertEqual(self.app.store.get_job(job_id)["status"], "queued")
+
+    def test_retry_preserves_s1_cache_while_restart_cleans_all(self):
+        job = self.app.create_job({"title": "缓存测试", "source_path": str(self.video)})
+        job_id = job["id"]
+        workspace = Path(job["workspace"])
+        clauses_file = workspace / "clauses.json"
+        clauses_file.write_text("{}", encoding="utf-8")
+        extra_file = workspace / "final.mp4"
+        extra_file.write_text("dummy", encoding="utf-8")
+        historical_video = workspace / "deliverables" / "final.mp4"
+        historical_video.parent.mkdir(parents=True)
+        historical_video.write_bytes(b"history")
+
+        # retry: 保留 clauses.json，清理 final.mp4
+        self.app.invoke_tool("retry_video_job", {"job_id": job_id})
+        self.assertTrue(clauses_file.exists())
+        self.assertFalse(extra_file.exists())
+        self.assertEqual(historical_video.read_bytes(), b"history")
+
+        # restart: 完全清空目录
+        self.app.invoke_tool("restart_video_job", {"job_id": job_id})
+        self.assertFalse(clauses_file.exists())
+        self.assertFalse(extra_file.exists())
+
+    def test_rerun_s2_preserves_s1_and_historical_video_but_clears_downstream(self):
+        job = self.app.create_job({"title": "单节点", "source_path": str(self.video)})
+        job_id = job["id"]
+        workspace = Path(job["workspace"])
+        files = {
+            "clauses.json": "s1",
+            "clauses.filtered.json": "s2",
+            "clauses.judged.json": "s3",
+            "order.json": "s4",
+        }
+        for name, value in files.items():
+            (workspace / name).write_text(value, encoding="utf-8")
+        video = workspace / "deliverables" / "final.mp4"
+        video.parent.mkdir(parents=True)
+        video.write_bytes(b"old-video")
+        for stage_id in ("asr", "filter", "judge", "order", "render"):
+            self.app.store.update_stage(job_id, stage_id, status="succeeded")
+        self.app.store.update_job(job_id, status="completed")
+
+        self.app.runner.rerun_stage(job_id, "filter")
+
+        updated = self.app.store.get_job(job_id)
+        self.assertEqual(updated["run_stage"], "filter")
+        self.assertEqual(updated["status"], "queued")
+        self.assertEqual(updated["stages"][0]["status"], "succeeded")
+        self.assertTrue(all(stage["status"] == "pending" for stage in updated["stages"][1:]))
+        self.assertEqual((workspace / "clauses.json").read_text(encoding="utf-8"), "s1")
+        self.assertFalse((workspace / "clauses.filtered.json").exists())
+        self.assertFalse((workspace / "clauses.judged.json").exists())
+        self.assertFalse((workspace / "order.json").exists())
+        self.assertEqual(video.read_bytes(), b"old-video")
 
     def test_update_settings_validates_ai_engine(self):
         self.assertEqual(self.app.update_settings({"ai_engine": "jev"})["ai_engine"], "jev")

@@ -52,6 +52,24 @@ def choose_backend(requested=None, model=None):
     return requested
 
 
+def resolve_cpu_threads(cpu_count=None):
+    """ASR 使用的 CPU 线程数：默认吃满多核（留 2 核给系统/ffmpeg）。
+
+    纯并行只改速度，不改变解码结果，因此不影响识别准确度。
+    可用 ``DOUYIN_WHISPER_THREADS`` 覆盖。
+    """
+    raw = os.environ.get("DOUYIN_WHISPER_THREADS")
+    if raw:
+        try:
+            value = int(raw)
+            if value > 0:
+                return value
+        except (TypeError, ValueError):
+            pass
+    cores = cpu_count or os.cpu_count() or 4
+    return max(1, cores - 2)
+
+
 def resolve_config(backend=None, model=None):
     selected = choose_backend(backend, model)
     env_model = os.environ.get("DOUYIN_WHISPER_MODEL")
@@ -78,6 +96,7 @@ class Transcriber:
         self.backend = config["backend"]
         self.model_name = config["model"]
         self._model = None
+        self.batch_size = 0
         if self.backend == "faster":
             from faster_whisper import WhisperModel
             # 默认 CPU/int8（跨平台最稳）；有独显时用 DOUYIN_WHISPER_DEVICE=cuda 打开。
@@ -89,7 +108,13 @@ class Transcriber:
             self.compute_type = compute_type
             self._model = WhisperModel(self.model_name, device=device,
                                        compute_type=compute_type,
-                                       cpu_threads=max(1, min(8, os.cpu_count() or 4)))
+                                       cpu_threads=resolve_cpu_threads())
+            # 批处理推理默认关闭：开启后解码分段方式会变，可能带来细微差异，
+            # 用 DOUYIN_WHISPER_BATCH=<batch_size> 显式打开（A/B 验证后再用）。
+            try:
+                self.batch_size = max(0, int(os.environ.get("DOUYIN_WHISPER_BATCH") or 0))
+            except (TypeError, ValueError):
+                self.batch_size = 0
 
     @property
     def identity(self):
@@ -118,11 +143,17 @@ class Transcriber:
                              "text": (segment.get("text") or "").strip(), "words": words})
             return rows
 
-        segments, _ = self._model.transcribe(
-            audio, language=language, vad_filter=True,
+        options = dict(
+            language=language, vad_filter=True,
             vad_parameters={"min_silence_duration_ms": 400}, beam_size=beam_size,
             condition_on_previous_text=False, word_timestamps=word_timestamps,
             initial_prompt=initial_prompt)
+        if self.batch_size > 0:
+            from faster_whisper import BatchedInferencePipeline
+            pipeline = BatchedInferencePipeline(model=self._model)
+            segments, _ = pipeline.transcribe(audio, batch_size=self.batch_size, **options)
+        else:
+            segments, _ = self._model.transcribe(audio, **options)
         rows = []
         for segment in segments:
             words = [{"s": float(word.start), "e": float(word.end),

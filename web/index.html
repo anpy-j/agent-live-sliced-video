@@ -58,15 +58,50 @@
           </label>
         </div>
 
-        <section class="form-section" id="sectionDirectMode">
-          <header class="section-head"><i>1</i><div><b>直播素材</b><small>选择本机视频并命名成片</small></div></header>
-          <div class="file-drop" id="fileDrop">
-            <span class="file-drop-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="14" height="14" rx="2"/><path d="m17 10 4-2v8l-4-2z"/></svg></span>
-            <div class="file-drop-body"><input name="source_path" placeholder="选择视频或粘贴绝对路径"><small>点击浏览从系统文件选择器关联本机视频，也可直接粘贴绝对路径；文件不会被复制。</small></div>
-            <button class="button ghost small" type="button" id="pickSourceButton">浏览</button>
-          </div>
-          <label class="field">成片名称<input name="title" placeholder="留空则使用素材文件名"><small>最终输出为“成片名称.mp4”。</small></label>
-        </section>
+        <div id="sectionDirectMode" style="display:grid;gap:1.5rem">
+          <section class="form-section">
+            <header class="section-head"><i>1</i><div><b>直播素材</b><small>选择本机视频并命名成片</small></div></header>
+            <div class="file-drop" id="fileDrop">
+              <span class="file-drop-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="14" height="14" rx="2"/><path d="m17 10 4-2v8l-4-2z"/></svg></span>
+              <div class="file-drop-body"><input name="source_path" placeholder="选择视频或粘贴绝对路径"><small>点击浏览从系统文件选择器关联本机视频，也可直接粘贴绝对路径；文件不会被复制。</small></div>
+              <button class="button ghost small" type="button" id="pickSourceButton">浏览</button>
+            </div>
+            <label class="field">成片名称<input name="title" placeholder="留空则使用素材文件名"><small>最终输出为“成片名称.mp4”；同名成片自动加序号（-1、-2…），不会覆盖已有视频。</small></label>
+            <label class="field">商品名称<input name="product_name" placeholder="本次要剪辑的商品，如：毛衣、裤子（可留空）"><small>用于判定主商品：主推其它商品的句子会被剔除，把该商品当搭配/对比的会保留。</small></label>
+            <label class="field">输出形态
+              <select name="export_mode">
+                <option value="merge" selected>合并版（输出一条成片）</option>
+                <option value="segments">分段版（每段导出到「成片名称」子文件夹，保持源响度）</option>
+              </select>
+            </label>
+            <div class="file-drop" id="exportDrop">
+              <span class="file-drop-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></span>
+              <div class="file-drop-body"><input name="export_dir" placeholder="导出位置（可留空，留空则用任务工作目录）"><small>选择一次后会记住，作为后续任务默认导出位置；同名文件自动加序号，不覆盖。</small></div>
+              <button class="button ghost small" type="button" id="pickExportButton">选择文件夹</button>
+            </div>
+          </section>
+          <section class="form-section">
+            <header class="section-head"><i>2</i><div><b>目标时长范围</b><small>成片总时长控制范围（秒），默认 70–90 秒，可自定义输入</small></div></header>
+            <div class="range-inputs">
+              <label class="field">
+                <span class="field-label">最短时长（秒）</span>
+                <input type="number" name="target_min" min="10" max="600" step="1" value="70">
+              </label>
+              <span class="range-sep">至</span>
+              <label class="field">
+                <span class="field-label">最长时长（秒）</span>
+                <input type="number" name="target_max" min="15" max="600" step="1" value="90">
+              </label>
+            </div>
+            <div class="duration-presets" id="durationPresets">
+              <button type="button" class="preset-chip" data-min="45" data-max="60">45–60s 紧凑</button>
+              <button type="button" class="preset-chip active" data-min="70" data-max="90">70–90s 默认</button>
+              <button type="button" class="preset-chip" data-min="90" data-max="120">90–120s 充实</button>
+              <button type="button" class="preset-chip" data-min="120" data-max="180">120–180s 深度</button>
+            </div>
+            <small class="field-hint">AI 排序编排（S4）将按设定时长精选并组装最佳卖点句单元。</small>
+          </section>
+        </div>
 
         <section class="form-section" id="sectionTimelineMode" style="display:none">
           <header class="section-head"><i>1</i><div><b>剪映虚拟时间线</b><small>选择剪映草稿目录、draft_content.json 或时间线 JSON</small></div></header>

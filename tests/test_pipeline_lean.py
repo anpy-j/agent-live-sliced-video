@@ -2,14 +2,25 @@
 """精简管线单元测试：S1 切分、S2 粗筛、S3/S4 契约校验、AI 原语选择。"""
 import json
 import os
+import re
+import tempfile
 import unittest
 from unittest.mock import patch
 
+from agent_video.engine.scripts import badvocab
+from agent_video.engine.scripts.asr_backend import resolve_cpu_threads
 from agent_video.pipeline import ai as pipeline_ai
 from agent_video.pipeline.ai import DECISION_SCHEMA, ORDER_SCHEMA
 from agent_video.pipeline.errors import AIReturnError, PipelineConfigError
-from agent_video.pipeline.filter import filter_clauses, normalize
-from agent_video.pipeline.run import _judge_batches, _validate_decisions, _validate_order
+from agent_video.pipeline.filter import (activate_account_vocab, filter_clauses,
+                                         normalize)
+from agent_video.pipeline import run as pipeline_run
+from agent_video.pipeline.run import (_judge_batches, _judge_concurrency,
+                                      _judge_prompt, _judge_retries,
+                                      _next_render_output, _order_prompt,
+                                      _run_judge_batches, _safe_output_stem,
+                                      _validate_decisions, _validate_order,
+                                      next_available_dir)
 from agent_video.pipeline.split import split_clauses
 from agent_video.pipeline.units import build_units, order_candidates
 
@@ -155,6 +166,26 @@ class FilterTest(unittest.TestCase):
         rows = filter_clauses([self.clause(0, "这条马甲的版型很正")])
         self.assertTrue(rows[0]["usable"])
 
+    def test_brand_names_are_hard_blocked(self):
+        rows = filter_clauses([
+            self.clause(0, "对这件衣服就是今年香奈儿的最新款"),
+            self.clause(1, "专门打迪奥的外套"),
+            self.clause(2, "它是做到的一个羊毛小香"),
+            self.clause(3, "这件羊毛马甲版型很正"),
+            self.clause(4, "这是一件小香风的外套"),
+            self.clause(5, "小香家同款"),
+        ])
+        self.assertFalse(rows[0]["usable"])
+        self.assertEqual(rows[0]["reason"], "hard_vocab")
+        self.assertFalse(rows[1]["usable"])
+        self.assertEqual(rows[1]["reason"], "hard_vocab")
+        self.assertFalse(rows[2]["usable"])
+        self.assertEqual(rows[2]["reason"], "hard_vocab")
+        self.assertTrue(rows[3]["usable"])
+        self.assertTrue(rows[4]["usable"])
+        self.assertFalse(rows[5]["usable"])
+        self.assertEqual(rows[5]["reason"], "hard_vocab")
+
     def test_price_and_live_chatter_blocked(self):
         rows = filter_clauses([
             self.clause(0, "拍它上链接"),
@@ -182,6 +213,52 @@ class FilterTest(unittest.TestCase):
 
     def test_normalize_strips_punctuation(self):
         self.assertEqual(normalize("马甲，很显瘦！"), normalize("马甲很显瘦"))
+
+
+class AccountVocabFilterTest(unittest.TestCase):
+    """S2 必须应用账号级红线词表：价格/现货/发货/库存/尺码/优惠券等命中即硬禁。"""
+
+    def clause(self, cid, text, start=0.0, end=2.0):
+        return {"id": cid, "text": text, "start": start, "end": end,
+                "usable": None, "reason": "", "order": None, "split_from": None}
+
+    def setUp(self):
+        activate_account_vocab()
+
+    def tearDown(self):
+        badvocab.set_profile({}, None)
+
+    def test_account_redline_words_are_hard_blocked(self):
+        rows = filter_clauses([
+            self.clause(0, "这个价格真的很划算"),
+            self.clause(1, "现在都是现货不用等"),
+            self.clause(2, "拍下发货很快"),
+            self.clause(3, "库存已经不多了"),
+            self.clause(4, "尺码做的很正"),
+            self.clause(5, "下单再送一张优惠券"),
+        ])
+        for row in rows:
+            self.assertFalse(row["usable"], row["text"])
+            self.assertEqual(row["reason"], "hard_vocab", row["text"])
+
+    def test_normal_selling_points_stay_usable(self):
+        rows = filter_clauses([
+            self.clause(0, "这件马甲上身特别显瘦"),
+            self.clause(1, "面料是百分百羊毛很软"),
+            self.clause(2, "小香风的设计很高级"),
+        ])
+        for row in rows:
+            self.assertTrue(row["usable"], row["text"])
+            self.assertEqual(row["reason"], "", row["text"])
+
+    def test_pipeline_activation_reports_strict_profile(self):
+        self.assertTrue(str(activate_account_vocab()).endswith("douyin-strict.json"))
+
+    def test_off_falls_back_to_plain_vocab(self):
+        badvocab.set_profile({}, None)
+        self.assertIsNone(activate_account_vocab("none"))
+        rows = filter_clauses([self.clause(0, "这个价格真的很划算")])
+        self.assertTrue(rows[0]["usable"])
 
 
 class DecisionContractTest(unittest.TestCase):
@@ -230,28 +307,43 @@ class OrderContractTest(unittest.TestCase):
         return [{"id": 0, "text": "a", "start": 0.0, "end": 3.0},
                 {"id": 1, "text": "b", "start": 3.0, "end": 6.0}]
 
+    @staticmethod
+    def order(sections, ordered_ids, main_product="马甲"):
+        return {"main_product": main_product, "sections": sections,
+                "ordered_ids": ordered_ids}
+
     def test_valid_order(self):
-        main, ids, total = _validate_order(
-            {"main_product": "马甲", "ordered_ids": [1, 0]}, self.candidates(),
-            (5.0, 7.0), 1.0)
+        main, ids, total, sections = _validate_order(
+            self.order([{"role": "hook", "ids": [1]},
+                        {"role": "selling_point", "ids": [0]}], [1, 0]),
+            self.candidates(), (5.0, 7.0), 1.0)
         self.assertEqual(main, "马甲")
         self.assertEqual(ids, [1, 0])
+        self.assertEqual(sections[0]["role"], "hook")
         self.assertAlmostEqual(total, 6.0)
+
+    def test_below_target_is_accepted_when_available_is_short(self):
+        candidates = [{"id": 0, "text": "a", "start": 0.0, "end": 3.0}]
+        main, ids, total, sections = _validate_order(
+            self.order([{"role": "hook", "ids": [0]}], [0]), candidates,
+            (5.0, 7.0), 1.0, available=3.0)
+        self.assertEqual(ids, [0])
+        self.assertAlmostEqual(total, 3.0)
 
     def test_out_of_range_total_is_rejected(self):
         with self.assertRaises(AIReturnError):
-            _validate_order({"main_product": "马甲", "ordered_ids": [0]},
+            _validate_order(self.order([{"role": "hook", "ids": [0]}], [0]),
                             self.candidates(), (5.0, 7.0), 1.0)
 
     def test_out_of_range_id_is_rejected(self):
         with self.assertRaises(AIReturnError):
-            _validate_order({"main_product": "马甲", "ordered_ids": [9]},
+            _validate_order(self.order([{"role": "hook", "ids": [9]}], [9]),
                             self.candidates(), (5.0, 7.0), 1.0)
 
     def test_long_unit_may_push_total_over_the_upper_bound(self):
         candidates = [{"id": 0, "text": "a", "start": 0.0, "end": 12.0}]
-        main, ids, total = _validate_order(
-            {"main_product": "马甲", "ordered_ids": [0]}, candidates, (5.0, 7.0), 1.0)
+        main, ids, total, sections = _validate_order(
+            self.order([{"role": "hook", "ids": [0]}], [0]), candidates, (5.0, 7.0), 1.0)
         self.assertEqual(ids, [0])
         self.assertAlmostEqual(total, 12.0)
 
@@ -259,8 +351,34 @@ class OrderContractTest(unittest.TestCase):
         candidates = [{"id": 0, "text": "a", "start": 0.0, "end": 12.0},
                       {"id": 1, "text": "b", "start": 12.0, "end": 15.0}]
         with self.assertRaises(AIReturnError):
-            _validate_order({"main_product": "马甲", "ordered_ids": [0, 1]},
+            _validate_order(self.order([{"role": "hook", "ids": [0, 1]}], [0, 1]),
                             candidates, (5.0, 7.0), 1.0)
+
+    def test_hook_must_open_the_order(self):
+        with self.assertRaises(AIReturnError):
+            _validate_order(
+                self.order([{"role": "selling_point", "ids": [0, 1]}], [0, 1]),
+                self.candidates(), (5.0, 7.0), 1.0)
+
+    def test_cta_must_close_the_order(self):
+        candidates = [{"id": i, "text": str(i), "start": float(i), "end": float(i) + 2.0}
+                      for i in range(3)]
+        with self.assertRaises(AIReturnError):
+            _validate_order(
+                self.order([{"role": "hook", "ids": [0]},
+                            {"role": "cta", "ids": [1]},
+                            {"role": "proof", "ids": [2]}], [0, 1, 2]),
+                candidates, (4.0, 8.0), 1.0)
+
+    def test_sections_and_ordered_ids_must_agree(self):
+        with self.assertRaises(AIReturnError):
+            _validate_order(self.order([{"role": "hook", "ids": [0, 1]}], [1, 0]),
+                            self.candidates(), (5.0, 7.0), 1.0)
+
+    def test_invalid_role_is_rejected(self):
+        with self.assertRaises(AIReturnError):
+            _validate_order(self.order([{"role": "intro", "ids": [0, 1]}], [0, 1]),
+                            self.candidates(), (5.0, 7.0), 1.0)
 
 
 class AiPrimitiveTest(unittest.TestCase):
@@ -285,7 +403,170 @@ class AiPrimitiveTest(unittest.TestCase):
 
     def test_schema_shapes_are_stable(self):
         self.assertEqual(DECISION_SCHEMA["required"], ["decisions"])
-        self.assertEqual(ORDER_SCHEMA["required"], ["main_product", "ordered_ids"])
+        self.assertEqual(ORDER_SCHEMA["required"],
+                         ["main_product", "sections", "ordered_ids"])
+
+    def test_sections_schema_translates_for_jev(self):
+        questions = pipeline_ai._schema_to_questions(ORDER_SCHEMA)
+        self.assertIn("sections", questions)
+        parsed = pipeline_ai._answers_to_object(ORDER_SCHEMA, {"answers": {
+            "main_product": {"text": "毛衣"},
+            "sections": {"text": "hook:1,2;scene:3"},
+            "ordered_ids": {"text": "1,2,3"},
+        }})
+        self.assertEqual(parsed["sections"],
+                         [{"role": "hook", "ids": [1, 2]},
+                          {"role": "scene", "ids": [3]}])
+        self.assertEqual(parsed["ordered_ids"], [1, 2, 3])
+
+
+class RenderOutputNameTest(unittest.TestCase):
+    def test_default_stem_is_final(self):
+        with tempfile.TemporaryDirectory() as temp:
+            self.assertEqual(os.path.basename(_next_render_output(temp)), "final.mp4")
+
+    def test_custom_stem_versions_without_overwrite(self):
+        with tempfile.TemporaryDirectory() as temp:
+            os.makedirs(os.path.join(temp, "deliverables"))
+            first = _next_render_output(temp, "伯恩夫人0926")
+            self.assertEqual(os.path.basename(first), "伯恩夫人0926.mp4")
+            open(first, "w", encoding="utf-8").close()
+            second = _next_render_output(temp, "伯恩夫人0926")
+            self.assertEqual(os.path.basename(second), "伯恩夫人0926-1.mp4")
+            open(second, "w", encoding="utf-8").close()
+            third = _next_render_output(temp, "伯恩夫人0926")
+            self.assertEqual(os.path.basename(third), "伯恩夫人0926-2.mp4")
+
+    def test_unsafe_stem_is_sanitized(self):
+        self.assertEqual(_safe_output_stem('a/b:c*?"<>|'), "a-b-c")
+        self.assertEqual(_safe_output_stem("  ... "), "final")
+        self.assertEqual(_safe_output_stem(None), "final")
+
+    def test_next_available_dir_increments(self):
+        with tempfile.TemporaryDirectory() as temp:
+            first = next_available_dir(temp, "伯恩夫人0926")
+            self.assertEqual(os.path.basename(first), "伯恩夫人0926")
+            os.makedirs(first)
+            second = next_available_dir(temp, "伯恩夫人0926")
+            self.assertEqual(os.path.basename(second), "伯恩夫人0926-1")
+
+
+class ProductPromptTest(unittest.TestCase):
+    def test_judge_prompt_carries_target_product(self):
+        units = [{"id": 0, "members": [{"id": 1, "text": "这条裤子很好看"}]}]
+        self.assertIn("主商品是「毛衣」", _judge_prompt(units, "毛衣"))
+        self.assertIn("主商品未知", _judge_prompt(units, None))
+
+    def test_order_prompt_carries_target_product(self):
+        cands = [{"id": 0, "text": "a", "start": 0.0, "end": 3.0}]
+        self.assertIn("固定为「毛衣」", _order_prompt(cands, (5.0, 7.0), "毛衣"))
+        self.assertIn("main_product 给出本片主商品", _order_prompt(cands, (5.0, 7.0), None))
+
+    def test_order_prompt_warns_when_material_below_target(self):
+        cands = [{"id": 0, "text": "a", "start": 0.0, "end": 3.0}]
+        self.assertIn("已低于目标下限", _order_prompt(cands, (5.0, 7.0), None, 3.0))
+        self.assertNotIn("已低于目标下限", _order_prompt(cands, (5.0, 7.0), None, 30.0))
+
+
+class AsrThreadsTest(unittest.TestCase):
+    def test_default_uses_all_cores_minus_two(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DOUYIN_WHISPER_THREADS", None)
+            self.assertEqual(resolve_cpu_threads(20), 18)
+            self.assertEqual(resolve_cpu_threads(2), 1)
+
+    def test_env_override_wins(self):
+        with patch.dict(os.environ, {"DOUYIN_WHISPER_THREADS": "12"}):
+            self.assertEqual(resolve_cpu_threads(20), 12)
+
+    def test_invalid_env_falls_back(self):
+        with patch.dict(os.environ, {"DOUYIN_WHISPER_THREADS": "abc"}):
+            self.assertEqual(resolve_cpu_threads(20), 18)
+
+
+class JudgeConcurrencyTest(unittest.TestCase):
+    def unit(self, uid, size):
+        return {"id": uid,
+                "members": [{"id": uid * 100 + i, "text": f"句{uid * 100 + i}"}
+                            for i in range(size)]}
+
+    def fake_ai_call(self, model, prompt, schema, timeout):
+        ids = [int(value) for value in re.findall(r'"id":\s*(\d+)', prompt)]
+        return {"decisions": [{"id": cid, "usable": cid % 2 == 0, "reason": "fake"}
+                              for cid in ids]}
+
+    def test_concurrency_config_falls_back_to_serial(self):
+        self.assertEqual(_judge_concurrency(None), 1)
+        self.assertEqual(_judge_concurrency("abc"), 1)
+        self.assertEqual(_judge_concurrency(0), 1)
+        self.assertEqual(_judge_concurrency(-3), 1)
+        self.assertEqual(_judge_concurrency(4), 4)
+        self.assertEqual(_judge_concurrency("8"), 8)
+
+    def test_concurrent_merges_every_id_exactly_once(self):
+        batches = [list(_judge_batches([self.unit(i, 30)], 120))[0] for i in range(10)]
+        with patch.object(pipeline_run, "ai_call", side_effect=self.fake_ai_call):
+            serial, serial_calls = _run_judge_batches("auto", batches, None, 5, 1)
+            concurrent, concurrent_calls = _run_judge_batches("auto", batches, None, 5, 4)
+        expected = {uid * 100 + i for uid in range(10) for i in range(30)}
+        self.assertEqual(set(serial), expected)
+        self.assertEqual(set(concurrent), expected)
+        self.assertEqual(serial, concurrent)
+        self.assertEqual((serial_calls, concurrent_calls), (10, 10))
+
+    def test_concurrent_propagates_batch_failure(self):
+        batches = [list(_judge_batches([self.unit(i, 10)], 120))[0] for i in range(4)]
+
+        def flaky(model, prompt, schema, timeout):
+            if '"id": 100' in prompt:
+                raise AIReturnError("S3 返回缺少 decisions 数组")
+            return self.fake_ai_call(model, prompt, schema, timeout)
+
+        with patch.object(pipeline_run, "ai_call", side_effect=flaky):
+            with self.assertRaises(AIReturnError):
+                _run_judge_batches("auto", batches, None, 5, 4)
+
+    def test_judge_retries_config_falls_back(self):
+        self.assertEqual(_judge_retries(None), 1)
+        self.assertEqual(_judge_retries("abc"), 1)
+        self.assertEqual(_judge_retries(-1), 1)
+        self.assertEqual(_judge_retries(0), 0)
+        self.assertEqual(_judge_retries(2), 2)
+
+    def test_retry_recovers_transient_missing_id(self):
+        batches = [list(_judge_batches([self.unit(i, 5)], 120))[0] for i in range(3)]
+        seen = {}
+
+        def flaky(model, prompt, schema, timeout):
+            unit = re.search(r'"unit":\s*(\d+)', prompt).group(1)
+            seen[unit] = seen.get(unit, 0) + 1
+            if unit == "1" and seen[unit] == 1:
+                ids = [int(value) for value in re.findall(r'"id":\s*(\d+)', prompt)]
+                return {"decisions": [{"id": cid, "usable": True, "reason": "x"}
+                                      for cid in ids[:-1]]}  # 首次漏掉一个 id
+            return self.fake_ai_call(model, prompt, schema, timeout)
+
+        with patch.object(pipeline_run, "ai_call", side_effect=flaky):
+            decisions, calls = _run_judge_batches("auto", batches, None, 5, 2, 1)
+        self.assertEqual(len(decisions), 15)
+        self.assertEqual(calls, 4)  # 3 批 + 1 次重试
+
+    def test_retry_zero_still_raises_and_counts_attempt(self):
+        batches = [list(_judge_batches([self.unit(0, 5)], 120))[0]]
+
+        def bad(model, prompt, schema, timeout):
+            return {"decisions": []}
+
+        with patch.object(pipeline_run, "ai_call", side_effect=bad):
+            with self.assertRaises(AIReturnError):
+                _run_judge_batches("auto", batches, None, 5, 1, 0)
+
+    def test_env_defaults_to_serial(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PIPELINE_JUDGE_CONCURRENCY", None)
+            self.assertEqual(_judge_concurrency(os.environ.get("PIPELINE_JUDGE_CONCURRENCY")), 1)
+        with patch.dict(os.environ, {"PIPELINE_JUDGE_CONCURRENCY": "4"}):
+            self.assertEqual(_judge_concurrency(os.environ["PIPELINE_JUDGE_CONCURRENCY"]), 4)
 
 
 if __name__ == "__main__":

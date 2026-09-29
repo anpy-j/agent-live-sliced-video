@@ -112,7 +112,9 @@ class Store:
                   workspace TEXT NOT NULL,
                   error TEXT,
                   job_type TEXT NOT NULL DEFAULT 'direct',
-                  timeline_meta_json TEXT
+                  timeline_meta_json TEXT,
+                  target_seconds TEXT DEFAULT '70-90',
+                  run_stage TEXT
                 );
                 CREATE TABLE IF NOT EXISTS stages (
                   job_id TEXT NOT NULL,
@@ -174,24 +176,48 @@ class Store:
                 con.execute("ALTER TABLE jobs ADD COLUMN job_type TEXT NOT NULL DEFAULT 'direct'")
             if "timeline_meta_json" not in columns:
                 con.execute("ALTER TABLE jobs ADD COLUMN timeline_meta_json TEXT")
+            if "target_seconds" not in columns:
+                con.execute("ALTER TABLE jobs ADD COLUMN target_seconds TEXT DEFAULT '70-90'")
+            if "run_stage" not in columns:
+                con.execute("ALTER TABLE jobs ADD COLUMN run_stage TEXT")
+            if "export_dir" not in columns:
+                con.execute("ALTER TABLE jobs ADD COLUMN export_dir TEXT")
+            if "product_name" not in columns:
+                con.execute("ALTER TABLE jobs ADD COLUMN product_name TEXT")
+            if "export_mode" not in columns:
+                con.execute("ALTER TABLE jobs ADD COLUMN export_mode TEXT DEFAULT 'merge'")
+            if "edit_count" not in columns:
+                con.execute("ALTER TABLE jobs ADD COLUMN edit_count INTEGER NOT NULL DEFAULT 0")
+            if "delivered" not in columns:
+                con.execute("ALTER TABLE jobs ADD COLUMN delivered INTEGER NOT NULL DEFAULT 0")
 
     def create_job(self, *, title: str, source_path: str, workspace: str,
-                   job_type: str = "direct", timeline_meta: dict[str, Any] | None = None) -> str:
+                   job_type: str = "direct", timeline_meta: dict[str, Any] | None = None,
+                   target_seconds: str = "70-90",
+                   export_dir: str | None = None,
+                   product_name: str | None = None,
+                   export_mode: str = "merge") -> str:
         job_id = f"job_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
         now = utc_now()
         first_stage = STAGE_DEFINITIONS[0][0]
         meta_json = _json(timeline_meta) if timeline_meta else None
         with self.connect() as con:
             con.execute(
-                "INSERT INTO jobs(id,title,source_path,status,current_stage,progress,created_at,updated_at,workspace,job_type,timeline_meta_json) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (job_id, title, source_path, "queued", first_stage, 0, now, now, workspace, job_type, meta_json),
+                "INSERT INTO jobs(id,title,source_path,status,current_stage,progress,created_at,updated_at,workspace,"
+                "job_type,timeline_meta_json,target_seconds,export_dir,product_name,export_mode) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (job_id, title, source_path, "queued", first_stage, 0, now, now, workspace,
+                 job_type, meta_json, target_seconds, export_dir, product_name, export_mode),
             )
             con.executemany(
                 "INSERT INTO stages(job_id,stage_id,name,position) VALUES(?,?,?,?)",
                 [(job_id, stage_id, name, position) for stage_id, name, position in STAGE_DEFINITIONS],
             )
-        event_payload: dict[str, Any] = {"source_path": source_path, "job_type": job_type}
+        event_payload: dict[str, Any] = {
+            "source_path": source_path,
+            "job_type": job_type,
+            "target_seconds": target_seconds,
+        }
         if timeline_meta:
             event_payload["timeline_id"] = timeline_meta.get("timeline_id")
             event_payload["duration"] = timeline_meta.get("total_duration")
@@ -259,6 +285,20 @@ class Store:
         with self.connect() as con:
             con.execute("UPDATE jobs SET updated_at=? WHERE id=?", (utc_now(), job_id))
 
+    def bump_edit_count(self, job_id: str) -> None:
+        """一次成片产出 = 剪辑一次；并清掉上一轮的「已剪辑」标记。"""
+        with self.connect() as con:
+            con.execute(
+                "UPDATE jobs SET edit_count=edit_count+1, delivered=0, updated_at=? WHERE id=?",
+                (utc_now(), job_id),
+            )
+
+    def mark_delivered(self, job_id: str) -> bool:
+        with self.connect() as con:
+            cur = con.execute("UPDATE jobs SET delivered=1, updated_at=? WHERE id=?",
+                              (utc_now(), job_id))
+            return cur.rowcount > 0
+
     def delete_job(self, job_id: str) -> bool:
         with self.connect() as con:
             cur = con.execute("DELETE FROM jobs WHERE id=?", (job_id,))
@@ -268,8 +308,9 @@ class Store:
         now = utc_now()
         with self.connect() as con:
             con.execute(
-                "UPDATE jobs SET status='queued', current_stage=?, progress=0, "
-                "error=NULL, started_at=NULL, finished_at=NULL, updated_at=? WHERE id=?",
+                "UPDATE jobs SET status='queued', current_stage=?, progress=0, run_stage=NULL, "
+                "error=NULL, started_at=NULL, finished_at=NULL, delivered=0, updated_at=? "
+                "WHERE id=?",
                 (STAGE_DEFINITIONS[0][0], now, job_id),
             )
             con.execute(
@@ -279,6 +320,39 @@ class Store:
             )
             con.execute("DELETE FROM artifacts WHERE job_id=?", (job_id,))
         self.add_event(job_id, None, "info", "job_restarted", "任务已重置并重新开始执行")
+
+    def prepare_stage_rerun(self, job_id: str, stage_id: str) -> None:
+        """重置目标节点及其下游状态，同时保留上游状态和历史渲染产物。"""
+        positions = {sid: position for sid, _, position in STAGE_DEFINITIONS}
+        if stage_id not in {"filter", "judge", "order", "render"}:
+            raise ValueError(f"不支持单节点重跑：{stage_id}")
+        position = positions[stage_id]
+        previous_progress = max((pos for pos in positions.values() if pos < position), default=0)
+        downstream = [sid for sid, pos in positions.items() if pos >= position]
+        placeholders = ",".join("?" for _ in downstream)
+        now = utc_now()
+        with self.connect() as con:
+            con.execute(
+                "UPDATE jobs SET status='queued', current_stage=?, progress=?, run_stage=?, "
+                "error=NULL, started_at=NULL, finished_at=NULL, updated_at=? WHERE id=?",
+                (stage_id, previous_progress, stage_id, now, job_id),
+            )
+            con.execute(
+                f"UPDATE stages SET status='pending', progress=0, message='', started_at=NULL, "
+                f"finished_at=NULL, result_json=NULL, error=NULL "
+                f"WHERE job_id=? AND stage_id IN ({placeholders})",
+                (job_id, *downstream),
+            )
+            # 历史成片必须保留；仅移除将被重算的 JSON 节点登记。
+            cleared_artifacts = [sid for sid in downstream if sid != "render"]
+            if cleared_artifacts:
+                artifact_marks = ",".join("?" for _ in cleared_artifacts)
+                con.execute(
+                    f"DELETE FROM artifacts WHERE job_id=? AND stage_id IN ({artifact_marks})",
+                    (job_id, *cleared_artifacts),
+                )
+        self.add_event(job_id, stage_id, "info", "stage_requeued",
+                       f"{stage_id} 已加入单节点重跑队列")
 
     def update_stage(self, job_id: str, stage_id: str, **fields: Any) -> None:
         if not fields:

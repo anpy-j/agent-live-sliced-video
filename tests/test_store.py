@@ -131,6 +131,33 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(data["total"], 2)
         self.assertEqual(data["active"], 2)
 
+    def test_target_seconds_is_persisted_and_defaults_to_70_90(self):
+        default_id = self.store.create_job(title="默认", source_path="/tmp/def.mp4", workspace="/tmp/def")
+        custom_id = self.store.create_job(title="自定义", source_path="/tmp/cust.mp4", workspace="/tmp/cust",
+                                           target_seconds="45-60")
+        self.assertEqual(self.store.get_job(default_id)["target_seconds"], "70-90")
+        self.assertEqual(self.store.get_job(custom_id)["target_seconds"], "45-60")
+
+    def test_edit_count_and_delivered_lifecycle(self):
+        job_id = self.store.create_job(title="计数", source_path="/tmp/c.mp4",
+                                       workspace="/tmp/count")
+        self.assertEqual(self.store.get_job(job_id)["edit_count"], 0)
+        self.assertEqual(self.store.get_job(job_id)["delivered"], 0)
+
+        self.store.bump_edit_count(job_id)
+        self.store.mark_delivered(job_id)
+        job = self.store.get_job(job_id)
+        self.assertEqual(job["edit_count"], 1)
+        self.assertEqual(job["delivered"], 1)
+
+        self.store.reset_job(job_id)
+        job = self.store.get_job(job_id)
+        self.assertEqual(job["delivered"], 0)
+        self.assertEqual(job["edit_count"], 1)
+
+        self.store.bump_edit_count(job_id)
+        self.assertEqual(self.store.get_job(job_id)["edit_count"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

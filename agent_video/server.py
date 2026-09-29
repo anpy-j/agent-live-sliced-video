@@ -93,10 +93,40 @@ class Application:
         title = str(payload.get("title") or source.stem).strip()[:120]
         if not title:
             raise ValueError("请填写成片名称")
+        target_min = payload.get("target_min")
+        target_max = payload.get("target_max")
+        target_seconds_str = str(payload.get("target_seconds") or "").strip()
+        if target_min is not None and target_max is not None:
+            try:
+                min_s = float(target_min)
+                max_s = float(target_max)
+                if min_s <= 0 or max_s < min_s:
+                    raise ValueError("最长时长不能小于最短时长，且必须大于 0")
+                target_seconds = f"{min_s:g}-{max_s:g}"
+            except (ValueError, TypeError) as exc:
+                raise ValueError(f"目标时长格式错误: {exc}") from exc
+        elif target_seconds_str:
+            target_seconds = target_seconds_str
+        else:
+            target_seconds = "70-90"
+        raw_export = payload.get("export_dir")
+        if raw_export is None:
+            raw_export = self.store.get_setting("export_dir")
+        export_dir = self._resolve_export_dir(raw_export)
+        if export_dir:
+            self.store.set_setting("export_dir", export_dir)
+        product_name = str(payload.get("product_name") or "").strip()[:60] or None
+        export_mode = str(payload.get("export_mode") or "merge").strip().lower()
+        if export_mode not in {"merge", "segments"}:
+            raise ValueError("输出形态必须是 合并版(merge) 或 分段版(segments)")
         source_workspace = self._source_workspace(source)
         placeholder = source_workspace / "edits" / "pending"
         job_id = self.store.create_job(title=title, source_path=str(source),
-                                       workspace=str(placeholder), job_type="direct")
+                                       workspace=str(placeholder), job_type="direct",
+                                       target_seconds=target_seconds,
+                                       export_dir=export_dir,
+                                       product_name=product_name,
+                                       export_mode=export_mode)
         edit_name = f"{job_id}-{self._path_slug(title, 48)}"
         workspace = source_workspace / "edits" / edit_name
         workspace.mkdir(parents=True, exist_ok=True)
@@ -170,6 +200,17 @@ class Application:
         }
 
     @staticmethod
+    def _resolve_export_dir(value: Any) -> str | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        path = Path(raw).expanduser()
+        if path.exists() and not path.is_dir():
+            raise ValueError(f"导出位置不是文件夹: {path}")
+        path.mkdir(parents=True, exist_ok=True)
+        return str(path.resolve())
+
+    @staticmethod
     def _path_slug(value: str, limit: int = 64) -> str:
         slug = re.sub(r"[\\/:*?\"<>|\s]+", "-", value).strip("-. ")
         return (slug or "untitled")[:limit]
@@ -218,13 +259,28 @@ class Application:
         """成片输出目录与产物清单。"""
         workspace = Path(str(job.get("workspace") or ""))
         folder = workspace / "deliverables"
-        output = folder / "final.mp4"
+        outputs = sorted(folder.glob("*.mp4"),
+                         key=lambda path: (path.stat().st_mtime_ns, path.name)) \
+            if folder.is_dir() else []
+        output = outputs[-1] if outputs else folder / "final.mp4"
+        export_value = str(job.get("export_dir") or "").strip()
+        export_folder = Path(export_value).expanduser() if export_value else None
+        exported = (sorted(export_folder.glob("*.mp4"),
+                           key=lambda path: (path.stat().st_mtime_ns, path.name))
+                    if export_folder and export_folder.is_dir() else [])
         return {
             "folder": str(folder),
-            "exists": output.is_file(),
+            "exists": bool(outputs),
             "output": str(output),
-            "deliverables": [{"title": "成片", "path": str(output), "kind": "video"}]
-            if output.is_file() else [],
+            "export_folder": str(export_folder) if export_folder else "",
+            "exported": [
+                {"title": f"成片（导出）· {path.name}", "path": str(path), "kind": "video"}
+                for path in reversed(exported)
+            ],
+            "deliverables": [
+                {"title": f"成片 · {path.name}", "path": str(path), "kind": "video"}
+                for path in reversed(outputs)
+            ],
         }
 
     @staticmethod
@@ -285,7 +341,9 @@ class Application:
         if not job:
             raise ValueError("任务不存在")
         info = self.deliverable_info(job)
-        folder = Path(info["folder"])
+        folder = Path(info["export_folder"] or info["folder"])
+        if not folder.is_dir():
+            folder = Path(info["folder"])
         if not folder.is_dir():
             raise ValueError(f"成片文件夹尚未生成: {folder}")
         if sys.platform == "win32":
@@ -297,8 +355,12 @@ class Application:
         return {"opened": True, "folder": str(folder)}
 
     def _pick_file_macos(self, kind: str = "video") -> dict[str, Any]:
-        prompt = "选择剪映草稿或虚拟时间线文件" if kind in {"timeline", "draft", "json"} else "选择直播视频素材"
-        script = f'POSIX path of (choose file with prompt "{prompt}")'
+        if kind == "dir":
+            script = 'POSIX path of (choose folder with prompt "选择成片导出位置")'
+        elif kind in {"timeline", "draft", "json"}:
+            script = 'POSIX path of (choose file with prompt "选择剪映草稿或虚拟时间线文件")'
+        else:
+            script = 'POSIX path of (choose file with prompt "选择直播视频素材")'
         result = subprocess.run(["/usr/bin/osascript", "-e", script], capture_output=True,
                                 text=True, encoding="utf-8", errors="replace", timeout=300)
         if result.returncode:
@@ -306,6 +368,8 @@ class Application:
             if "User canceled" in message or "-128" in message:
                 return {"cancelled": True}
             raise ValueError(message or "无法打开文件选择器")
+        if kind == "dir":
+            return self._picked_dir_result(result.stdout.strip())
         return self._picked_file_result(result.stdout.strip(), kind=kind)
 
     def _pick_video_file_macos(self) -> dict[str, Any]:
@@ -315,14 +379,64 @@ class Application:
         powershell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
         if not powershell:
             raise ValueError("未找到 PowerShell，无法打开 Windows 文件选择器")
-        if kind in {"timeline", "draft", "json"}:
+        if kind == "dir":
+            script = r"""
+Add-Type -AssemblyName System.Windows.Forms
+$owner = New-Object System.Windows.Forms.Form
+$owner.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+$owner.Size = New-Object System.Drawing.Size(1, 1)
+$owner.ShowInTaskbar = $false
+$owner.TopMost = $true
+$owner.Opacity = 0
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+$dialog.Description = '选择成片导出位置'
+$dialog.ShowNewFolderButton = $true
+$owner.Show()
+$owner.Activate()
+try {
+    if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) {
+        [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($dialog.SelectedPath))
+    }
+} finally {
+    $dialog.Dispose()
+    $owner.Close()
+    $owner.Dispose()
+}
+"""
+        elif kind in {"timeline", "draft", "json"}:
             title = "选择剪映草稿或虚拟时间线"
             filter_spec = ("时间线/草稿 (*.json;draft_content.json)|*.json;draft_content.json|所有文件 (*.*)|*.*")
+            script = rf"""
+Add-Type -AssemblyName System.Windows.Forms
+$owner = New-Object System.Windows.Forms.Form
+$owner.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+$owner.Size = New-Object System.Drawing.Size(1, 1)
+$owner.ShowInTaskbar = $false
+$owner.TopMost = $true
+$owner.Opacity = 0
+$dialog = New-Object System.Windows.Forms.OpenFileDialog
+$dialog.Title = '{title}'
+$dialog.Filter = '{filter_spec}'
+$dialog.Multiselect = $false
+$dialog.CheckFileExists = $true
+$dialog.RestoreDirectory = $true
+$owner.Show()
+$owner.Activate()
+try {{
+    if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) {{
+        [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($dialog.FileName))
+    }}
+}} finally {{
+    $dialog.Dispose()
+    $owner.Close()
+    $owner.Dispose()
+}}
+"""
         else:
             title = "选择直播视频素材"
             filter_spec = ("视频文件 (*.mp4;*.mov;*.mkv;*.m4v;*.avi;*.webm;*.ts)|"
                            "*.mp4;*.mov;*.mkv;*.m4v;*.avi;*.webm;*.ts|所有文件 (*.*)|*.*")
-        script = rf"""
+            script = rf"""
 Add-Type -AssemblyName System.Windows.Forms
 $owner = New-Object System.Windows.Forms.Form
 $owner.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
@@ -365,6 +479,8 @@ try {{
             raw_path = base64.b64decode(encoded_path, validate=True).decode("utf-8")
         except (ValueError, UnicodeDecodeError) as exc:
             raise ValueError("Windows 文件选择器返回了无效路径") from exc
+        if kind == "dir":
+            return self._picked_dir_result(raw_path)
         return self._picked_file_result(raw_path, kind=kind)
 
     def _pick_video_file_windows(self) -> dict[str, Any]:
@@ -386,6 +502,14 @@ try {{
     def _picked_video_result(raw_path: str) -> dict[str, Any]:
         return Application._picked_file_result(raw_path, kind="video")
 
+    @staticmethod
+    def _picked_dir_result(raw_path: str) -> dict[str, Any]:
+        path = Path(raw_path).expanduser().resolve()
+        if path.exists() and not path.is_dir():
+            raise ValueError("请选择一个文件夹")
+        path.mkdir(parents=True, exist_ok=True)
+        return {"cancelled": False, "path": str(path), "name": path.name or str(path)}
+
     def invoke_tool(self, name: str, args: dict[str, Any]) -> Any:
         if name == "create_video_job":
             return self.create_job(args)
@@ -401,7 +525,7 @@ try {{
             job_id = str(args.get("job_id", ""))
             if not self.store.get_job(job_id):
                 raise KeyError("任务不存在")
-            self.runner.restart(job_id)
+            self.runner.retry(job_id)
             return {"job_id": job_id, "queued": True}
         if name == "restart_video_job":
             job_id = str(args.get("job_id", ""))
@@ -413,11 +537,16 @@ try {{
         if name == "cancel_video_job":
             job_id = str(args.get("job_id", ""))
             return {"job_id": job_id, "cancelled": self.runner.cancel(job_id)}
+        if name == "rerun_video_stage":
+            job_id = str(args.get("job_id", ""))
+            stage_id = str(args.get("stage_id", ""))
+            self.runner.rerun_stage(job_id, stage_id)
+            return {"job_id": job_id, "stage_id": stage_id, "queued": True}
         raise KeyError(f"未知工具: {name}")
 
     def settings(self) -> dict[str, Any]:
         keys = ["engine_python", "skill_path", "mcp_enabled", "mcp_token",
-                "ai_engine", "ai_provider", "ai_model", "jev_base_url"]
+                "ai_engine", "ai_provider", "ai_model", "jev_base_url", "export_dir"]
         result = {key: self.store.get_setting(key) for key in keys}
         raw_jev_key = str(self.store.get_setting("jev_api_key") or "").strip()
         result["jev_api_key_configured"] = bool(raw_jev_key)
@@ -434,7 +563,7 @@ try {{
 
     def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
         allowed = {"engine_python", "skill_path", "mcp_enabled", "ai_engine", "ai_provider",
-                   "ai_model", "jev_api_key", "jev_base_url"}
+                   "ai_model", "jev_api_key", "jev_base_url", "export_dir"}
         if "ai_engine" in payload and str(payload["ai_engine"]) not in {"llm", "jev"}:
             raise ValueError("ai_engine 必须是 llm 或 jev")
         if "ai_provider" in payload and str(payload["ai_provider"]) not in {
@@ -638,15 +767,21 @@ class Handler(BaseHTTPRequestHandler):
                     if action == "cancel":
                         return self.json_response({"cancelled": self.app.runner.cancel(job_id)})
                     if action == "retry":
-                        self.app.runner.restart(job_id)
+                        self.app.runner.retry(job_id)
                         return self.json_response({"queued": True})
                     if action == "restart":
                         self.app.runner.restart(job_id)
                         return self.json_response({"restarted": True})
                     if action == "delete":
                         return self.json_response({"deleted": self.app.runner.delete(job_id)})
+                    if action == "delivered":
+                        return self.json_response({"delivered": self.app.runner.mark_delivered(job_id)})
                     if action == "open-folder":
                         return self.json_response(self.app.open_deliverable_folder(job_id))
+                    if action == "rerun-stage":
+                        stage_id = str(payload.get("stage_id") or "")
+                        self.app.runner.rerun_stage(job_id, stage_id)
+                        return self.json_response({"queued": True, "stage_id": stage_id})
             if path == "/api/mcp/token":
                 return self.json_response({"token": self.app.rotate_token()})
             if path == "/api/label/sessions":

@@ -15,6 +15,12 @@ def tool_specs() -> list[dict[str, Any]]:
             "inputSchema": {"type": "object", "properties": {
                 "source_path": {"type": "string", "description": "本机视频绝对路径"},
                 "title": {"type": "string", "description": "成片名称；留空使用素材文件名"},
+                "export_dir": {"type": "string",
+                               "description": "成片导出目录；留空使用已记住的默认导出位置"},
+                "product_name": {"type": "string",
+                                 "description": "本次要剪辑的主商品（如 毛衣/裤子），用于判定"},
+                "export_mode": {"type": "string", "enum": ["merge", "segments"],
+                                "description": "输出形态：merge 合并版（默认）/ segments 分段版"},
             }, "required": ["source_path"]},
         },
         {
@@ -36,6 +42,18 @@ def tool_specs() -> list[dict[str, Any]]:
             "name": "restart_video_job",
             "description": "从头重新开始一个任务，重置全部阶段与产物。",
             "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]},
+        },
+        {
+            "name": "rerun_video_stage",
+            "description": "只重新执行 S2 规则粗筛、S3 AI 判定或 S4 AI 编排中的一个节点，并保留上游数据。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "string"},
+                    "stage_id": {"type": "string", "enum": ["filter", "judge", "order"]},
+                },
+                "required": ["job_id", "stage_id"],
+            },
         },
         {
             "name": "delete_video_job",

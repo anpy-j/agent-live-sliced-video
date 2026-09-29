@@ -49,6 +49,7 @@ CODEX_MODELS = [
 ]
 
 OPENCODE_FALLBACK_MODELS = [
+    ("jysd/deepseek-v4.1-flash", "deepseek-v4.1-flash"),
     ("opencode-go/gpt-5.6-luna", "gpt-5.6-luna"),
     ("opencode-go/glm-5.3", "glm-5.3"),
     ("openai/gpt-5.6-sol", "gpt-5.6-sol"),
@@ -364,6 +365,20 @@ class CliProvider:
                         return found
                 except (json.JSONDecodeError, TypeError):
                     continue
+            decoder = json.JSONDecoder()
+            pos = 0
+            while pos < len(text):
+                idx = text.find("{", pos)
+                if idx == -1:
+                    break
+                try:
+                    obj, end = decoder.raw_decode(text, idx)
+                    found = cls._find_plan(obj)
+                    if found:
+                        return found
+                    pos = max(end, idx + 1)
+                except (json.JSONDecodeError, TypeError):
+                    pos = idx + 1
             match = re.search(r"(\{[\s\S]*\"main_product\"[\s\S]*\"picks\"[\s\S]*\})", text)
             if match:
                 try:
@@ -496,6 +511,20 @@ class CliProvider:
                         return found
                 except (json.JSONDecodeError, TypeError):
                     continue
+            decoder = json.JSONDecoder()
+            pos = 0
+            while pos < len(text):
+                idx = text.find("{", pos)
+                if idx == -1:
+                    break
+                try:
+                    obj, end = decoder.raw_decode(text, idx)
+                    found = cls._find_object(obj, required_keys)
+                    if found:
+                        return found
+                    pos = max(end, idx + 1)
+                except (json.JSONDecodeError, TypeError):
+                    pos = idx + 1
             match = re.search(r"(\{[\s\S]*\})", text)
             if match:
                 try:
@@ -668,27 +697,54 @@ class AntigravityCli(CliProvider):
         type(self)._model_cache = (now, choices)
         return choices
 
+    _ALIASES: dict[str, str] = {
+        "gemini-3.8-flash": "gemini-3.8-flash-high",
+        "gemini-3.7-flash": "gemini-3.7-flash-high",
+        "gemini-3.6-flash": "gemini-3.6-flash-high",
+        "gemini-3.1-pro": "gemini-3.1-pro-high",
+        "claude-opus-4-6": "claude-opus-4-6-thinking",
+    }
+
+    def normalize_model(self, model: str) -> str:
+        return self._ALIASES.get(model.strip().lower(), model.strip())
+
+    def validate_model(self, model: str) -> None:
+        normalized = self.normalize_model(model)
+        if normalized not in {item[0] for item in self.models()}:
+            raise ValueError(f"{self.display_name} 不支持模型: {model}")
+
     def generate_plan(self, *, model: str, prompt: str, cwd: Path,
                       schema: dict[str, Any] = PLAN_SCHEMA,
                       on_process: Callable[[subprocess.Popen[str]], None] | None = None,
                       timeout: int = DEFAULT_AI_TIMEOUT_SECONDS) -> dict[str, Any]:
         self._ensure_available()
+        model = self.normalize_model(model)
         self.validate_model(model)
         command = [
             str(self.executable), "-p", prompt, "--output-format", "json",
             "--json-schema", json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
             "--print-timeout", f"{timeout}s", "--sandbox", "--disable-slash-commands",
+            "--dangerously-skip-permissions",
         ]
         if model != "auto":
             command.extend(["--model", model])
         started = time.monotonic()
-        with tempfile.TemporaryDirectory(prefix="livecut-antigravity-") as temp_dir:
+        with tempfile.TemporaryDirectory(prefix="livecut-antigravity-",
+                                         ignore_cleanup_errors=True) as temp_dir:
             stdout, stderr, seconds = self._complete(
                 command, cwd=Path(temp_dir), on_process=on_process, timeout=timeout, started=started)
         envelope = self._parse_json(stdout)
         plan = self._find_plan(envelope)
         if not plan:
-            raise RuntimeError("Antigravity 已返回结果，但没有找到 main_product 和 picks")
+            denied = envelope.get("denied_actions") if isinstance(envelope, dict) else None
+            msg = "Antigravity 已返回结果，但没有找到 main_product 和 picks"
+            if denied:
+                msg += f"（工具权限被拒绝：{denied}）"
+            raise ProviderResponseError(
+                msg,
+                {"stdout": stdout[-100000:], "stderr": stderr[-20000:],
+                 "envelope": envelope, "seconds": seconds, "model": model},
+            )
         return {"plan": plan, "raw": envelope, "stderr": stderr.strip(), "seconds": seconds,
                 "usage": self._find_usage(envelope)}
 
@@ -696,25 +752,32 @@ class AntigravityCli(CliProvider):
                       on_process: Callable[[subprocess.Popen[str]], None] | None = None,
                       timeout: int = DEFAULT_AI_TIMEOUT_SECONDS) -> dict[str, Any]:
         self._ensure_available()
+        model = self.normalize_model(model)
         self.validate_model(model)
         required = tuple(schema.get("required") or ())
         command = [
             str(self.executable), "-p", prompt, "--output-format", "json",
             "--json-schema", json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
             "--print-timeout", f"{timeout}s", "--sandbox", "--disable-slash-commands",
+            "--dangerously-skip-permissions",
         ]
         if model != "auto":
             command.extend(["--model", model])
         started = time.monotonic()
-        with tempfile.TemporaryDirectory(prefix="livecut-antigravity-") as temp_dir:
+        with tempfile.TemporaryDirectory(prefix="livecut-antigravity-",
+                                         ignore_cleanup_errors=True) as temp_dir:
             stdout, stderr, seconds = self._complete(
                 command, cwd=Path(temp_dir), on_process=on_process, timeout=timeout,
                 started=started)
         envelope = self._parse_json(stdout)
         data = self._find_object(envelope, required)
         if not data:
+            denied = envelope.get("denied_actions") if isinstance(envelope, dict) else None
+            msg = "Antigravity 已返回结果，但没有找到所需的 JSON 对象"
+            if denied:
+                msg += f"（工具权限被拒绝：{denied}）"
             raise ProviderResponseError(
-                "Antigravity 已返回结果，但没有找到所需的 JSON 对象",
+                msg,
                 {"stdout": stdout[-100000:], "stderr": stderr[-20000:],
                  "envelope": envelope, "seconds": seconds, "model": model},
             )
@@ -896,12 +959,23 @@ class OpenCodeCli(CliProvider):
                 "livecut": {
                     "description": "Return one structured LiveCut edit plan without using tools.",
                     "mode": "primary",
-                    "steps": 1,
                     "permission": {"*": "deny"},
                     "tools": {"*": False},
                 },
             },
         }, ensure_ascii=False, separators=(",", ":"))
+
+    @classmethod
+    def _extract_text(cls, events: list[Any]) -> str:
+        text_parts: list[str] = []
+        for event in events:
+            if isinstance(event, dict):
+                part = event.get("part")
+                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                    text_parts.append(part["text"])
+                elif isinstance(event.get("text"), str):
+                    text_parts.append(event["text"])
+        return "".join(text_parts)
 
     @classmethod
     def _parse_events(cls, stdout: str) -> tuple[list[Any], dict[str, Any] | None]:
@@ -924,11 +998,47 @@ class OpenCodeCli(CliProvider):
                     text_parts.append(event["text"])
         return events, cls._find_plan("".join(text_parts)) if text_parts else None
 
+    _ALIASES: dict[str, str] = {
+        "deepseek-v4.1-flash": "jysd/deepseek-v4.1-flash",
+        "deepseek-flash": "deepseek/deepseek-flash",
+        "deepseek-v4-pro": "deepseek/deepseek-v4-pro",
+        "glm-5.3-flash": "jysd/glm-5.3-flash",
+        "glm-5.2": "jysd/glm-5.2",
+        "glm-5.2-instant": "jysd/glm-5.2-instant",
+        "glm-5.2-reasoning": "jysd/glm-5.2-reasoning",
+        "glm-5.2-reasoning-max": "jysd/glm-5.2-reasoning-max",
+    }
+
+    def normalize_model(self, model: str) -> str:
+        raw = model.strip()
+        if not raw or raw.lower() == "auto":
+            return "auto"
+        model_ids = [item[0] for item in self.models()]
+        id_map = {m.lower(): m for m in model_ids}
+        if raw.lower() in id_map:
+            return id_map[raw.lower()]
+        if raw.lower() in self._ALIASES:
+            alias = self._ALIASES[raw.lower()]
+            if alias.lower() in id_map:
+                return id_map[alias.lower()]
+            return alias
+        matches = [m for m in model_ids if "/" in m and m.split("/", 1)[1].lower() == raw.lower()]
+        if matches:
+            jysd_match = next((m for m in matches if m.startswith("jysd/")), None)
+            return jysd_match or matches[0]
+        return raw
+
+    def validate_model(self, model: str) -> None:
+        normalized = self.normalize_model(model)
+        if normalized not in {item[0] for item in self.models()}:
+            raise ValueError(f"{self.display_name} 不支持模型: {model}")
+
     def generate_plan(self, *, model: str, prompt: str, cwd: Path,
                       schema: dict[str, Any] = PLAN_SCHEMA,
                       on_process: Callable[[subprocess.Popen[str]], None] | None = None,
                       timeout: int = DEFAULT_AI_TIMEOUT_SECONDS) -> dict[str, Any]:
         self._ensure_available()
+        model = self.normalize_model(model)
         self.validate_model(model)
         schema_json = json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
         constrained_prompt = f"""你现在是一个只返回 JSON 的编排接口，不是聊天助手。
@@ -947,7 +1057,8 @@ class OpenCodeCli(CliProvider):
 
 再次确认：必须返回 main_product 和 picks；只输出 JSON 对象。"""
         started = time.monotonic()
-        with tempfile.TemporaryDirectory(prefix="livecut-opencode-") as temp_dir:
+        with tempfile.TemporaryDirectory(prefix="livecut-opencode-",
+                                         ignore_cleanup_errors=True) as temp_dir:
             temp = Path(temp_dir)
             command = [
                 str(self.executable), "run", "--format", "json", "--pure",
@@ -955,12 +1066,16 @@ class OpenCodeCli(CliProvider):
             ]
             if model != "auto":
                 command.extend(["--model", model])
-            command.append(constrained_prompt)
             stdout, stderr, seconds = self._complete(
                 command, cwd=temp, on_process=on_process, timeout=timeout, started=started,
                 env_overrides={"OPENCODE_CONFIG_CONTENT": self._runtime_config()},
+                stdin_text=constrained_prompt,
             )
         events, plan = self._parse_events(stdout)
+        if not plan:
+            assembled = self._extract_text(events)
+            if assembled:
+                plan = self._find_plan(assembled)
         if not plan:
             raise ProviderResponseError(
                 "OpenCode 已返回结果，但没有找到 main_product 和 picks",
@@ -974,6 +1089,7 @@ class OpenCodeCli(CliProvider):
                       on_process: Callable[[subprocess.Popen[str]], None] | None = None,
                       timeout: int = DEFAULT_AI_TIMEOUT_SECONDS) -> dict[str, Any]:
         self._ensure_available()
+        model = self.normalize_model(model)
         self.validate_model(model)
         required = tuple(schema.get("required") or ())
         schema_json = json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
@@ -990,7 +1106,8 @@ class OpenCodeCli(CliProvider):
 最终响应只允许是一个符合以下 Schema 的 JSON 对象：
 {schema_json}"""
         started = time.monotonic()
-        with tempfile.TemporaryDirectory(prefix="livecut-opencode-") as temp_dir:
+        with tempfile.TemporaryDirectory(prefix="livecut-opencode-",
+                                         ignore_cleanup_errors=True) as temp_dir:
             temp = Path(temp_dir)
             command = [
                 str(self.executable), "run", "--format", "json", "--pure",
@@ -998,13 +1115,17 @@ class OpenCodeCli(CliProvider):
             ]
             if model != "auto":
                 command.extend(["--model", model])
-            command.append(constrained_prompt)
             stdout, stderr, seconds = self._complete(
                 command, cwd=temp, on_process=on_process, timeout=timeout, started=started,
                 env_overrides={"OPENCODE_CONFIG_CONTENT": self._runtime_config()},
+                stdin_text=constrained_prompt,
             )
         events, _ = self._parse_events(stdout)
         data = self._find_object(events, required)
+        if not data:
+            assembled = self._extract_text(events)
+            if assembled:
+                data = self._find_object(assembled, required)
         if not data:
             raise ProviderResponseError(
                 "OpenCode 已返回结果，但没有找到所需的 JSON 对象",

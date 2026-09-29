@@ -51,7 +51,6 @@ def build_segments(ordered_clauses: list[dict[str, Any]],
         })
     return segments
 
-
 def build_virtual_segments(ordered_clauses: list[dict[str, Any]],
                            virtual_timeline: Any) -> list[dict[str, Any]]:
     """根据虚拟时间线与双时间轴映射，构建渲染片段列表。"""
@@ -81,11 +80,44 @@ def build_virtual_segments(ordered_clauses: list[dict[str, Any]],
     return segments
 
 
+def _run_render_multi(rows: list[dict[str, Any]], output: str, workdir: str,
+                      timeline_name: str, *, media: str | None = None,
+                      src_args: list[str] | None = None,
+                      no_loudnorm: bool = False,
+                      width: int | None = None, height: int | None = None,
+                      fps: float | None = None, preset: str | None = None) -> str:
+    timeline_path = os.path.join(workdir, timeline_name)
+    with open(timeline_path, "w", encoding="utf-8") as handle:
+        json.dump(rows, handle, ensure_ascii=False, indent=1)
+    os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
+    if src_args is None:
+        if not media:
+            raise RenderError("必须提供 media 或 src_args")
+        src_args = ["--src", f"1={os.path.abspath(media)}"]
+    command = [sys.executable, RENDER_MULTI, timeline_path, os.path.abspath(output),
+               *src_args, "--force"]
+    if no_loudnorm:
+        command.append("--no-loudnorm")
+    if width and height:
+        command += ["--width", str(width), "--height", str(height)]
+    if fps:
+        command += ["--fps", str(fps)]
+    if preset:
+        command += ["--preset", preset]
+    result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8",
+                            errors="replace")
+    if result.returncode != 0:
+        raise RenderError(f"ffmpeg 渲染失败：{result.stderr.strip()[-1200:]}")
+    if not os.path.isfile(output):
+        raise RenderError(f"ffmpeg 结束但没有产出成片：{output}")
+    return output
+
+
 def render_video(media: str, segments: list[dict[str, Any]], output: str, workdir: str,
                  *, width: int | None = None, height: int | None = None,
                  fps: float | None = None, preset: str | None = None,
                  virtual_timeline: Any | None = None) -> str:
-    """调用 render_multi 把片段拼成 ``output``。支持单素材直接渲染与虚拟时间线多源映射渲染。"""
+    """调用 render_multi 把片段拼成单个 ``output``。支持单素材直接渲染与虚拟时间线多源映射渲染。"""
     if not segments:
         raise RenderError("渲染片段为空")
 
@@ -109,36 +141,25 @@ def render_video(media: str, segments: list[dict[str, Any]], output: str, workdi
             speed = float(row.get("speed", 1.0))
             timeline_rows.append({"src": src_id, "start": start, "end": end, "speed": speed})
 
-        timeline_path = os.path.join(workdir, "render_timeline.json")
-        with open(timeline_path, "w", encoding="utf-8") as handle:
-            json.dump(timeline_rows, handle, ensure_ascii=False, indent=1)
-
         src_args: list[str] = []
         for path, src_id in source_to_id.items():
             src_args.extend(["--src", f"{src_id}={os.path.abspath(path)}"])
 
-        os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
-        command = [sys.executable, RENDER_MULTI, timeline_path, os.path.abspath(output),
-                   *src_args, "--force"]
+        return _run_render_multi(timeline_rows, output, workdir, "render_timeline.json",
+                                 src_args=src_args, width=width, height=height,
+                                 fps=fps, preset=preset)
     else:
-        timeline_path = os.path.join(workdir, "render_timeline.json")
-        with open(timeline_path, "w", encoding="utf-8") as handle:
-            json.dump([{"src": 1, "start": row["start"], "end": row["end"]}
-                       for row in segments], handle, ensure_ascii=False, indent=1)
-        os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
-        command = [sys.executable, RENDER_MULTI, timeline_path, os.path.abspath(output),
-                   "--src", f"1={os.path.abspath(media)}", "--force"]
+        rows = [{"src": 1, "start": row["start"], "end": row["end"]} for row in segments]
+        return _run_render_multi(rows, output, workdir, "render_timeline.json",
+                                 media=media, width=width, height=height, fps=fps, preset=preset)
 
-    if width and height:
-        command += ["--width", str(width), "--height", str(height)]
-    if fps:
-        command += ["--fps", str(fps)]
-    if preset:
-        command += ["--preset", preset]
-    result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8",
-                            errors="replace")
-    if result.returncode != 0:
-        raise RenderError(f"ffmpeg 渲染失败：{result.stderr.strip()[-1200:]}")
-    if not os.path.isfile(output):
-        raise RenderError(f"ffmpeg 结束但没有产出成片：{output}")
-    return output
+
+def render_segment(media: str, segment: dict[str, Any], output: str, workdir: str,
+                   *, width: int | None = None, height: int | None = None,
+                   fps: float | None = None, preset: str | None = None,
+                   index: int = 0) -> str:
+    """单独剪出 ``segment``；保持源响度，不做整条 loudnorm。"""
+    rows = [{"src": 1, "start": float(segment["start"]), "end": float(segment["end"])}]
+    return _run_render_multi(rows, output, workdir,
+                             f"render_segment_{index:03d}.json", media=media,
+                             no_loudnorm=True, width=width, height=height, fps=fps, preset=preset)

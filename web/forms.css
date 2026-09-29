@@ -180,45 +180,103 @@
 .input-with-action input{flex:1;min-width:0}
 .input-with-action .button{flex:0 0 auto}
 
-.timeline-inspect-card {
-  margin-top: 4px;
-  padding: 12px 14px;
-  border: 1px solid rgba(168, 255, 53, .35);
-  border-radius: 12px;
-  background: rgba(168, 255, 53, .05);
+
   display: grid;
   gap: 6px;
 }
 .timeline-inspect-head {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
+.range-inputs{display:flex;align-items:center;gap:12px}
+.range-inputs .field{flex:1;min-width:0}
+.range-inputs input[type="number"]{width:100%;box-sizing:border-box}
+.range-sep{color:var(--dim);font-weight:600;padding-top:20px;flex:0 0 auto}
+.duration-presets{display:flex;flex-wrap:wrap;gap:8px;margin-top:2px}
+.preset-chip{padding:5px 12px;border:1px solid var(--line);border-radius:8px;background:#141c25;color:var(--muted);font-size:12px;cursor:pointer;transition:border-color .15s,color .15s,background .15s}
+.preset-chip:hover{border-color:var(--accent);color:var(--text)}
+.preset-chip.active{border-color:var(--accent);background:rgba(168,255,53,.1);color:var(--accent);font-weight:650}
+.field-hint{color:var(--dim);font-size:11px;line-height:1.4}
+
+/* Dual mode selection */
+.mode-cards {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 1.5rem;
 }
-.timeline-inspect-title {
-  font-weight: 700;
-  color: var(--accent);
-  font-size: 13px;
+.mode-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-2, #141c25);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
 }
-.timeline-inspect-badge {
-  font-size: 10.5px;
-  padding: 2px 7px;
-  border-radius: 99px;
-  background: rgba(168, 255, 53, .15);
-  color: var(--accent);
-  font-weight: 600;
+.mode-card:hover {
+  border-color: var(--accent);
 }
-.timeline-inspect-meta {
-  color: var(--dim);
+.mode-card input[type="radio"] {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  accent-color: var(--accent);
+}
+.mode-card:has(input:checked) {
+  border-color: var(--accent);
+  background: rgba(168, 255, 53, 0.06);
+}
+.mode-card b {
+  font-size: 14px;
+  color: var(--text);
+}
+.mode-card small {
+  color: var(--muted);
   font-size: 11px;
   line-height: 1.4;
 }
+
+.timeline-inspect-card {
+  margin: 10px 0;
+  padding: 12px 14px;
+  border: 1px solid rgba(104, 167, 255, 0.35);
+  border-radius: 9px;
+  background: rgba(104, 167, 255, 0.08);
+  display: grid;
+  gap: 6px;
+}
+.timeline-inspect-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.timeline-inspect-title {
+  font-weight: 650;
+  color: #fff;
+  font-size: 13px;
+}
+.timeline-inspect-badge {
+  padding: 2px 8px;
+  border-radius: 99px;
+  background: rgba(168, 255, 53, 0.15);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+}
+.timeline-inspect-meta {
+  font-size: 11px;
+  color: var(--muted);
+}
 .timeline-tag {
   display: inline-block;
-  padding: 2px 6px;
+  margin-left: 8px;
+  padding: 2px 7px;
   border-radius: 4px;
-  background: rgba(168, 255, 53, .12);
-  color: var(--accent);
-  font-size: 10px;
+  background: rgba(104, 167, 255, 0.18);
+  color: #68a7ff;
+  font-size: 11px;
   font-weight: 600;
-  margin-left: 6px;
+  vertical-align: middle;
 }

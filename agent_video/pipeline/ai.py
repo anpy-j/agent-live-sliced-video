@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -70,18 +71,39 @@ DECISION_SCHEMA: dict[str, Any] = {
     "required": ["decisions"],
 }
 
+# S4 成片结构角色：hook 必须开头，cta 若存在必须收尾，其余为可选中段。
+ORDER_SECTION_ROLES: tuple[str, ...] = (
+    "hook", "scene", "selling_point", "proof", "styling", "cta")
+
 ORDER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
         "main_product": {"type": "string", "minLength": 1},
+        "sections": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "role": {"type": "string", "enum": list(ORDER_SECTION_ROLES)},
+                    "ids": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {"type": "integer", "minimum": 0},
+                    },
+                },
+                "required": ["role", "ids"],
+            },
+        },
         "ordered_ids": {
             "type": "array",
             "minItems": 1,
             "items": {"type": "integer", "minimum": 0},
         },
     },
-    "required": ["main_product", "ordered_ids"],
+    "required": ["main_product", "sections", "ordered_ids"],
 }
 
 _CLI_BUILDERS = {
@@ -99,9 +121,18 @@ _FALLBACK_EXECUTABLES: dict[str, tuple[str, ...]] = {
         str(Path.home() / "Applications" / "WorkBuddy.app" / "Contents"
             / "Resources" / "app.asar.unpacked" / "cli" / "bin" / "codebuddy"),
     ),
-    "antigravity": (str(Path.home() / ".local" / "bin" / "agy"),),
-    "codex": ("/opt/homebrew/bin/codex",),
-    "opencode": (str(Path.home() / ".opencode" / "bin" / "opencode"),),
+    "antigravity": (
+        str(Path.home() / ".local" / "bin" / "agy"),
+        str(Path.home() / "AppData" / "Local" / "agy" / "bin" / "agy.exe"),
+    ),
+    "codex": (
+        "/opt/homebrew/bin/codex",
+        str(Path.home() / "AppData" / "Roaming" / "npm" / "codex.cmd"),
+    ),
+    "opencode": (
+        str(Path.home() / ".opencode" / "bin" / "opencode"),
+        str(Path.home() / "AppData" / "Roaming" / "npm" / "opencode.cmd"),
+    ),
 }
 
 _WHICH = {
@@ -147,6 +178,8 @@ def _call_llm(model: str, prompt: str, json_schema: dict[str, Any],
     provider_id, executable = resolve_provider()
     provider = _CLI_BUILDERS[provider_id](Path(executable))
     chosen_model = (model or os.environ.get("PIPELINE_AI_MODEL") or "auto").strip() or "auto"
+    if hasattr(provider, "normalize_model"):
+        chosen_model = provider.normalize_model(chosen_model)
     if chosen_model != "auto":
         try:
             provider.validate_model(chosen_model)
@@ -181,9 +214,33 @@ def _schema_to_questions(schema: dict[str, Any]) -> dict[str, Any]:
         elif kind == "array" and (spec.get("items") or {}).get("type") == "integer":
             questions[name] = {"type": "text",
                                "instructions": f"给出 {name}：只输出整数 id，用英文逗号分隔"}
+        elif kind == "array" and (spec.get("items") or {}).get("type") == "object":
+            questions[name] = {
+                "type": "text",
+                "instructions": (
+                    f"给出 {name}：每段写成 role:id1,id2 的形式，多个段之间用英文分号 ; "
+                    f"分隔；role 只能取 {'/'.join(ORDER_SECTION_ROLES)}")}
         else:
             raise PipelineConfigError(f"Jev 引擎暂不支持 schema 字段：{name}")
     return questions
+
+
+def _parse_sections_text(text: str) -> list[dict[str, Any]]:
+    """把「role:id,id;role:id」文本解析成 S4 的 sections 结构。"""
+    sections: list[dict[str, Any]] = []
+    for chunk in re.split(r"[;\n；]+", text or ""):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        role, separator, rest = chunk.partition(":")
+        if not separator:
+            role, separator, rest = chunk.partition("：")
+        if not separator:
+            continue
+        ids = [int(part) for part in re.findall(r"\d+", rest)]
+        if role.strip() and ids:
+            sections.append({"role": role.strip(), "ids": ids})
+    return sections
 
 
 def _answers_to_object(schema: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
@@ -196,8 +253,11 @@ def _answers_to_object(schema: dict[str, Any], response: dict[str, Any]) -> dict
             result[name] = str(answer.get("choice")) in {"yes", "true", "是"}
         elif kind == "array":
             text = str(answer.get("text") or answer.get("choice") or "")
-            result[name] = [int(part) for part in (piece.strip() for piece in text.split(","))
-                            if part.lstrip("-").isdigit()]
+            if (spec.get("items") or {}).get("type") == "object":
+                result[name] = _parse_sections_text(text)
+            else:
+                result[name] = [int(part) for part in (piece.strip() for piece in text.split(","))
+                                if part.lstrip("-").isdigit()]
         elif kind == "integer":
             raw = answer.get("score", answer.get("value", answer.get("noul")))
             result[name] = int(raw) if raw is not None else 0

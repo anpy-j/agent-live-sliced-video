@@ -10,12 +10,13 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from agent_video.pipeline import run as pipeline_run
 from agent_video.pipeline.ai import DECISION_SCHEMA
 from agent_video.pipeline.errors import (AIReturnError, AsrError, RenderError,
-                                         RuleFilterEmpty, TargetUnreachable)
+                                         RuleFilterEmpty)
 from agent_video.pipeline.render import build_segments
 
 FFMPEG = shutil.which("ffmpeg")
@@ -49,7 +50,9 @@ def fake_ai(model, prompt, schema, timeout):
     if schema is DECISION_SCHEMA:
         return {"decisions": [{"id": cid, "usable": True, "reason": "mock 可用"}
                               for cid in ids]}
-    return {"main_product": "马甲", "ordered_ids": ids}
+    return {"main_product": "马甲",
+            "sections": [{"role": "hook", "ids": ids}],
+            "ordered_ids": ids}
 
 
 @unittest.skipUnless(FFMPEG, "ffmpeg 不可用")
@@ -71,6 +74,8 @@ class LeanPipelineEndToEndTest(unittest.TestCase):
             manifest = self.run_pipeline()
         self.assertEqual(manifest["ai_calls"], 2)
         self.assertEqual(mocked.call_count, 2)
+        self.assertEqual(manifest["judge_concurrency"], 1)
+        self.assertEqual(manifest["judge_retries"], 1)
         self.assertEqual(manifest["main_product"], "马甲")
         self.assertEqual(len(manifest["segments"]), 5)
         self.assertAlmostEqual(manifest["total_seconds"], 8.4, places=2)
@@ -94,6 +99,21 @@ class LeanPipelineEndToEndTest(unittest.TestCase):
             judged = json.load(handle)
         self.assertTrue(all(clause["usable"] for clause in judged["clauses"]))
         self.assertEqual(len(judged["clauses"]), len(timeline["clauses"]))
+
+    def test_judge_batch_retry_recovers_and_counts_calls(self):
+        state = {"failed": False}
+
+        def flaky(model, prompt, schema, timeout):
+            if schema is DECISION_SCHEMA and not state["failed"]:
+                state["failed"] = True
+                raise AIReturnError("S3 返回缺少 decisions 数组")
+            return fake_ai(model, prompt, schema, timeout)
+
+        with patch.object(pipeline_run, "ai_call", side_effect=flaky):
+            manifest = self.run_pipeline(judge_retries=1)
+        self.assertEqual(manifest["judge_retries"], 1)
+        self.assertEqual(manifest["ai_calls"], 3)  # 1 次失败 + 1 次重试 + 1 次排序
+        self.assertTrue(os.path.isfile(os.path.join(self.workdir, manifest["output"])))
 
     def test_contiguous_fragments_merge_and_long_unit_extends_duration(self):
         words = [
@@ -142,16 +162,118 @@ class LeanPipelineEndToEndTest(unittest.TestCase):
         with self.assertRaises(AsrError):
             self.run_pipeline(transcript=([], []))
 
-    def test_too_few_usable_clauses_fail_before_ordering_call(self):
-        def stingy(model, prompt, schema, timeout):
+    def test_below_target_material_still_renders_without_abort(self):
+        def only_first(model, prompt, schema, timeout):
             ids = [int(value) for value in re.findall(r'"id": (\d+)', prompt)]
-            return {"decisions": [{"id": cid, "usable": cid == ids[0], "reason": "only one"}
-                                  for cid in ids]}
+            if schema is DECISION_SCHEMA:
+                return {"decisions": [{"id": cid, "usable": cid == ids[0], "reason": "keep one"}
+                                      for cid in ids]}
+            return {"main_product": "马甲",
+                    "sections": [{"role": "hook", "ids": ids}],
+                    "ordered_ids": ids}
 
-        with patch.object(pipeline_run, "ai_call", side_effect=stingy) as mocked:
-            with self.assertRaises(TargetUnreachable):
-                self.run_pipeline()
-        self.assertEqual(mocked.call_count, 1)
+        with patch.object(pipeline_run, "ai_call", side_effect=only_first):
+            manifest = self.run_pipeline()
+        self.assertLess(manifest["total_seconds"], manifest["target_seconds"]["min"])
+        self.assertTrue(os.path.isfile(os.path.join(self.workdir, manifest["output"])))
+
+    def test_pipeline_reuses_cached_clauses_without_asr(self):
+        workdir = os.path.join(self.temp.name, "cached_workdir")
+        os.makedirs(workdir, exist_ok=True)
+        cached_timeline = {
+            "source": os.path.abspath(self.media),
+            "duration": 10.0,
+            "clauses": [
+                {"id": 0, "start": 0.0, "end": 2.0, "text": "这件衣服面料很好。"},
+                {"id": 1, "start": 2.5, "end": 5.0, "text": "穿上特别显瘦。"},
+                {"id": 2, "start": 5.5, "end": 8.0, "text": "颜色也非常百搭。"},
+            ],
+        }
+        with open(os.path.join(workdir, "clauses.json"), "w", encoding="utf-8") as f:
+            json.dump(cached_timeline, f)
+
+        stages = []
+        with patch.object(pipeline_run, "ai_call", side_effect=fake_ai), \
+                patch.object(pipeline_run, "_default_asr") as mock_asr:
+            manifest = pipeline_run.run_pipeline(
+                self.media, workdir, target_seconds=(4.0, 8.0),
+                on_stage=lambda s, st, msg: stages.append((s, st, msg)))
+
+        mock_asr.assert_not_called()
+        self.assertTrue(any("复用已有" in msg for s, st, msg in stages if s == "asr"))
+        output = os.path.join(workdir, manifest["output"])
+        self.assertTrue(os.path.isfile(output))
+
+    def test_repeated_render_creates_versioned_video_without_overwrite(self):
+        with patch.object(pipeline_run, "ai_call", side_effect=fake_ai):
+            first = self.run_pipeline()
+            first_path = os.path.join(self.workdir, first["output"])
+            first_bytes = Path(first_path).read_bytes()
+            second = self.run_pipeline()
+
+        self.assertEqual(first["output"], os.path.join("deliverables", "final.mp4"))
+        self.assertEqual(second["output"], os.path.join("deliverables", "final-1.mp4"))
+        self.assertTrue(os.path.isfile(os.path.join(self.workdir, second["output"])))
+        self.assertEqual(Path(first_path).read_bytes(), first_bytes)
+
+    def test_output_stem_names_deliverable_and_versions(self):
+        with patch.object(pipeline_run, "ai_call", side_effect=fake_ai):
+            first = self.run_pipeline(output_stem="伯恩夫人0926")
+        self.assertEqual(first["output"], os.path.join("deliverables", "伯恩夫人0926.mp4"))
+        self.assertTrue(os.path.isfile(os.path.join(self.workdir, first["output"])))
+
+        with patch.object(pipeline_run, "ai_call", side_effect=fake_ai):
+            second = self.run_pipeline(output_stem="伯恩夫人0926")
+        self.assertEqual(second["output"],
+                         os.path.join("deliverables", "伯恩夫人0926-1.mp4"))
+        self.assertTrue(os.path.isfile(os.path.join(self.workdir, second["output"])))
+        self.assertTrue(os.path.isfile(os.path.join(self.workdir, first["output"])))
+
+    def test_single_stage_reruns_preserve_upstream_files(self):
+        with patch.object(pipeline_run, "ai_call", side_effect=fake_ai):
+            self.run_pipeline()
+        s1_path = Path(self.workdir) / "clauses.json"
+        s2_path = Path(self.workdir) / "clauses.filtered.json"
+        s3_path = Path(self.workdir) / "clauses.judged.json"
+        s1_before = s1_path.read_bytes()
+
+        with patch.object(pipeline_run, "ai_call") as ai:
+            result2 = pipeline_run.run_pipeline_stage(
+                self.media, self.workdir, "filter", target_seconds=(8.0, 9.0))
+        ai.assert_not_called()
+        self.assertEqual(result2["stage"], "filter")
+        self.assertEqual(s1_path.read_bytes(), s1_before)
+        s2_before = s2_path.read_bytes()
+
+        with patch.object(pipeline_run, "ai_call", side_effect=fake_ai):
+            result3 = pipeline_run.run_pipeline_stage(
+                self.media, self.workdir, "judge", target_seconds=(8.0, 9.0))
+        self.assertEqual(result3["stage"], "judge")
+        self.assertEqual(s1_path.read_bytes(), s1_before)
+        self.assertEqual(s2_path.read_bytes(), s2_before)
+        s3_before = s3_path.read_bytes()
+
+        with patch.object(pipeline_run, "ai_call", side_effect=fake_ai):
+            result4 = pipeline_run.run_pipeline_stage(
+                self.media, self.workdir, "order", target_seconds=(8.0, 9.0))
+        self.assertEqual(result4["stage"], "order")
+        self.assertEqual(s1_path.read_bytes(), s1_before)
+        self.assertEqual(s2_path.read_bytes(), s2_before)
+        self.assertEqual(s3_path.read_bytes(), s3_before)
+
+        order_path = Path(self.workdir) / "order.json"
+        order_before = order_path.read_bytes()
+        with patch.object(pipeline_run, "ai_call") as ai:
+            result5 = pipeline_run.run_pipeline_stage(
+                self.media, self.workdir, "render", target_seconds=(8.0, 9.0),
+                output_stem="重渲染")
+        ai.assert_not_called()
+        self.assertEqual(result5["output"], os.path.join("deliverables", "重渲染.mp4"))
+        self.assertTrue(os.path.isfile(os.path.join(self.workdir, result5["output"])))
+        self.assertEqual(s1_path.read_bytes(), s1_before)
+        self.assertEqual(s2_path.read_bytes(), s2_before)
+        self.assertEqual(s3_path.read_bytes(), s3_before)
+        self.assertEqual(order_path.read_bytes(), order_before)
 
 
 class RenderSeamTest(unittest.TestCase):
