@@ -314,6 +314,114 @@ def _parse_jianying_draft_dict(data: dict[str, Any], draft_dir: Path | None = No
     return VirtualTimeline(timeline_id=timeline_id, title=title, segments=segments)
 
 
+def _jianying_project_context(path: Path) -> tuple[Path, str | None]:
+    """Return the draft root and an explicitly selected child timeline id."""
+    location = path.parent if path.is_file() else path
+    if location.parent.name.lower() == "timelines":
+        return location.parent.parent, location.name
+    if location.name.lower() == "timelines":
+        return location.parent, None
+    return location, None
+
+
+def _read_timeline_layout(root: Path) -> tuple[str | None, list[tuple[str, str]]]:
+    layout_path = root / "timeline_layout.json"
+    if not layout_path.is_file():
+        return None, []
+    try:
+        layout = json.loads(layout_path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"剪映时间线布局解析失败 ({layout_path.name}): {exc}") from exc
+
+    active_id = str(layout.get("activeTimeline") or "").strip() or None
+    entries: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for dock in layout.get("dockItems") or []:
+        ids = dock.get("timelineIds") or []
+        names = dock.get("timelineNames") or []
+        for index, raw_id in enumerate(ids):
+            timeline_id = str(raw_id or "").strip()
+            if not timeline_id or timeline_id in seen:
+                continue
+            name = str(names[index] if index < len(names) else timeline_id).strip() or timeline_id
+            entries.append((timeline_id, name))
+            seen.add(timeline_id)
+    return active_id, entries
+
+
+def _apply_jianying_timeline_identity(timeline: VirtualTimeline, path: Path) -> VirtualTimeline:
+    root, selected_id = _jianying_project_context(path)
+    active_id, entries = _read_timeline_layout(root)
+    timeline_id = selected_id or active_id
+    if not timeline_id:
+        return timeline
+    names = dict(entries)
+    timeline.timeline_id = timeline_id
+    timeline_name = names.get(timeline_id, timeline_id)
+    timeline.title = f"{root.name} / {timeline_name}"
+    return timeline
+
+
+def discover_virtual_timelines(target: str | Path) -> dict[str, Any]:
+    """List selectable Jianying timelines, preserving their human names and order."""
+    path = Path(target).expanduser().resolve()
+    if not path.exists():
+        raise FileNotFoundError(f"时间线文件不存在: {target}")
+    root, selected_id = _jianying_project_context(path)
+    active_id, layout_entries = _read_timeline_layout(root)
+    timelines_root = root / "Timelines"
+
+    entries = list(layout_entries)
+    known = {timeline_id for timeline_id, _ in entries}
+    if timelines_root.is_dir():
+        for child in sorted(timelines_root.iterdir(), key=lambda item: item.name):
+            if child.is_dir() and (child / "draft_content.json").is_file() and child.name not in known:
+                entries.append((child.name, child.name))
+                known.add(child.name)
+
+    result: list[dict[str, Any]] = []
+    for timeline_id, name in entries:
+        draft_file = timelines_root / timeline_id / "draft_content.json"
+        if not draft_file.is_file():
+            continue
+        timeline = load_virtual_timeline(draft_file)
+        result.append({
+            "timeline_id": timeline_id,
+            "name": name,
+            "title": timeline.title,
+            "path": str(draft_file.resolve()),
+            "active": timeline_id == active_id,
+            "selected": timeline_id == selected_id,
+            "timeline_duration": round(timeline.total_duration, 3),
+            "source_duration": round(timeline.source_duration, 3),
+            "segment_count": len(timeline.segments),
+            "source_count": len(timeline.source_paths),
+            "speeds": sorted({segment.speed for segment in timeline.segments}),
+        })
+
+    if not result:
+        timeline = load_virtual_timeline(path)
+        result.append({
+            "timeline_id": timeline.timeline_id,
+            "name": timeline.title,
+            "title": timeline.title,
+            "path": str(path),
+            "active": True,
+            "selected": True,
+            "timeline_duration": round(timeline.total_duration, 3),
+            "source_duration": round(timeline.source_duration, 3),
+            "segment_count": len(timeline.segments),
+            "source_count": len(timeline.source_paths),
+            "speeds": sorted({segment.speed for segment in timeline.segments}),
+        })
+    return {
+        "draft_name": root.name,
+        "draft_root": str(root),
+        "active_timeline_id": active_id or result[0]["timeline_id"],
+        "timelines": result,
+    }
+
+
 def load_virtual_timeline(target: str | Path | dict[str, Any]) -> VirtualTimeline:
     """从文件、目录或字典加载虚拟时间线。
 
@@ -374,9 +482,10 @@ def load_virtual_timeline(target: str | Path | dict[str, Any]) -> VirtualTimelin
             vt = VirtualTimeline.from_dict(data)
             if not vt.title or vt.title == "虚拟时间线":
                 vt.title = path.stem
-            return vt
+            return _apply_jianying_timeline_identity(vt, path)
         if "tracks" in data:
-            return _parse_jianying_draft_dict(data, draft_dir=path.parent)
+            vt = _parse_jianying_draft_dict(data, draft_dir=path.parent)
+            return _apply_jianying_timeline_identity(vt, path)
 
     raise ValueError(f"文件格式不符合剪映草稿或虚拟时间线规范: {path}")
 

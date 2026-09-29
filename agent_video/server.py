@@ -229,6 +229,22 @@ class Application:
             "source_count": len(vt.source_paths),
         }
 
+    def list_timelines(self, payload: dict[str, Any] | str) -> dict[str, Any]:
+        from .timeline import discover_virtual_timelines
+        if isinstance(payload, str):
+            target = payload
+        else:
+            target = (payload.get("path") or payload.get("draft_path") or
+                      payload.get("source_path"))
+        if not target:
+            raise ValueError("请提供剪映草稿目录或时间线文件")
+        discovered = discover_virtual_timelines(target)
+        for item in discovered["timelines"]:
+            total = float(item.get("timeline_duration") or 0)
+            minutes, seconds = divmod(total, 60)
+            item["duration_text"] = f"{int(minutes)}分{seconds:04.1f}秒"
+        return discovered
+
     @staticmethod
     def _resolve_export_dir(value: Any) -> str | None:
         raw = str(value or "").strip()
@@ -788,6 +804,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json_response(self.app.pick_file(kind=kind))
             if path == "/api/timeline/inspect":
                 return self.json_response(self.app.inspect_timeline(payload))
+            if path == "/api/timeline/list":
+                return self.json_response(self.app.list_timelines(payload))
             if path == "/api/jobs":
                 return self.json_response(self.app.create_job(payload), 201)
             if path.startswith("/api/jobs/"):

@@ -110,6 +110,10 @@
             <div class="file-drop-body"><input name="draft_path" id="timelineDraftInput" placeholder="选择剪映草稿目录或时间线 JSON"><small>AI 仅在剪映保留的 30–40 分钟内分析，底层原素材文件自动隐藏。</small></div>
             <button class="button ghost small" type="button" id="pickTimelineButton">浏览草稿</button>
           </div>
+          <label class="field" id="timelineSelectorField" style="display:none">选择时间线
+            <select name="timeline_choice" id="timelineSelect"></select>
+            <small>默认选中剪映当前活动时间线；切换后会重新显示所选时间线的时长、片段数和倍速。</small>
+          </label>
           <div id="timelineInspectResult" class="timeline-inspect-card" style="display:none"></div>
           <label class="field">成片名称<input name="timeline_title" id="timelineTitleInput" placeholder="留空则使用时间线标题（如：F家限定 / 时间线01）"><small>最终输出为“成片名称.mp4”。</small></label>
           <label class="field">商品名称<input name="timeline_product_name" placeholder="本次要剪辑的商品，如：毛衣、裤子（可留空）"><small>与原素材方式相同，用于 AI 判断主商品并过滤跑题内容。</small></label>

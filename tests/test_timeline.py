@@ -10,6 +10,7 @@ from agent_video.timeline import (
     map_timeline_range,
     map_clause,
     extract_virtual_timeline_audio,
+    discover_virtual_timelines,
 )
 
 
@@ -162,6 +163,40 @@ def test_jianying_11_mixed_track_keeps_only_video_segments(tmp_path):
     assert len(timeline.segments) == 1
     assert timeline.segments[0].source_start == 10.0
     assert timeline.timeline_duration == 30.0
+
+
+def test_discover_multiple_named_jianying_timelines(tmp_path):
+    root = tmp_path / "F家限定"
+    timelines = root / "Timelines"
+    ids = ["timeline-id-01", "timeline-id-02"]
+    names = ["时间线01", "时间线02"]
+    root.mkdir()
+    (root / "timeline_layout.json").write_text(json.dumps({
+        "activeTimeline": ids[1],
+        "dockItems": [{"timelineIds": ids, "timelineNames": names}],
+    }, ensure_ascii=False), encoding="utf-8")
+    for index, timeline_id in enumerate(ids, start=1):
+        folder = timelines / timeline_id
+        folder.mkdir(parents=True)
+        duration = index * 60_000_000
+        (folder / "draft_content.json").write_text(json.dumps({
+            "materials": {"videos": [{"id": f"v{index}", "path": str(tmp_path / f"raw{index}.mp4")}]},
+            "tracks": [{"type": "video", "segments": [{
+                "material_id": f"v{index}",
+                "source_timerange": {"start": 0, "duration": duration},
+                "target_timerange": {"start": 0, "duration": duration},
+            }]}],
+        }, ensure_ascii=False), encoding="utf-8")
+
+    result = discover_virtual_timelines(root)
+    assert result["active_timeline_id"] == ids[1]
+    assert [item["name"] for item in result["timelines"]] == names
+    assert [item["timeline_duration"] for item in result["timelines"]] == [60.0, 120.0]
+    assert result["timelines"][1]["active"] is True
+
+    selected = load_virtual_timeline(timelines / ids[0] / "draft_content.json")
+    assert selected.timeline_id == ids[0]
+    assert selected.title == "F家限定 / 时间线01"
 
 
 def test_user_specified_mapping_formula():

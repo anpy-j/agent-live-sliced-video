@@ -510,9 +510,50 @@ async function inspectTimeline(path){
   }
 }
 
+function timelineOptionLabel(item){
+  const speeds=(item.speeds||[]).map(x=>`${x}x`).join('/');
+  return `${item.name} · ${item.duration_text} · ${item.segment_count} 个片段${speeds?` · ${speeds}`:''}`;
+}
+
+async function loadTimelineChoices(path){
+  if(!path)return;
+  const input=$('#timelineDraftInput');
+  const selector=$('#timelineSelect');
+  const field=$('#timelineSelectorField');
+  input.dataset.selectedPath='';
+  try{
+    const listing=await api('/api/timeline/list',{method:'POST',body:JSON.stringify({path})});
+    const timelines=listing.timelines||[];
+    selector.innerHTML='';
+    timelines.forEach(item=>{
+      const option=document.createElement('option');
+      option.value=item.path;
+      option.textContent=timelineOptionLabel(item);
+      option.dataset.timelineId=item.timeline_id;
+      selector.appendChild(option);
+    });
+    const selected=timelines.find(item=>item.selected)||timelines.find(item=>item.active)||timelines[0];
+    if(!selected)throw new Error('草稿中没有找到可用时间线');
+    selector.value=selected.path;
+    input.dataset.selectedPath=selected.path;
+    field.style.display=timelines.length>1?'grid':'none';
+    await inspectTimeline(selected.path);
+  }catch(err){
+    field.style.display='none';
+    selector.innerHTML='';
+    input.dataset.selectedPath=path;
+    await inspectTimeline(path);
+  }
+}
+
 $('#newJobForm [name="title"]')?.addEventListener('input',e=>{e.target.dataset.userEdited=e.target.value?'true':''});
 $('#timelineTitleInput')?.addEventListener('input', e=>{e.target.dataset.userEdited=e.target.value?'true':''});
-$('#timelineDraftInput')?.addEventListener('change', e=>inspectTimeline(e.target.value.trim()));
+$('#timelineDraftInput')?.addEventListener('change', e=>loadTimelineChoices(e.target.value.trim()));
+$('#timelineSelect')?.addEventListener('change',e=>{
+  const input=$('#timelineDraftInput');
+  input.dataset.selectedPath=e.target.value;
+  inspectTimeline(e.target.value);
+});
 
 $$('#durationPresets .preset-chip').forEach(chip => {
   chip.addEventListener('click', () => {
@@ -548,7 +589,7 @@ $('#pickTimelineButton')?.addEventListener('click', async e=>{
     const result=await api('/api/files/pick',{method:'POST',body:JSON.stringify({kind:'timeline'})});
     if(result.cancelled) return;
     input.value = result.path;
-    await inspectTimeline(result.path);
+    await loadTimelineChoices(result.path);
   } catch(err){$('#newJobError').textContent=err.message}
   finally{button.disabled=false;button.textContent='浏览草稿';}
 });
@@ -584,7 +625,8 @@ $('#newJobForm').addEventListener('submit',async e=>{
     const mode = $('input[name="job_mode_select"]:checked')?.value || 'direct';
     let payload;
     if (mode === 'timeline') {
-      const draftPath = $('#timelineDraftInput')?.value.trim();
+      const timelineInput = $('#timelineDraftInput');
+      const draftPath = timelineInput?.dataset.selectedPath || timelineInput?.value.trim();
       if(!draftPath){ error.textContent = '请选择剪映草稿目录或时间线 JSON'; submit.disabled=false; submit.textContent='加入队列'; return; }
       const title = $('#timelineTitleInput')?.value.trim();
       const targetMin = parseFloat($('#newJobForm [name="timeline_target_min"]')?.value) || 70;
@@ -634,6 +676,9 @@ $('#newJobForm').addEventListener('submit',async e=>{
     $('#newJobForm [name="title"]').dataset.userEdited='';
     if($('#timelineTitleInput')) $('#timelineTitleInput').dataset.userEdited='';
     if($('#timelineInspectResult')) $('#timelineInspectResult').style.display='none';
+    if($('#timelineSelectorField')) $('#timelineSelectorField').style.display='none';
+    if($('#timelineSelect')) $('#timelineSelect').innerHTML='';
+    if($('#timelineDraftInput')) $('#timelineDraftInput').dataset.selectedPath='';
     setJobMode('direct');
     location.hash=`#/jobs/${data.id}`;
     toast('任务已加入队列');
