@@ -356,13 +356,15 @@ class JobApiTest(unittest.TestCase):
         self.assertEqual(inspect_res["source_duration"], 60.0)
 
         # Test create timeline job
+        saved_export = self.root / "saved-default-exports"
+        self.app.store.set_setting("export_dir", str(saved_export))
         job = self.app.create_job({
             "job_type": "timeline",
             "timeline_path": str(draft_file),
             "title": "F家限定 / 时间线01 · 约 1 分钟",
             "target_min": 90,
             "target_max": 120,
-            "export_dir": str(self.root / "timeline-exports"),
+            "export_dir": "",
             "product_name": "限定款",
             "export_mode": "segments",
         })
@@ -371,7 +373,7 @@ class JobApiTest(unittest.TestCase):
         self.assertIsNotNone(job.get("timeline_meta"))
         self.assertEqual(job["timeline_meta"]["segment_count"], 1)
         self.assertEqual(job["target_seconds"], "90-120")
-        self.assertEqual(job["export_dir"], str((self.root / "timeline-exports").resolve()))
+        self.assertEqual(job["export_dir"], str(saved_export.resolve()))
         self.assertEqual(job["product_name"], "限定款")
         self.assertEqual(job["export_mode"], "segments")
 

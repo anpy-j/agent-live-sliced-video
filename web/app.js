@@ -429,9 +429,15 @@ async function openNewJob(){
   if (minInput && !minInput.value) minInput.value = '70';
   if (maxInput && !maxInput.value) maxInput.value = '90';
   syncDurationChips();
-  const exportInput = $('#newJobForm [name="export_dir"]');
-  if (exportInput && !exportInput.value) {
-    try { const settings = await api('/api/settings'); if (settings.export_dir) exportInput.value = settings.export_dir; }
+  const exportInputs = [
+    $('#newJobForm [name="export_dir"]'),
+    $('#newJobForm [name="timeline_export_dir"]')
+  ].filter(Boolean);
+  if (exportInputs.some(input=>!input.value)) {
+    try {
+      const settings = await api('/api/settings');
+      if (settings.export_dir) exportInputs.forEach(input=>{if(!input.value)input.value=settings.export_dir});
+    }
     catch (err) {}
   }
   $('#newJobDialog').showModal();

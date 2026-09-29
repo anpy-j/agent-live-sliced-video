@@ -110,7 +110,7 @@ class Application:
         else:
             target_seconds = "70-90"
         raw_export = payload.get("export_dir")
-        if raw_export is None:
+        if raw_export is None or not str(raw_export).strip():
             raw_export = self.store.get_setting("export_dir")
         export_dir = self._resolve_export_dir(raw_export)
         if export_dir:
@@ -169,7 +169,7 @@ class Application:
             target_seconds = target_seconds_str or "70-90"
 
         raw_export = payload.get("export_dir")
-        if raw_export is None:
+        if raw_export is None or not str(raw_export).strip():
             raw_export = self.store.get_setting("export_dir")
         export_dir = self._resolve_export_dir(raw_export)
         if export_dir:
