@@ -43,7 +43,7 @@ function jobFlags(job){return {active:['queued','running'].includes(job.status)}
 function jobRows(jobs){
   if(!jobs.length)return `<div class="empty">${icons.empty}<h3>还没有剪辑任务</h3><p>添加第一段直播素材，系统会自动完成转写、粗筛、判定、排序与渲染。</p><button class="button primary" data-new-job>新建剪辑任务</button></div>`;
   return `<table class="jobs-table"><thead><tr><th>任务</th><th>当前节点</th><th>进度</th><th>状态</th><th>操作</th></tr></thead><tbody>${jobs.map(j=>{const folder=j.deliverables||{};return `<tr>
-<td><div class="job-name"><span class="job-thumb">${icons.video}</span><div><b>${escapeHtml(j.title)}</b>${j.job_type===\'timeline\'?\'<span class="timeline-tag">虚拟时间线</span>\':\'\'}<small>${escapeHtml(j.source_path)}${j.target_seconds ? ` · 目标 ${escapeHtml(j.target_seconds)}s` : \'\'}</small></div></div></td>
+<td><div class="job-name"><span class="job-thumb">${icons.video}</span><div><b>${escapeHtml(j.title)}</b>${j.job_type === "timeline" ? '<span class="timeline-tag">虚拟时间线</span>' : ""}<small>${escapeHtml(j.source_path)}${j.target_seconds ? ` · 目标 ${escapeHtml(j.target_seconds)}s` : ""}</small></div></div></td>
     <td><small>${escapeHtml(j.current_stage?stageLabel(j.current_stage):'—')}</small></td>
     <td><div class="progress"><div class="progress-line"><i style="width:${Math.max(2,Math.min(100,j.progress||0))}%"></i></div><small>${Math.round(j.progress||0)}% · ${formatTime(j.updated_at)}</small></div></td>
     <td>${statusCell(j)}</td>
@@ -233,7 +233,7 @@ async function renderJob(jobId){
   setCrumb('任务详情');loading();const job=await api(`/api/jobs/${jobId}`);
   state.job=job;state.selectedStage=job.current_stage||job.stages[0]?.stage_id;
   app.innerHTML=`<a href="#/queue" class="back-link">${icons.arrow}返回队列</a>
-<div class="detail-head"><div class="detail-title"><span class="eyebrow">${escapeHtml(job.id)}</span><h1>${escapeHtml(job.title)}${job.job_type===\'timeline\'?\'<span class="timeline-tag">虚拟时间线</span>\':\'\'}</h1><p>${escapeHtml(job.source_path)}${job.target_seconds ? ` · 目标时长 ${escapeHtml(job.target_seconds)}s` : \'\'}</p></div><div class="detail-actions" id="jobControls" data-render-key="${escapeHtml(deliverablesControlsKey(job))}">${jobControlsHtml(job)}</div></div>
+<div class="detail-head"><div class="detail-title"><span class="eyebrow">${escapeHtml(job.id)}</span><h1>${escapeHtml(job.title)}${job.job_type === "timeline" ? '<span class="timeline-tag">虚拟时间线</span>' : ""}</h1><p>${escapeHtml(job.source_path)}${job.target_seconds ? ` · 目标时长 ${escapeHtml(job.target_seconds)}s` : ""}</p></div><div class="detail-actions" id="jobControls" data-render-key="${escapeHtml(deliverablesControlsKey(job))}">${jobControlsHtml(job)}</div></div>
   <div class="panel"><div class="panel-head"><div><h2>整体流程</h2><p id="jobProgressMeta">${Math.round(job.progress||0)}% · 当前节点 ${escapeHtml(stageLabel(job.current_stage)||'—')}</p></div><div class="workflow-meta"><span class="connection-state" id="jobConnectionState"><i></i>实时连接正常</span><span class="panel-hint">点击节点查看详情</span></div></div><div class="workflow" id="jobWorkflow" data-render-key="${escapeHtml(workflowKey(job))}">${workflowHtml(job)}</div></div>
   <div class="detail-grid"><div><div class="panel stage-detail" id="jobStageDetail" data-render-key="${escapeHtml(stageDetailKey(job))}">${stageDetailHtml(job)}</div>
   <div class="panel"><div class="panel-head"><div><h2>任务产物</h2><p>图片、时间线、日志与视频均可打开</p></div></div><div id="jobArtifacts" data-render-key="${escapeHtml(artifactsKey(job))}">${artifactsHtml(job)}</div></div></div>
