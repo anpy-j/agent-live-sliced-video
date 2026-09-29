@@ -338,13 +338,23 @@ def load_virtual_timeline(target: str | Path | dict[str, Any]) -> VirtualTimelin
     if not path.is_file():
         raise FileNotFoundError(f"时间线文件不存在: {target}")
 
+    content = ""
     try:
-        content = path.read_text(encoding="utf-8")
+        content = path.read_text(encoding="utf-8", errors="ignore")
         data = json.loads(content)
     except Exception as exc:
-        if (path.parent / "crypto_key_store.dat").is_file() or not content.strip().startswith(("{", "[")):
+        is_jianying = (
+            path.name in ("draft_content.json", "draft_meta_info.json")
+            or (path.parent / "draft_content.json").is_file()
+            or (path.parent / "draft_meta_info.json").is_file()
+        )
+        is_encrypted = (
+            (path.parent / "crypto_key_store.dat").is_file()
+            or not content.strip().startswith(("{", "["))
+        )
+        if is_jianying and is_encrypted:
             raise ValueError(
-                f"检测到剪映高版本对该草稿文件 ({path.name}) 启用了本地加密保护，外部程序无法直接读取。请在剪映中导出明文时间线/草稿，或使用直传视频模式。"
+                f"检测到剪映高版本加密草稿 ({path.name})。剪映专业版（Jianying Pro 6.0+）对本地草稿文件实施了独占 AES 加密存储，外部程序无法直接读取其内部片段轨道。建议使用【原素材直接切片】模式直接导入原片进行 AI 全自动切片，或使用标准虚拟时间线 JSON 描述文件。"
             ) from exc
         raise ValueError(f"时间线文件解析失败 ({path.name}): {exc}") from exc
 
