@@ -342,6 +342,10 @@ def load_virtual_timeline(target: str | Path | dict[str, Any]) -> VirtualTimelin
         content = path.read_text(encoding="utf-8")
         data = json.loads(content)
     except Exception as exc:
+        if (path.parent / "crypto_key_store.dat").is_file() or not content.strip().startswith(("{", "[")):
+            raise ValueError(
+                f"检测到剪映高版本对该草稿文件 ({path.name}) 启用了本地加密保护，外部程序无法直接读取。请在剪映中导出明文时间线/草稿，或使用直传视频模式。"
+            ) from exc
         raise ValueError(f"时间线文件解析失败 ({path.name}): {exc}") from exc
 
     if isinstance(data, dict):
