@@ -368,3 +368,35 @@ def test_render_segment_keeps_direct_media_behavior(tmp_path):
     assert run.call_args.args[0] == [{"src": 1, "start": 3.0, "end": 8.0}]
     assert run.call_args.kwargs["media"] == str(direct_media)
 
+
+def test_group_and_render_virtual_clause_across_tiny_cut(tmp_path):
+    from agent_video.pipeline.render import group_segments_for_export, render_segment
+
+    first = tmp_path / "first.mp4"
+    second = tmp_path / "second.mp4"
+    segments = [
+        {"id": 12, "source_path": str(first), "source_start": 10.0,
+         "source_end": 12.0, "start": 10.0, "end": 12.0, "speed": 1.3},
+        {"id": 12, "source_path": str(second), "source_start": 30.0,
+         "source_end": 30.017, "start": 30.0, "end": 30.017, "speed": 1.3},
+        {"id": 13, "source_path": str(second), "source_start": 40.0,
+         "source_end": 43.0, "start": 40.0, "end": 43.0, "speed": 1.3},
+    ]
+
+    groups = group_segments_for_export(segments)
+    assert [len(group) for group in groups] == [2, 1]
+
+    with patch("agent_video.pipeline.render._run_render_multi", return_value="out.mp4") as run:
+        render_segment("display name", groups[0], str(tmp_path / "out.mp4"),
+                       str(tmp_path), index=2)
+
+    assert run.call_args.args[0] == [
+        {"src": 1, "start": 10.0, "end": 12.0, "speed": 1.3},
+        {"src": 2, "start": 30.0, "end": 30.017, "speed": 1.3},
+    ]
+    assert run.call_args.args[3] == "render_segment_002.json"
+    assert run.call_args.kwargs["src_args"] == [
+        "--src", f"1={first.resolve()}", "--src", f"2={second.resolve()}",
+    ]
+    assert run.call_args.kwargs["no_loudnorm"] is True
+

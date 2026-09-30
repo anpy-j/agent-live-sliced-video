@@ -80,6 +80,24 @@ def build_virtual_segments(ordered_clauses: list[dict[str, Any]],
     return segments
 
 
+def group_segments_for_export(
+        segments: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Group adjacent physical slices that belong to one selected AI clause.
+
+    A virtual-timeline clause can cross Jianying cut boundaries and is therefore
+    flattened into several render rows.  Split export must concatenate those rows
+    into one deliverable instead of trying to encode millisecond-sized fragments.
+    """
+    groups: list[list[dict[str, Any]]] = []
+    for segment in segments:
+        segment_id = segment.get("id")
+        if groups and segment_id is not None and groups[-1][-1].get("id") == segment_id:
+            groups[-1].append(segment)
+        else:
+            groups.append([segment])
+    return groups
+
+
 def _run_render_multi(rows: list[dict[str, Any]], output: str, workdir: str,
                       timeline_name: str, *, media: str | None = None,
                       src_args: list[str] | None = None,
@@ -154,11 +172,44 @@ def render_video(media: str, segments: list[dict[str, Any]], output: str, workdi
                                  media=media, width=width, height=height, fps=fps, preset=preset)
 
 
-def render_segment(media: str, segment: dict[str, Any], output: str, workdir: str,
+def render_segment(media: str, segment: dict[str, Any] | list[dict[str, Any]],
+                   output: str, workdir: str,
                    *, width: int | None = None, height: int | None = None,
                    fps: float | None = None, preset: str | None = None,
                    index: int = 0) -> str:
     """单独剪出 ``segment``；保持源响度，不做整条 loudnorm。"""
+    items = segment if isinstance(segment, list) else [segment]
+    if not items:
+        raise RenderError("导出分段为空")
+
+    if len(items) > 1:
+        source_paths: list[str] = []
+        for item in items:
+            path = str(item.get("source_path") or media)
+            if path not in source_paths:
+                source_paths.append(path)
+        source_to_id = {path: source_id for source_id, path in enumerate(source_paths, 1)}
+        rows = []
+        for item in items:
+            path = str(item.get("source_path") or media)
+            row = {
+                "src": source_to_id[path],
+                "start": float(item.get("source_start", item["start"])),
+                "end": float(item.get("source_end", item["end"])),
+            }
+            if "speed" in item:
+                row["speed"] = float(item["speed"])
+            rows.append(row)
+        src_args: list[str] = []
+        for path, source_id in source_to_id.items():
+            src_args.extend(["--src", f"{source_id}={os.path.abspath(path)}"])
+        return _run_render_multi(
+            rows, output, workdir, f"render_segment_{index:03d}.json",
+            src_args=src_args, no_loudnorm=True, width=width, height=height,
+            fps=fps, preset=preset,
+        )
+
+    segment = items[0]
     # Virtual-timeline jobs store a human-readable label in the job-level
     # source_path.  Each mapped segment carries the real media path and the
     # source-axis timestamps, which must take precedence for split export.

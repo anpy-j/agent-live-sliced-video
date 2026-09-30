@@ -23,7 +23,8 @@ from typing import Any, Iterator
 
 from .db import Store, utc_now
 from .pipeline import (PipelineError, next_available_dir, next_available_output,
-                       render_segment, run_pipeline, run_pipeline_stage)
+                       group_segments_for_export, render_segment, run_pipeline,
+                       run_pipeline_stage)
 
 HEARTBEAT_SECONDS = 5.0
 
@@ -539,9 +540,10 @@ class JobRunner:
             sub.mkdir(parents=True, exist_ok=True)
             source = media or str(manifest.get("source") or "")
             exported: list[Path] = []
-            for index, segment in enumerate(segments, start=1):
+            segment_groups = group_segments_for_export(segments)
+            for index, segment_group in enumerate(segment_groups, start=1):
                 target = Path(next_available_output(str(sub), f"{index:02d}"))
-                render_segment(source, segment, str(target), str(workspace), index=index)
+                render_segment(source, segment_group, str(target), str(workspace), index=index)
                 exported.append(target)
             return exported
         rendered = workspace / str(manifest.get("output") or "")

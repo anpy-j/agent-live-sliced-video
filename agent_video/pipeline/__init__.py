@@ -12,7 +12,8 @@ from .ai import DECISION_SCHEMA, ORDER_SCHEMA, ai_call
 from .errors import (AIReturnError, AsrError, PipelineConfigError, PipelineError,
                      RenderError, RuleFilterEmpty, TargetUnreachable)
 from .filter import filter_clauses
-from .render import build_segments, render_segment, render_video, select_visual
+from .render import (build_segments, group_segments_for_export, render_segment,
+                     render_video, select_visual)
 from .run import (next_available_dir, next_available_output, run_pipeline,
                    run_pipeline_stage)
 from .split import split_clauses
@@ -32,6 +33,7 @@ __all__ = [
     "build_segments",
     "build_units",
     "filter_clauses",
+    "group_segments_for_export",
     "next_available_dir",
     "next_available_output",
     "order_candidates",
