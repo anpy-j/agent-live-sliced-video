@@ -326,3 +326,45 @@ def test_build_virtual_segments_and_render_timeline():
     assert pytest.approx(s1["source_end"], 0.001) == 2039.0
     assert pytest.approx(s1["speed"], 0.001) == 1.3
 
+
+def test_render_segment_prefers_virtual_timeline_source_path(tmp_path):
+    from agent_video.pipeline.render import render_segment
+
+    real_media = tmp_path / "real-source.mp4"
+    segment = {
+        "start": 12.0,
+        "end": 16.0,
+        "source_path": str(real_media),
+        "source_start": 120.5,
+        "source_end": 125.7,
+        "speed": 1.3,
+    }
+
+    with patch("agent_video.pipeline.render._run_render_multi", return_value="out.mp4") as run:
+        result = render_segment(
+            "timeline / display name (about 30 min)", segment,
+            str(tmp_path / "out.mp4"), str(tmp_path), index=7,
+        )
+
+    assert result == "out.mp4"
+    rows, output, workdir, timeline_name = run.call_args.args
+    assert rows == [{"src": 1, "start": 120.5, "end": 125.7, "speed": 1.3}]
+    assert output == str(tmp_path / "out.mp4")
+    assert workdir == str(tmp_path)
+    assert timeline_name == "render_segment_007.json"
+    assert run.call_args.kwargs["media"] == str(real_media)
+    assert run.call_args.kwargs["no_loudnorm"] is True
+
+
+def test_render_segment_keeps_direct_media_behavior(tmp_path):
+    from agent_video.pipeline.render import render_segment
+
+    direct_media = tmp_path / "direct.mp4"
+    segment = {"start": 3.0, "end": 8.0}
+
+    with patch("agent_video.pipeline.render._run_render_multi", return_value="out.mp4") as run:
+        render_segment(str(direct_media), segment, str(tmp_path / "out.mp4"), str(tmp_path))
+
+    assert run.call_args.args[0] == [{"src": 1, "start": 3.0, "end": 8.0}]
+    assert run.call_args.kwargs["media"] == str(direct_media)
+

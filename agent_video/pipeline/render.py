@@ -159,7 +159,16 @@ def render_segment(media: str, segment: dict[str, Any], output: str, workdir: st
                    fps: float | None = None, preset: str | None = None,
                    index: int = 0) -> str:
     """单独剪出 ``segment``；保持源响度，不做整条 loudnorm。"""
-    rows = [{"src": 1, "start": float(segment["start"]), "end": float(segment["end"])}]
+    # Virtual-timeline jobs store a human-readable label in the job-level
+    # source_path.  Each mapped segment carries the real media path and the
+    # source-axis timestamps, which must take precedence for split export.
+    segment_media = str(segment.get("source_path") or media)
+    start = float(segment.get("source_start", segment["start"]))
+    end = float(segment.get("source_end", segment["end"]))
+    row = {"src": 1, "start": start, "end": end}
+    if "speed" in segment:
+        row["speed"] = float(segment["speed"])
+    rows = [row]
     return _run_render_multi(rows, output, workdir,
-                             f"render_segment_{index:03d}.json", media=media,
+                             f"render_segment_{index:03d}.json", media=segment_media,
                              no_loudnorm=True, width=width, height=height, fps=fps, preset=preset)
