@@ -275,6 +275,37 @@ class LeanPipelineEndToEndTest(unittest.TestCase):
         self.assertEqual(s3_path.read_bytes(), s3_before)
         self.assertEqual(order_path.read_bytes(), order_before)
 
+    def test_render_stage_rerun_uses_virtual_timeline_sources(self):
+        class FakeTimeline:
+            title = "虚拟时间线"
+            timeline_id = "vt-1"
+
+            def map_timeline_range(self, start, end):
+                return [{"timeline_id": self.timeline_id,
+                         "timeline_start": start, "timeline_end": end,
+                         "segment_id": "s1", "segment_offset": 0.0,
+                         "source_path": "real-source.ts",
+                         "source_start": start + 10, "source_end": end + 10,
+                         "speed": 1.0}]
+
+            def to_dict(self):
+                return {"timeline_id": self.timeline_id, "title": self.title,
+                        "segments": []}
+
+        with patch.object(pipeline_run, "ai_call", side_effect=fake_ai):
+            self.run_pipeline()
+        timeline = FakeTimeline()
+        with patch.object(pipeline_run, "render_video") as render:
+            result = pipeline_run.run_pipeline_stage(
+                self.media, self.workdir, "render", target_seconds=(8.0, 9.0),
+                output_stem="重渲染", virtual_timeline=timeline)
+
+        segments = render.call_args.args[1]
+        self.assertTrue(segments)
+        self.assertTrue(all(row["source_path"] == "real-source.ts" for row in segments))
+        self.assertIs(render.call_args.kwargs["virtual_timeline"], timeline)
+        self.assertEqual(result["timeline_id"], "vt-1")
+
 
 class RenderSeamTest(unittest.TestCase):
     def test_invalid_bounds_raise_render_error(self):

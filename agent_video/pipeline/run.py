@@ -405,7 +405,8 @@ def run_pipeline_stage(media: str, workdir: str, stage: str, *,
                        preset: str | None = None,
                        select_visual_fn: Callable[[dict[str, Any]], tuple[float, float]]
                        | None = None,
-                       on_stage: StageCallback | None = None) -> dict[str, Any]:
+                       on_stage: StageCallback | None = None,
+                       virtual_timeline: Any | None = None) -> dict[str, Any]:
     """只重跑 S2/S3/S4/S6 中的一个节点，并严格复用其上游落盘数据。"""
     if stage not in {"filter", "judge", "order", "render"}:
         raise PipelineError(f"不支持单节点重跑：{stage}")
@@ -500,14 +501,19 @@ def run_pipeline_stage(media: str, workdir: str, stage: str, *,
         if not ordered_clauses:
             raise PipelineError("S4 排序结果为空，无法渲染成片")
         _emit(on_stage, "render", "start", "单独重跑渲染成片（复用 S4 排序结果）")
-        segments = build_segments(ordered_clauses, select_visual_fn)
+        if virtual_timeline is not None:
+            segments = build_virtual_segments(ordered_clauses, virtual_timeline)
+        else:
+            segments = build_segments(ordered_clauses, select_visual_fn)
         output = _next_render_output(workdir, output_stem)
         render_video(media, segments, output, workdir,
                      width=render_size[0] if render_size else None,
                      height=render_size[1] if render_size else None,
-                     preset=preset)
+                     preset=preset, virtual_timeline=virtual_timeline)
         manifest = {
-            "source": media,
+            "source": virtual_timeline.title if virtual_timeline is not None else media,
+            "timeline_id": virtual_timeline.timeline_id if virtual_timeline else None,
+            "virtual_timeline": virtual_timeline.to_dict() if virtual_timeline else None,
             "duration": float(judged_data.get("duration") or 0.0),
             "main_product": order_data.get("main_product") or "",
             "order_sections": order_data.get("sections") or [],

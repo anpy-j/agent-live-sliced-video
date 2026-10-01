@@ -132,7 +132,8 @@ def _run_pipeline_child(result_queue: Any, source: str, workspace: str,
         if only_stage:
             manifest = run_pipeline_stage(
                 source, workspace, only_stage, target_seconds=target_seconds,
-                product_name=product_name, output_stem=output_stem, on_stage=on_stage)
+                product_name=product_name, output_stem=output_stem, on_stage=on_stage,
+                virtual_timeline=vt)
         else:
             manifest = run_pipeline(source, workspace, target_seconds=target_seconds,
                                     output_stem=output_stem, product_name=product_name,

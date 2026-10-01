@@ -22,6 +22,29 @@ def read_filter_graph(command):
 
 
 class EngineValidationTest(unittest.TestCase):
+    def test_render_probes_mpeg_ts_stream_from_structured_output(self):
+        # MPEG-TS CSV output can repeat fields once under the program and once under
+        # the top-level stream. JSON lets us explicitly consume only `streams`.
+        probe = json.dumps({
+            "programs": [{"streams": [{"avg_frame_rate": "22/1",
+                                           "width": 1088, "height": 1920}]}],
+            "streams": [{"avg_frame_rate": "22/1", "r_frame_rate": "22/1",
+                         "width": 1088, "height": 1920}],
+        })
+        for renderer in (render_multi, render_dual):
+            with self.subTest(renderer=renderer.__name__), \
+                    patch.object(renderer, "run", return_value=probe):
+                self.assertEqual(renderer.source_fps("source.ts"), 22.0)
+                self.assertEqual(renderer.source_size("source.ts"), (1088, 1920))
+
+    def test_render_fps_falls_back_to_nominal_rate(self):
+        probe = json.dumps({"streams": [{"avg_frame_rate": "0/0",
+                                          "r_frame_rate": "30000/1001"}]})
+        for renderer in (render_multi, render_dual):
+            with self.subTest(renderer=renderer.__name__), \
+                    patch.object(renderer, "run", return_value=probe):
+                self.assertAlmostEqual(renderer.source_fps("source.ts"), 29.97003, places=5)
+
     def test_glossary_rewrites_known_asr_mishearings(self):
         from agent_video.engine.scripts.glossary import correct_terms
         self.assertEqual(correct_terms("全部做这样的一个裸口之带"), "全部做这样的一个罗纹之带")

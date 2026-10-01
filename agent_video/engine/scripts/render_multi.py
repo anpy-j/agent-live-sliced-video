@@ -10,9 +10,11 @@ H.264 CRF16 preset slow、AAC 256k、响度目标 -6.5 LUFS（单遍 loudnorm �
 """
 import argparse
 import json
+import math
 import os
 import subprocess
 import sys
+from fractions import Fraction
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ffmpeg_graph import filter_complex_args  # noqa: E402
@@ -38,17 +40,38 @@ def parse_sources(values):
     return result
 
 
-def source_fps(path):
+def source_video_stream(path):
+    """Return the first video stream without CSV duplication from MPEG-TS programs."""
     out = run(["ffprobe", "-v", "error", "-select_streams", "v:0",
-               "-show_entries", "stream=avg_frame_rate", "-of", "csv=p=0", path]).strip()
-    num, _, den = out.partition("/")
-    return float(num) / float(den or 1)
+               "-show_entries", "stream=avg_frame_rate,r_frame_rate,width,height",
+               "-of", "json", path])
+    try:
+        streams = json.loads(out).get("streams") or []
+        return streams[0]
+    except (AttributeError, IndexError, TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"ffprobe returned no usable video stream for {path!r}") from exc
+
+
+def source_fps(path):
+    stream = source_video_stream(path)
+    for field in ("avg_frame_rate", "r_frame_rate"):
+        try:
+            fps = float(Fraction(str(stream.get(field, "0/0"))))
+        except (ValueError, ZeroDivisionError):
+            continue
+        if math.isfinite(fps) and fps > 0:
+            return fps
+    raise RuntimeError(f"ffprobe returned no usable frame rate for {path!r}")
 
 
 def source_size(path):
-    out = run(["ffprobe", "-v", "error", "-select_streams", "v:0",
-               "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", path]).strip()
-    width, height = (int(value) for value in out.split("x"))
+    stream = source_video_stream(path)
+    try:
+        width, height = int(stream["width"]), int(stream["height"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"ffprobe returned no usable video size for {path!r}") from exc
+    if width <= 0 or height <= 0:
+        raise RuntimeError(f"ffprobe returned invalid video size {width}x{height} for {path!r}")
     return width, height
 
 
