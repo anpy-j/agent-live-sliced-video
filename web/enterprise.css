@@ -497,3 +497,9 @@ input[readonly], input:disabled { background: #081018; color: #708797; }
   .jianying-defaults { align-items: flex-start; flex-direction: column; }
   .jianying-grid { grid-template-columns: 1fr; }
 }
+
+.jianying-grid{grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}.jianying-card-body{gap:8px;padding:11px 12px}.jianying-card-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px}.jianying-card-head h2{min-width:0;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px}.jianying-card-head span{flex:0 0 auto;color:var(--dim);font-size:10px}.jianying-card p{min-height:34px;font-size:11px}.jianying-card-foot{display:flex;align-items:end;gap:8px}.jianying-card-foot .jianying-title-preview{min-width:0;flex:1;padding:6px 8px}.jianying-card-foot .jianying-title-preview span{font-size:9px}.jianying-card-foot .jianying-title-preview b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}.jianying-card-foot .button{width:auto;flex:0 0 auto;min-height:32px;padding:0 12px}
+
+@media (max-width: 620px) {
+  .jianying-grid { grid-template-columns: 1fr; }
+}
