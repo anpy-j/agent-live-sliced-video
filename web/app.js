@@ -75,21 +75,37 @@ async function renderQueue(){
   bindCommon();
 }
 
-async function renderJianyingDrafts(){
-  setCrumb('剪映草稿');loading();
-  const data=await api('/api/jianying/drafts');state.jianying=data;
+async function renderJianyingDrafts(force=false){
+  setCrumb('剪映草稿');
+  if(force||!state.jianying){loading();state.jianying=await api('/api/jianying/drafts');}
+  const data=state.jianying;
   const drafts=data.drafts||[],defaults=data.defaults||{};
   const cards=drafts.map(draft=>{
     const timeline=draft.recommended_timeline;
     const recommendation=timeline?`最长时间线：${escapeHtml(timeline.name||timeline.title||timeline.timeline_id)} · ${durationText(timeline.timeline_duration)}`:(draft.timeline_error?'时间线解析失败':'未发现有效时间线');
-    return `<article class="jianying-card"><div class="jianying-card-body"><div class="jianying-card-head"><h2>${escapeHtml(draft.name)}</h2><span>${formatTime(draft.modified_at)}</span></div><p>${recommendation}</p><div class="jianying-card-foot"><div class="jianying-title-preview"><span>成片名称</span><b>${escapeHtml(draft.suggested_title)}</b></div><button type="button" class="button primary small" data-edit-jianying="${escapeHtml(draft.id)}" ${timeline?'':'disabled'}>剪辑</button></div></div></article>`;
+    const activeCount=Number(draft.active_job_count||0);
+    return `<article class="jianying-card"><div class="jianying-card-body"><div class="jianying-card-head"><h2>${escapeHtml(draft.name)}</h2><span>${formatTime(draft.modified_at)}</span></div><p>${recommendation}</p><div class="jianying-card-foot"><div class="jianying-title-preview"><span>成片名称</span><b>${escapeHtml(draft.suggested_title)}</b></div><div class="jianying-action">${activeCount?`<span class="jianying-running">剪辑中 ${activeCount}</span>`:''}<button type="button" class="button primary small" data-edit-jianying="${escapeHtml(draft.id)}" ${timeline?'':'disabled'}>剪辑</button></div></div></div></article>`;
   }).join('');
-  app.innerHTML=`<div class="hero"><div><span class="eyebrow">JIANYING DRAFTS</span><h1>剪映草稿</h1><p>点击草稿后复用创建剪辑任务窗口，默认选最长时间线、120–180 秒深度、分段版。</p></div><button class="button ghost" data-refresh-jianying>刷新草稿</button></div><div class="jianying-defaults"><span>默认导出目录</span><b>${escapeHtml(defaults.export_dir||'—')}</b></div>${drafts.length?`<div class="jianying-grid">${cards}</div>`:`<div class="panel"><div class="empty">${icons.empty}<h3>没有找到剪映草稿</h3><p>请确认本机已安装剪映专业版并保存过草稿。</p></div></div>`}`;
-  $('[data-refresh-jianying]')?.addEventListener('click',renderJianyingDrafts);
+  app.innerHTML=`<div class="hero"><div><span class="eyebrow">JIANYING DRAFTS</span><h1>剪映草稿</h1><p>点击“剪辑”即按最长时间线、120–180 秒深度和分段版直接加入队列。</p></div><button class="button ghost" data-refresh-jianying>刷新草稿</button></div><div class="jianying-defaults"><span>默认导出目录</span><b>${escapeHtml(defaults.export_dir||'—')}</b></div>${drafts.length?`<div class="jianying-grid">${cards}</div>`:`<div class="panel"><div class="empty">${icons.empty}<h3>没有找到剪映草稿</h3><p>请确认本机已安装剪映专业版并保存过草稿。</p></div></div>`}`;
+  $('[data-refresh-jianying]')?.addEventListener('click',()=>renderJianyingDrafts(true));
   $$('[data-edit-jianying]').forEach(button=>button.addEventListener('click',()=>{
     const draft=drafts.find(item=>item.id===button.dataset.editJianying);
-    if(draft)openNewJobForDraft(draft,defaults);
+    if(draft)enqueueJianyingDraft(draft,defaults,button);
   }));
+}
+
+function nextSuggestedTitle(title){const match=String(title).match(/-(\d+)$/);return match?`${title.slice(0,-match[0].length)}-${Number(match[1])+1}`:`${title}-1`;}
+async function enqueueJianyingDraft(draft,defaults,button){
+  const timeline=draft.recommended_timeline;
+  if(!timeline)return;
+  button.disabled=true;button.textContent='加入中…';
+  try{
+    const job=await api('/api/jobs',{method:'POST',body:JSON.stringify({job_type:'timeline',draft_path:timeline.path,title:draft.suggested_title,draft_name:draft.name,auto_title:true,product_name:'',export_mode:defaults.export_mode||'segments',export_dir:defaults.export_dir||'',target_min:defaults.target_min||120,target_max:defaults.target_max||180})});
+    draft.active_job_count=Number(draft.active_job_count||0)+1;
+    draft.suggested_title=nextSuggestedTitle(job.title||draft.suggested_title);
+    renderJianyingDrafts();
+    toast(`“${draft.name}”已加入剪辑队列`);
+  }catch(err){button.disabled=false;button.textContent='剪辑';toast(err.message)}
 }
 
 function artifactCard(a){

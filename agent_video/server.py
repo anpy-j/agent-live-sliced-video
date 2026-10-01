@@ -253,14 +253,23 @@ class Application:
         return discovered
 
     def list_jianying_drafts(self) -> dict[str, Any]:
-        from .jianying import DEFAULT_EXPORT_DIR, list_jianying_drafts, next_available_title
+        from .jianying import (
+            DEFAULT_EXPORT_DIR, draft_title_base, list_jianying_drafts, next_available_title,
+        )
 
         drafts = list_jianying_drafts()
         titles = self.store.list_job_titles()
+        active_titles = self.store.list_active_job_titles()
         covers: dict[str, Path] = {}
         for draft in drafts:
             draft["suggested_title"] = next_available_title(
                 draft["name"], titles, DEFAULT_EXPORT_DIR
+            )
+            title_pattern = re.compile(
+                rf"^{re.escape(draft_title_base(draft['name']))}(?:-\d+)?$", re.IGNORECASE
+            )
+            draft["active_job_count"] = sum(
+                1 for title in active_titles if title_pattern.fullmatch(title)
             )
             cover_path = draft.pop("cover_path", None)
             if cover_path:

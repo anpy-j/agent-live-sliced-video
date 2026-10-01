@@ -114,16 +114,20 @@ def list_jianying_drafts(root: Path | None = None) -> list[dict[str, Any]]:
     return result
 
 
+def draft_title_base(draft_name: str, now: datetime | None = None) -> str:
+    clean_name = re.sub(r"[\\/:*?\"<>|]+", "", str(draft_name)).strip()
+    if not clean_name:
+        clean_name = "剪映草稿"
+    return f"{clean_name}{(now or datetime.now()).strftime('%m%d')}"
+
+
 def next_available_title(
     draft_name: str,
     existing_titles: Iterable[str],
     export_dir: str | Path | None = None,
     now: datetime | None = None,
 ) -> str:
-    clean_name = re.sub(r"[\\/:*?\"<>|]+", "", str(draft_name)).strip()
-    if not clean_name:
-        clean_name = "剪映草稿"
-    base = f"{clean_name}{(now or datetime.now()).strftime('%m%d')}"
+    base = draft_title_base(draft_name, now)
     used = {str(title).casefold() for title in existing_titles}
     folder = Path(export_dir).expanduser() if export_dir else None
 

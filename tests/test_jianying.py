@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from agent_video.jianying import list_jianying_drafts, next_available_title
+from agent_video.jianying import draft_title_base, list_jianying_drafts, next_available_title
 
 
 class JianyingDraftsTest(unittest.TestCase):
@@ -52,6 +52,9 @@ class JianyingDraftsTest(unittest.TestCase):
         )
 
         self.assertEqual(title, "米兰1001-2")
+
+    def test_title_base_uses_draft_name_and_current_date(self):
+        self.assertEqual(draft_title_base("米兰", datetime(2026, 10, 2)), "米兰1002")
 
 
 if __name__ == "__main__":

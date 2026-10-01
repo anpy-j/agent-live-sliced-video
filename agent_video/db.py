@@ -241,6 +241,13 @@ class Store:
             rows = con.execute("SELECT title FROM jobs").fetchall()
         return [str(row["title"]) for row in rows]
 
+    def list_active_job_titles(self) -> list[str]:
+        with self.connect() as con:
+            rows = con.execute(
+                "SELECT title FROM jobs WHERE status IN ('queued','running','waiting_input')"
+            ).fetchall()
+        return [str(row["title"]) for row in rows]
+
     def list_recoverable_jobs(self) -> list[dict[str, Any]]:
         with self.connect() as con:
             rows = con.execute(
