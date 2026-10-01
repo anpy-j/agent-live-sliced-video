@@ -16,6 +16,10 @@ const icons = {
 
 async function api(url, options={}) {
   const response = await fetch(url, {headers:{'Content-Type':'application/json',...(options.headers||{})}, ...options});
+  const contentType=response.headers.get('content-type')||'';
+  if(!contentType.includes('application/json')){
+    throw new Error('后台服务未加载当前页面所需接口，请完全退出并重启 LiveCut 后台服务');
+  }
   const data = await response.json().catch(()=>({}));
   if (!response.ok) throw new Error(data.error || `请求失败 ${response.status}`);
   return data;
