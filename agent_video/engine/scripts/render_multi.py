@@ -17,6 +17,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ffmpeg_graph import filter_complex_args  # noqa: E402
 
+SEEK_PREROLL_SECONDS = 5.0
+
 
 def run(cmd):
     result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
@@ -64,27 +66,48 @@ def output_size(path, width, height):
     return 1440, 2560
 
 
-def video_filter(width, height, fps, allow_upscale, frame_count, speed=1.0):
+def video_filter(width, height, fps, allow_upscale, frame_count, speed=1.0,
+                 trim_start=0.0, raw_duration=None):
     if allow_upscale:
         scale = (f"scale={width}:{height}:force_original_aspect_ratio=decrease,")
     else:
         ratio = f"min(1\\,min({width}/iw\\,{height}/ih))"
         scale = (f"scale=w='trunc(iw*{ratio}/2)*2':"
                  f"h='trunc(ih*{ratio}/2)*2',")
-    pts = f"setpts=(PTS-STARTPTS)/{speed:.6f}" if abs(speed - 1.0) > 1e-4 else "setpts=PTS-STARTPTS"
-    return (scale + f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,"
-            f"{pts},fps={fps:.6f},trim=end_frame={frame_count},"
+    source_trim = (f"trim=start={trim_start:.6f}:duration={raw_duration:.6f},"
+                   if raw_duration is not None else "")
+    if raw_duration is not None:
+        # Use the requested cut as the shared origin. STARTPTS would independently
+        # zero video/audio and permanently erase their source timestamp offset.
+        pts = f"setpts=(PTS-{trim_start:.6f}/TB)/{speed:.6f}"
+    else:
+        pts = (f"setpts=(PTS-STARTPTS)/{speed:.6f}"
+               if abs(speed - 1.0) > 1e-4 else "setpts=PTS-STARTPTS")
+    return (source_trim + scale + f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,"
+            f"{pts},fps={fps:.6f}:start_time=0,trim=end_frame={frame_count},"
             f"setpts=N/({fps:.6f}*TB),setsar=1")
 
 
-def audio_filter(duration, speed=1.0, edge=0.0):
+def audio_filter(duration, speed=1.0, edge=0.0, trim_start=0.0,
+                 raw_duration=None):
     """Keep audio on the exact same CFR clock as its corresponding video piece."""
+    source_trim = (f"atrim=start={trim_start:.6f}:duration={raw_duration:.6f},"
+                   if raw_duration is not None else "")
     tempo = f"atempo={speed:.6f}," if abs(speed - 1.0) > 1e-4 else ""
     fades = (f",afade=t=in:st=0:d={edge:.4f},"
              f"afade=t=out:st={max(0.0, duration - edge):.4f}:d={edge:.4f}") if edge else ""
-    return (f"{tempo}aresample=48000:first_pts=0,"
+    origin = (f"asetpts=PTS-{trim_start:.6f}/TB"
+              if raw_duration is not None else "asetpts=PTS-STARTPTS")
+    return (f"{source_trim}{origin},{tempo}"
+            f"aresample=48000:first_pts=0,"
             f"aformat=sample_rates=48000:channel_layouts=stereo,"
             f"apad,atrim=duration={duration:.9f},asetpts=N/SR/TB{fades}")
+
+
+def input_window(start, end, preroll=SEEK_PREROLL_SECONDS):
+    """Seek before a cut, then trim in-filter so video is not lost to the next keyframe."""
+    seek_start = max(0.0, start - preroll)
+    return seek_start, end - seek_start, start - seek_start, end - start
 
 
 def segment_frame_counts(timeline, fps):
@@ -136,11 +159,14 @@ def main():
         sources[int(timeline[0].get("src", 1))], args.width, args.height)
 
     command = ["ffmpeg", "-y", "-v", "error"]
+    input_windows = []
     for row in timeline:
         start, end = float(row["start"]), float(row["end"])
         if start < 0 or end <= start:
             raise SystemExit(f"Invalid segment bounds: {start}-{end}")
-        command += ["-ss", f"{start:.6f}", "-to", f"{end:.6f}",
+        seek_start, input_duration, trim_start, raw_duration = input_window(start, end)
+        input_windows.append((trim_start, raw_duration))
+        command += ["-ss", f"{seek_start:.6f}", "-t", f"{input_duration:.6f}",
                     "-i", sources[int(row.get("src", 1))]]
 
     frame_counts = segment_frame_counts(timeline, fps)
@@ -149,11 +175,12 @@ def main():
         speed = float(timeline[index].get("speed", 1.0))
         frame_count = frame_counts[index]
         duration = frame_count / fps
-        filters.append(f"[{index}:v]{video_filter(args.width, args.height, fps, args.allow_upscale, frame_count, speed=speed)}"
+        trim_start, raw_duration = input_windows[index]
+        filters.append(f"[{index}:v]{video_filter(args.width, args.height, fps, args.allow_upscale, frame_count, speed=speed, trim_start=trim_start, raw_duration=raw_duration)}"
                        f"[v{index}]")
         edge = max(0.0, min(args.audio_edge_ms / 1000.0, duration / 4.0))
         filters.append(
-            f"[{index}:a]{audio_filter(duration, speed=speed, edge=edge)}[a{index}]"
+            f"[{index}:a]{audio_filter(duration, speed=speed, edge=edge, trim_start=trim_start, raw_duration=raw_duration)}[a{index}]"
         )
     labels = "".join(f"[v{i}][a{i}]" for i in range(len(timeline)))
     filters.append(f"{labels}concat=n={len(timeline)}:v=1:a=1[vcat][acat]")

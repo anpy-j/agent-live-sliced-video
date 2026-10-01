@@ -361,17 +361,35 @@ class EngineValidationTest(unittest.TestCase):
 
     def test_render_multi_applies_speed_before_cfr_and_uses_exact_frame_count(self):
         graph = render_multi.video_filter(
-            1080, 1920, 30.0, False, frame_count=37, speed=1.3)
-        self.assertLess(graph.index("setpts=(PTS-STARTPTS)/1.300000"), graph.index("fps=30.000000"))
+            1080, 1920, 30.0, False, frame_count=37, speed=1.3,
+            trim_start=5.0, raw_duration=1.6)
+        self.assertTrue(graph.startswith("trim=start=5.000000:duration=1.600000"))
+        self.assertIn("setpts=(PTS-5.000000/TB)/1.300000", graph)
+        self.assertLess(graph.index("setpts=(PTS-5.000000/TB)/1.300000"),
+                        graph.index("fps=30.000000:start_time=0"))
         self.assertIn("trim=end_frame=37", graph)
         self.assertIn("setpts=N/(30.000000*TB)", graph)
 
     def test_render_multi_audio_uses_video_clock_without_async_resampling(self):
-        graph = render_multi.audio_filter(37 / 30, speed=1.3, edge=0.012)
+        graph = render_multi.audio_filter(
+            37 / 30, speed=1.3, edge=0.012,
+            trim_start=5.0, raw_duration=1.6)
+        self.assertTrue(graph.startswith(
+            "atrim=start=5.000000:duration=1.600000,asetpts=PTS-5.000000/TB"))
         self.assertIn("atempo=1.300000", graph)
         self.assertIn("apad,atrim=duration=1.233333333", graph)
         self.assertIn("asetpts=N/SR/TB", graph)
         self.assertNotIn("async=1", graph)
+
+    def test_render_multi_seeks_with_preroll_and_trims_at_exact_cut(self):
+        seek_start, input_duration, trim_start, raw_duration = \
+            render_multi.input_window(14046.742, 14053.372)
+        self.assertEqual(seek_start, 14041.742)
+        self.assertAlmostEqual(input_duration, 11.63)
+        self.assertEqual(trim_start, 5.0)
+        self.assertAlmostEqual(raw_duration, 6.63)
+
+        self.assertEqual(render_multi.input_window(2.0, 4.0), (0.0, 4.0, 2.0, 2.0))
 
     def test_render_multi_quantizes_cumulative_boundaries_without_drift(self):
         rows = [
