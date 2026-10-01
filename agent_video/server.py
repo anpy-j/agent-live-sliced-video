@@ -149,7 +149,14 @@ class Application:
         if not vt.segments:
             raise ValueError("虚拟时间线不包含任何有效片段")
 
-        title = str(payload.get("title") or vt.title).strip()[:120]
+        if payload.get("auto_title") and payload.get("draft_name"):
+            from .jianying import DEFAULT_EXPORT_DIR, next_available_title
+            output_dir = payload.get("export_dir") or DEFAULT_EXPORT_DIR
+            title = next_available_title(
+                str(payload["draft_name"]), self.store.list_job_titles(), output_dir
+            )
+        else:
+            title = str(payload.get("title") or vt.title).strip()[:120]
         if not title:
             title = vt.title or "虚拟时间线剪辑"
 
@@ -244,6 +251,37 @@ class Application:
             minutes, seconds = divmod(total, 60)
             item["duration_text"] = f"{int(minutes)}分{seconds:04.1f}秒"
         return discovered
+
+    def list_jianying_drafts(self) -> dict[str, Any]:
+        from .jianying import DEFAULT_EXPORT_DIR, list_jianying_drafts, next_available_title
+
+        drafts = list_jianying_drafts()
+        titles = self.store.list_job_titles()
+        covers: dict[str, Path] = {}
+        for draft in drafts:
+            draft["suggested_title"] = next_available_title(
+                draft["name"], titles, DEFAULT_EXPORT_DIR
+            )
+            cover_path = draft.pop("cover_path", None)
+            if cover_path:
+                covers[draft["id"]] = Path(cover_path)
+                draft["cover_url"] = f"/api/jianying/covers/{draft['id']}"
+            else:
+                draft["cover_url"] = None
+        self._jianying_covers = covers
+        return {
+            "drafts": drafts,
+            "defaults": {
+                "target_min": 120,
+                "target_max": 180,
+                "export_dir": DEFAULT_EXPORT_DIR,
+                "export_mode": "segments",
+                "timeline_strategy": "longest",
+            },
+        }
+
+    def jianying_cover(self, draft_id: str) -> Path | None:
+        return getattr(self, "_jianying_covers", {}).get(draft_id)
 
     @staticmethod
     def _resolve_export_dir(value: Any) -> str | None:
@@ -755,6 +793,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json_response(self.app.store.dashboard())
             if path == "/api/jobs":
                 return self.json_response({"jobs": self.app.store.list_jobs()})
+            if path == "/api/jianying/drafts":
+                return self.json_response(self.app.list_jianying_drafts())
+            if path.startswith("/api/jianying/covers/"):
+                draft_id = path.removeprefix("/api/jianying/covers/").strip("/")
+                cover = self.app.jianying_cover(draft_id)
+                if not cover or not cover.is_file():
+                    return self.send_error(404)
+                return self.send_file(cover)
             if path.startswith("/api/jobs/") and path.endswith("/clauses"):
                 job_id = path[len("/api/jobs/"):-len("/clauses")].strip("/")
                 if not job_id:
@@ -927,6 +973,15 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_file(self, path: Path) -> None:
+        body = path.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", mimetypes.guess_type(path.name)[0] or "application/octet-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "private, max-age=60")
         self.end_headers()
         self.wfile.write(body)
 

@@ -236,6 +236,11 @@ class Store:
             jobs.append(j)
         return jobs
 
+    def list_job_titles(self) -> list[str]:
+        with self.connect() as con:
+            rows = con.execute("SELECT title FROM jobs").fetchall()
+        return [str(row["title"]) for row in rows]
+
     def list_recoverable_jobs(self) -> list[dict[str, Any]]:
         with self.connect() as con:
             rows = con.execute(

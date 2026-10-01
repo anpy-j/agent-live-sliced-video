@@ -1,7 +1,7 @@
 const $ = (selector, root=document) => root.querySelector(selector);
 const $$ = (selector, root=document) => [...root.querySelectorAll(selector)];
 const app = $('#app');
-const state = { dashboard:null, job:null, poll:null, mcp:null, selectedStage:null, label:{session:null,decisions:{},sel:{},patch:null}, clausesJob:null, clausesData:null, clausesFilter:'s2' };
+const state = { dashboard:null, job:null, poll:null, mcp:null, selectedStage:null, jianying:null, label:{session:null,decisions:{},sel:{},patch:null}, clausesJob:null, clausesData:null, clausesFilter:'s2' };
 const labels = {queued:'排队中',running:'执行中',waiting_input:'待继续',completed:'已完成',failed:'执行失败',cancelled:'已取消',pending:'等待',succeeded:'完成'};
 const stageLabels = {asr:'语音转写与切分',filter:'规则粗筛',judge:'AI 可用性判定',order:'AI 排序编排',render:'渲染成片'};
 const reasonLabels = {too_short:'文本过短',non_chinese:'中文占比低',duration_gate:'时长不足',hard_vocab:'违禁词',stage_chatter:'场控话术',malformed_speech:'病句/口误',duplicate:'重复',invalid_bounds:'时间异常'};
@@ -69,6 +69,24 @@ async function renderQueue(){
   setCrumb('剪辑队列');loading();const data=await api('/api/jobs');
   app.innerHTML=`<div class="hero"><div><span class="eyebrow">PRODUCTION QUEUE</span><h1>剪辑队列</h1><p>任务串行调度，实时展示节点状态、进度和异常。</p></div><button class="button primary" data-new-job>添加任务</button></div><div class="panel"><div class="panel-head"><div><h2>全部任务</h2><p>${data.jobs.length} 个任务</p></div></div>${jobRows(data.jobs)}</div>`;
   bindCommon();
+}
+
+async function renderJianyingDrafts(){
+  setCrumb('剪映草稿');loading();
+  const data=await api('/api/jianying/drafts');state.jianying=data;
+  const drafts=data.drafts||[],defaults=data.defaults||{};
+  const cards=drafts.map(draft=>{
+    const timeline=draft.recommended_timeline;
+    const cover=draft.cover_url?`<img loading="lazy" src="${escapeHtml(draft.cover_url)}" alt="${escapeHtml(draft.name)}封面">`:`<span class="jianying-cover-empty">${icons.video}</span>`;
+    const recommendation=timeline?`最长时间线：${escapeHtml(timeline.name||timeline.title||timeline.timeline_id)} · ${durationText(timeline.timeline_duration)}`:(draft.timeline_error?'时间线解析失败':'未发现有效时间线');
+    return `<article class="jianying-card"><div class="jianying-cover">${cover}</div><div class="jianying-card-body"><div><h2>${escapeHtml(draft.name)}</h2><p>${recommendation}</p></div><div class="jianying-meta"><span>${draft.timeline_count} 条时间线</span><span>更新于 ${formatTime(draft.modified_at)}</span></div><div class="jianying-title-preview">成片名称 <b>${escapeHtml(draft.suggested_title)}</b></div><button type="button" class="button primary" data-edit-jianying="${escapeHtml(draft.id)}" ${timeline?'':'disabled'}>剪辑</button></div></article>`;
+  }).join('');
+  app.innerHTML=`<div class="hero"><div><span class="eyebrow">JIANYING DRAFTS</span><h1>剪映草稿</h1><p>点击草稿后复用创建剪辑任务窗口，默认选最长时间线、120–180 秒深度、分段版。</p></div><button class="button ghost" data-refresh-jianying>刷新草稿</button></div><div class="jianying-defaults"><span>默认导出目录</span><b>${escapeHtml(defaults.export_dir||'—')}</b></div>${drafts.length?`<div class="jianying-grid">${cards}</div>`:`<div class="panel"><div class="empty">${icons.empty}<h3>没有找到剪映草稿</h3><p>请确认本机已安装剪映专业版并保存过草稿。</p></div></div>`}`;
+  $('[data-refresh-jianying]')?.addEventListener('click',renderJianyingDrafts);
+  $$('[data-edit-jianying]').forEach(button=>button.addEventListener('click',()=>{
+    const draft=drafts.find(item=>item.id===button.dataset.editJianying);
+    if(draft)openNewJobForDraft(draft,defaults);
+  }));
 }
 
 function artifactCard(a){
@@ -469,6 +487,7 @@ async function route(){
   try{
     if(hash.startsWith('#/jobs/'))return await renderJob(hash.split('/')[2]);
     if(hash==='#/queue')return await renderQueue();
+    if(hash==='#/jianying')return await renderJianyingDrafts();
     if(hash==='#/label')return await renderLabel();
     if(hash==='#/skill')return await renderSkill();
     if(hash==='#/mcp')return await renderMcp();
@@ -532,7 +551,10 @@ async function loadTimelineChoices(path){
       option.dataset.timelineId=item.timeline_id;
       selector.appendChild(option);
     });
-    const selected=timelines.find(item=>item.selected)||timelines.find(item=>item.active)||timelines[0];
+    const strategy=input.dataset.selectStrategy;
+    const selected=strategy==='longest'
+      ? timelines.reduce((best,item)=>!best||Number(item.timeline_duration||0)>Number(best.timeline_duration||0)?item:best,null)
+      : timelines.find(item=>item.selected)||timelines.find(item=>item.active)||timelines[0];
     if(!selected)throw new Error('草稿中没有找到可用时间线');
     selector.value=selected.path;
     input.dataset.selectedPath=selected.path;
@@ -546,8 +568,29 @@ async function loadTimelineChoices(path){
   }
 }
 
+async function openNewJobForDraft(draft,defaults={}){
+  await openNewJob();
+  const radio=$('input[name="job_mode_select"][value="timeline"]');
+  if(radio)radio.checked=true;
+  setJobMode('timeline');
+  const input=$('#timelineDraftInput'),title=$('#timelineTitleInput');
+  input.value=draft.path;
+  input.dataset.selectStrategy='longest';
+  title.value=draft.suggested_title;
+  title.dataset.userEdited='true';
+  title.dataset.autoTitle='true';
+  title.dataset.draftName=draft.name;
+  $('#newJobForm [name="timeline_target_min"]').value=String(defaults.target_min||120);
+  $('#newJobForm [name="timeline_target_max"]').value=String(defaults.target_max||180);
+  $('#newJobForm [name="timeline_export_dir"]').value=defaults.export_dir||'D:\\切片\\袁艺灵\\AI粗筛视频';
+  $('#newJobForm [name="timeline_export_mode"]').value=defaults.export_mode||'segments';
+  syncTimelineDurationChips();
+  await loadTimelineChoices(draft.path);
+  title.value=draft.suggested_title;
+}
+
 $('#newJobForm [name="title"]')?.addEventListener('input',e=>{e.target.dataset.userEdited=e.target.value?'true':''});
-$('#timelineTitleInput')?.addEventListener('input', e=>{e.target.dataset.userEdited=e.target.value?'true':''});
+$('#timelineTitleInput')?.addEventListener('input', e=>{e.target.dataset.userEdited=e.target.value?'true':'';e.target.dataset.autoTitle='';});
 $('#timelineDraftInput')?.addEventListener('change', e=>loadTimelineChoices(e.target.value.trim()));
 $('#timelineSelect')?.addEventListener('change',e=>{
   const input=$('#timelineDraftInput');
@@ -637,6 +680,8 @@ $('#newJobForm').addEventListener('submit',async e=>{
         job_type: 'timeline',
         draft_path: draftPath,
         title: title,
+        draft_name: $('#timelineTitleInput')?.dataset.draftName || '',
+        auto_title: $('#timelineTitleInput')?.dataset.autoTitle === 'true',
         product_name: $('#newJobForm [name="timeline_product_name"]')?.value || '',
         export_mode: $('#newJobForm [name="timeline_export_mode"]')?.value || 'merge',
         export_dir: $('#newJobForm [name="timeline_export_dir"]')?.value || '',
@@ -675,10 +720,12 @@ $('#newJobForm').addEventListener('submit',async e=>{
     syncTimelineDurationChips();
     $('#newJobForm [name="title"]').dataset.userEdited='';
     if($('#timelineTitleInput')) $('#timelineTitleInput').dataset.userEdited='';
+    if($('#timelineTitleInput')) { $('#timelineTitleInput').dataset.autoTitle=''; $('#timelineTitleInput').dataset.draftName=''; }
     if($('#timelineInspectResult')) $('#timelineInspectResult').style.display='none';
     if($('#timelineSelectorField')) $('#timelineSelectorField').style.display='none';
     if($('#timelineSelect')) $('#timelineSelect').innerHTML='';
     if($('#timelineDraftInput')) $('#timelineDraftInput').dataset.selectedPath='';
+    if($('#timelineDraftInput')) $('#timelineDraftInput').dataset.selectStrategy='';
     setJobMode('direct');
     location.hash=`#/jobs/${data.id}`;
     toast('任务已加入队列');
