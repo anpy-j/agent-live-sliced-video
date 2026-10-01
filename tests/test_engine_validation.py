@@ -11,7 +11,7 @@ from agent_video.engine.scripts.textnorm import content_rejection, incomplete_en
 from agent_video.engine.scripts.validate_timeline import validate_rows
 from agent_video.engine.scripts.visual_mix import apply as apply_visual_mix
 from agent_video.engine.scripts.audio_acceptance import analyze_preview_asr
-from agent_video.engine.scripts import render_dual
+from agent_video.engine.scripts import render_dual, render_multi
 
 GRAPH_OPTIONS = ("-filter_complex_script", "-/filter_complex")
 
@@ -358,6 +358,32 @@ class EngineValidationTest(unittest.TestCase):
             filters = graphs[-1]
             self.assertEqual(filters.count("(iw-ow)*0.100000"), 1)
             self.assertEqual(filters.count("(iw-ow)*0.900000"), 1)
+
+    def test_render_multi_applies_speed_before_cfr_and_uses_exact_frame_count(self):
+        graph = render_multi.video_filter(
+            1080, 1920, 30.0, False, frame_count=37, speed=1.3)
+        self.assertLess(graph.index("setpts=(PTS-STARTPTS)/1.300000"), graph.index("fps=30.000000"))
+        self.assertIn("trim=end_frame=37", graph)
+        self.assertIn("setpts=N/(30.000000*TB)", graph)
+
+    def test_render_multi_audio_uses_video_clock_without_async_resampling(self):
+        graph = render_multi.audio_filter(37 / 30, speed=1.3, edge=0.012)
+        self.assertIn("atempo=1.300000", graph)
+        self.assertIn("apad,atrim=duration=1.233333333", graph)
+        self.assertIn("asetpts=N/SR/TB", graph)
+        self.assertNotIn("async=1", graph)
+
+    def test_render_multi_quantizes_cumulative_boundaries_without_drift(self):
+        rows = [
+            {"start": 0, "end": 0.7, "speed": 1.3},
+            {"start": 1, "end": 1.7, "speed": 1.3},
+            {"start": 2, "end": 2.7, "speed": 1.3},
+        ]
+        counts = render_multi.segment_frame_counts(rows, 30)
+        expected_total = round(sum((row["end"] - row["start"]) / row["speed"]
+                                   for row in rows) * 30)
+        self.assertEqual(sum(counts), expected_total)
+        self.assertEqual(counts, [16, 16, 16])
 
     @patch.object(render_dual, "source_fps", return_value=30)
     @patch.object(render_dual, "output_size", return_value=(1080, 1920))

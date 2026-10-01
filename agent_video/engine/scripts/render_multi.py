@@ -64,7 +64,7 @@ def output_size(path, width, height):
     return 1440, 2560
 
 
-def video_filter(width, height, fps, allow_upscale, speed=1.0):
+def video_filter(width, height, fps, allow_upscale, frame_count, speed=1.0):
     if allow_upscale:
         scale = (f"scale={width}:{height}:force_original_aspect_ratio=decrease,")
     else:
@@ -73,7 +73,35 @@ def video_filter(width, height, fps, allow_upscale, speed=1.0):
                  f"h='trunc(ih*{ratio}/2)*2',")
     pts = f"setpts=(PTS-STARTPTS)/{speed:.6f}" if abs(speed - 1.0) > 1e-4 else "setpts=PTS-STARTPTS"
     return (scale + f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,"
-            f"fps={fps:.6f},setsar=1,{pts}")
+            f"{pts},fps={fps:.6f},trim=end_frame={frame_count},"
+            f"setpts=N/({fps:.6f}*TB),setsar=1")
+
+
+def audio_filter(duration, speed=1.0, edge=0.0):
+    """Keep audio on the exact same CFR clock as its corresponding video piece."""
+    tempo = f"atempo={speed:.6f}," if abs(speed - 1.0) > 1e-4 else ""
+    fades = (f",afade=t=in:st=0:d={edge:.4f},"
+             f"afade=t=out:st={max(0.0, duration - edge):.4f}:d={edge:.4f}") if edge else ""
+    return (f"{tempo}aresample=48000:first_pts=0,"
+            f"aformat=sample_rates=48000:channel_layouts=stereo,"
+            f"apad,atrim=duration={duration:.9f},asetpts=N/SR/TB{fades}")
+
+
+def segment_frame_counts(timeline, fps):
+    """Quantize cumulative cut positions so rounding cannot drift per segment."""
+    counts = []
+    cumulative_seconds = 0.0
+    allocated_frames = 0
+    for row in timeline:
+        speed = float(row.get("speed", 1.0))
+        if speed <= 0:
+            raise SystemExit(f"Invalid segment speed: {speed}")
+        cumulative_seconds += (float(row["end"]) - float(row["start"])) / speed
+        cumulative_frames = round(cumulative_seconds * fps)
+        frame_count = max(1, cumulative_frames - allocated_frames)
+        counts.append(frame_count)
+        allocated_frames += frame_count
+    return counts
 
 
 def main():
@@ -115,27 +143,23 @@ def main():
         command += ["-ss", f"{start:.6f}", "-to", f"{end:.6f}",
                     "-i", sources[int(row.get("src", 1))]]
 
+    frame_counts = segment_frame_counts(timeline, fps)
     filters = []
     for index in range(len(timeline)):
         speed = float(timeline[index].get("speed", 1.0))
-        filters.append(f"[{index}:v]{video_filter(args.width, args.height, fps, args.allow_upscale, speed=speed)}"
+        frame_count = frame_counts[index]
+        duration = frame_count / fps
+        filters.append(f"[{index}:v]{video_filter(args.width, args.height, fps, args.allow_upscale, frame_count, speed=speed)}"
                        f"[v{index}]")
-        raw_duration = float(timeline[index]["end"]) - float(timeline[index]["start"])
-        duration = raw_duration / speed if speed > 0 else raw_duration
         edge = max(0.0, min(args.audio_edge_ms / 1000.0, duration / 4.0))
-        fades = (f",afade=t=in:st=0:d={edge:.4f},"
-                 f"afade=t=out:st={max(0.0, duration - edge):.4f}:d={edge:.4f}") if edge else ""
-        tempo = f"atempo={speed:.6f}," if abs(speed - 1.0) > 1e-4 else ""
         filters.append(
-            f"[{index}:a]{tempo}aresample=async=1:first_pts=0,"
-            f"aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS"
-            f"{fades}[a{index}]"
+            f"[{index}:a]{audio_filter(duration, speed=speed, edge=edge)}[a{index}]"
         )
     labels = "".join(f"[v{i}][a{i}]" for i in range(len(timeline)))
     filters.append(f"{labels}concat=n={len(timeline)}:v=1:a=1[vcat][acat]")
-    audio_filter = "anull" if args.no_loudnorm else \
+    final_audio_filter = "anull" if args.no_loudnorm else \
         f"loudnorm=I={args.loudness}:TP=-1.0:LRA=8,alimiter=limit=0.95:level=disabled"
-    filters.append(f"[acat]{audio_filter}[aout]")
+    filters.append(f"[acat]{final_audio_filter}[aout]")
 
     final_output = os.path.abspath(args.output)
     partial_output = final_output + ".partial.mp4"
