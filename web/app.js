@@ -4,7 +4,7 @@ const app = $('#app');
 const state = { dashboard:null, job:null, poll:null, mcp:null, selectedStage:null, jianying:null, label:{session:null,decisions:{},sel:{},patch:null}, clausesJob:null, clausesData:null, clausesFilter:'s2' };
 const labels = {queued:'排队中',running:'执行中',waiting_input:'待继续',completed:'已完成',failed:'执行失败',cancelled:'已取消',pending:'等待',succeeded:'完成'};
 const stageLabels = {asr:'语音转写与切分',filter:'规则粗筛',judge:'AI 可用性判定',order:'AI 排序编排',render:'渲染成片'};
-const reasonLabels = {too_short:'文本过短',non_chinese:'中文占比低',duration_gate:'时长不足',hard_vocab:'违禁词',stage_chatter:'场控话术',malformed_speech:'病句/口误',duplicate:'重复',invalid_bounds:'时间异常'};
+const reasonLabels = {too_short:'文本过短',non_chinese:'中文占比低',duration_gate:'时长不足',hard_vocab:'违禁词',stage_chatter:'场控话术',malformed_speech:'病句/口误',duplicate:'重复',literal_duplicate:'字面重复',semantic_duplicate:'语义重复',invalid_bounds:'时间异常'};
 const icons = {
   video:'<svg viewBox="0 0 24 24"><rect x="3" y="5" width="14" height="14" rx="2"/><path d="m17 10 4-2v8l-4-2z"/></svg>',
   file:'<svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v5h5M9 13h6M9 17h6"/></svg>',
@@ -43,12 +43,28 @@ function toast(message){const el=$('#toast');el.textContent=message;el.classList
 function loading(){app.innerHTML='<div class="loading"><div class="spinner"></div>正在读取本地任务状态</div>';}
 function setCrumb(text){$('#pageCrumb').textContent=text;$$('[data-nav]').forEach(x=>{const active=location.hash.includes(x.dataset.nav);x.classList.toggle('active',active);if(active)x.setAttribute('aria-current','page');else x.removeAttribute('aria-current')});}
 function jobFlags(job){return {active:['queued','running'].includes(job.status)};}
+function jobStageLabel(job,id,stored=''){
+  if(job?.job_type==='remix'){
+    const remixLabels={asr:'片段文字识别',filter:'文字字面去重',judge:'语义去重与分类',order:'动态内容重排',render:'生成新成片'};
+    return remixLabels[id]||stored||stageLabel(id);
+  }
+  return stored||stageLabel(id);
+}
+function jobTypeTag(job){
+  if(job.job_type==='remix')return '<span class="timeline-tag">成片重组</span>';
+  if(job.job_type==='timeline')return '<span class="timeline-tag">虚拟时间线</span>';
+  return '';
+}
+function jobTargetText(job,prefix='目标'){
+  if(job.job_type==='remix')return ' · 全部去重后片段';
+  return job.target_seconds?` · ${prefix} ${escapeHtml(job.target_seconds)}s`:'';
+}
 
 function jobRows(jobs){
   if(!jobs.length)return `<div class="empty">${icons.empty}<h3>还没有剪辑任务</h3><p>添加第一段直播素材，系统会自动完成转写、粗筛、判定、排序与渲染。</p><button class="button primary" data-new-job>新建剪辑任务</button></div>`;
   return `<table class="jobs-table"><thead><tr><th>任务</th><th>当前节点</th><th>进度</th><th>状态</th><th>操作</th></tr></thead><tbody>${jobs.map(j=>{const folder=j.deliverables||{};return `<tr>
-<td><div class="job-name"><span class="job-thumb">${icons.video}</span><div><b>${escapeHtml(j.title)}</b>${j.job_type === "timeline" ? '<span class="timeline-tag">虚拟时间线</span>' : ""}<small>${escapeHtml(j.source_path)}${j.target_seconds ? ` · 目标 ${escapeHtml(j.target_seconds)}s` : ""}</small></div></div></td>
-    <td><small>${escapeHtml(j.current_stage?stageLabel(j.current_stage):'—')}</small></td>
+<td><div class="job-name"><span class="job-thumb">${icons.video}</span><div><b>${escapeHtml(j.title)}</b>${jobTypeTag(j)}<small>${escapeHtml(j.source_path)}${jobTargetText(j)}</small></div></div></td>
+    <td><small>${escapeHtml(j.current_stage?jobStageLabel(j,j.current_stage):'—')}</small></td>
     <td><div class="progress"><div class="progress-line"><i style="width:${Math.max(2,Math.min(100,j.progress||0))}%"></i></div><small>${Math.round(j.progress||0)}% · ${formatTime(j.updated_at)}</small></div></td>
     <td>${statusCell(j)}</td>
     <td><div class="job-row-actions">
@@ -117,17 +133,17 @@ function artifactCard(a){
 function payloadHtml(payload){if(!payload)return '';const value=JSON.stringify(payload,null,2);return `<details class="event-data"><summary>查看执行数据</summary><pre>${escapeHtml(value.length>6000?`${value.slice(0,6000)}\n……`:value)}</pre></details>`;}
 
 function selectedStageId(job){return job.stages.some(s=>s.stage_id===state.selectedStage)?state.selectedStage:(job.current_stage||job.stages[0]?.stage_id);}
-function workflowHtml(job){const selected=selectedStageId(job);return job.stages.map((s,i)=>`<button type="button" class="stage ${escapeHtml(s.status)} ${s.stage_id===selected?'selected':''}" data-stage-select="${escapeHtml(s.stage_id)}" aria-pressed="${s.stage_id===selected}"><span class="stage-dot">${s.status==='succeeded'?'✓':String(i+1).padStart(2,'0')}</span><b>${escapeHtml(s.name||stageLabel(s.stage_id))}</b><small>${labels[s.status]||s.status}</small></button>`).join('');}
+function workflowHtml(job){const selected=selectedStageId(job);return job.stages.map((s,i)=>`<button type="button" class="stage ${escapeHtml(s.status)} ${s.stage_id===selected?'selected':''}" data-stage-select="${escapeHtml(s.stage_id)}" aria-pressed="${s.stage_id===selected}"><span class="stage-dot">${s.status==='succeeded'?'✓':String(i+1).padStart(2,'0')}</span><b>${escapeHtml(jobStageLabel(job,s.stage_id,s.name))}</b><small>${labels[s.status]||s.status}</small></button>`).join('');}
 function workflowKey(job){return `${selectedStageId(job)}:${JSON.stringify(job.stages.map(x=>[x.stage_id,x.status]))}`;}
 function stageDetailHtml(job){
   const id=selectedStageId(job),stage=job.stages.find(s=>s.stage_id===id)||job.stages[0];
   if(!stage)return `<div class="empty">${icons.empty}<h3>暂无节点</h3><p>任务尚未初始化流程节点。</p></div>`;
   const events=job.events.filter(e=>e.stage_id===id),artifacts=job.artifacts.filter(a=>a.stage_id===id),isCurrent=job.current_stage===id&&jobFlags(job).active,runtime=job.runtime||{};
   const runState=isCurrent?(runtime.process_active?'本地子进程正在执行':runtime.worker_alive?'工作进程正在处理':'后台服务未运行'):(labels[stage.status]||stage.status);
-  const rerunnable=['filter','judge','order','render'].includes(id),index=job.stages.indexOf(stage),upstreamReady=index>0&&job.stages[index-1].status==='succeeded';
+  const rerunnable=job.job_type!=='remix'&&['filter','judge','order','render'].includes(id),index=job.stages.indexOf(stage),upstreamReady=index>0&&job.stages[index-1].status==='succeeded';
   const canRerun=rerunnable&&upstreamReady&&!jobFlags(job).active;
   const actionLabel=id==='render'?(stage.status==='succeeded'?'重新渲染成片':'渲染成片'):(stage.status==='succeeded'?'重新执行此节点':'执行此节点');
-  return `<div class="stage-detail-head"><div><span class="eyebrow">NODE ${String(index+1).padStart(2,'0')}</span><h2>${escapeHtml(stage.name||stageLabel(stage.stage_id))}</h2><p>${escapeHtml(stage.error||stage.message||'等待上游节点完成')}</p></div><div class="stage-detail-actions"><span class="runtime-state ${isCurrent&&runtime.worker_alive?'live':''}"><i></i>${escapeHtml(runState)}</span>${canRerun?`<button class="button ghost small" data-rerun-stage="${escapeHtml(id)}">${actionLabel}</button>`:''}</div></div>
+  return `<div class="stage-detail-head"><div><span class="eyebrow">NODE ${String(index+1).padStart(2,'0')}</span><h2>${escapeHtml(jobStageLabel(job,stage.stage_id,stage.name))}</h2><p>${escapeHtml(stage.error||stage.message||'等待上游节点完成')}</p></div><div class="stage-detail-actions"><span class="runtime-state ${isCurrent&&runtime.worker_alive?'live':''}"><i></i>${escapeHtml(runState)}</span>${canRerun?`<button class="button ghost small" data-rerun-stage="${escapeHtml(id)}">${actionLabel}</button>`:''}</div></div>
   <div class="stage-metrics"><div><span>开始时间</span><b>${formatExactTime(stage.started_at)}</b></div><div><span>运行耗时</span><b data-elapsed-from="${escapeHtml(stage.started_at||'')}" data-elapsed-to="${escapeHtml(stage.finished_at||'')}">${stage.started_at?durationText((new Date(stage.finished_at||Date.now())-new Date(stage.started_at))/1000):'—'}</b></div><div><span>最后心跳</span><b data-relative-time="${escapeHtml(job.updated_at||'')}">刚刚</b></div><div><span>节点进度</span><b>${Math.round((stage.progress||0)*100)}%</b></div></div>
   ${isCurrent&&!runtime.worker_alive?'<div class="service-warning"><b>后台服务已停止</b><span>这不是正常等待；重启 LiveCut 后任务会恢复进队。</span></div>':''}
   <div class="node-section"><div class="node-section-title"><b>该节点执行记录</b><span>${events.length} 条</span></div><div class="node-events">${events.length?events.map(e=>`<article class="node-event ${escapeHtml(e.level)}"><span class="event-mark"></span><div><time>${formatExactTime(e.created_at)}</time><p>${escapeHtml(e.message)}</p>${payloadHtml(e.payload)}</div></article>`).join(''):'<p class="muted-empty">还没有执行记录。</p>'}</div></div>
@@ -152,21 +168,30 @@ function filterClauses(clauses,key){
   if(key==='s2rej')return clauses.filter(c=>!c.s2_usable);
   return clauses;
 }
-function clauseRow(c){
+function clauseRow(c,isRemix=false){
   let badge;
-  if(c.usable)badge='<span class="lb-changed">AI 判可用</span>';
-  else if(!c.s2_usable)badge=`<span class="lb-reason">S2 · ${escapeHtml(reasonText(c.s2_reason))}</span>`;
-  else badge=`<span class="lb-reason">S3 · ${escapeHtml(reasonText(c.reason)||'判为不可用')}</span>`;
+  if(c.usable)badge=`<span class="lb-changed">${isRemix?'保留':'AI 判可用'}</span>`;
+  else if(!c.s2_usable)badge=`<span class="lb-reason">${isRemix?'字面去重':'S2'} · ${escapeHtml(reasonText(c.s2_reason))}</span>`;
+  else badge=`<span class="lb-reason">${isRemix?'语义去重':'S3'} · ${escapeHtml(reasonText(c.reason)||'判为不可用')}</span>`;
   const order=c.order!=null?`<span class="lb-hit">成片第 ${c.order+1} 段</span>`:'';
-  return `<article class="lb-row ${c.usable?'changed':'no'}"><header><span class="lb-time">${c.start.toFixed(1)}–${c.end.toFixed(1)}s · #${escapeHtml(String(c.id))}</span>${badge}${order}</header><p class="lb-text">${escapeHtml(c.text)}</p></article>`;
+  const category=isRemix&&c.category?`<span class="lb-hit">${escapeHtml(c.category)}</span>`:'';
+  return `<article class="lb-row ${c.usable?'changed':'no'}"><header><span class="lb-time">${c.start.toFixed(1)}–${c.end.toFixed(1)}s · #${escapeHtml(String(c.id))}</span>${badge}${category}${order}</header><p class="lb-text">${escapeHtml(c.text||'（未识别到口播文字）')}</p></article>`;
 }
 function paintJobClauses(){
   const box=$('#jobClauses');const data=state.clausesData;if(!box||!data)return;
-  if(!data.ready){box.innerHTML='<p class="muted-empty">尚未生成 S2/S3 结果（流程到达规则粗筛后可用）。</p>';return;}
+  const isRemix=data.job_type==='remix';
+  if(!data.ready){box.innerHTML=`<p class="muted-empty">${isRemix?'尚未生成文字去重结果。':'尚未生成 S2/S3 结果（流程到达规则粗筛后可用）。'}</p>`;return;}
   const counts=data.counts||{},filter=state.clausesFilter||'s2';
   const rows=filterClauses(data.clauses,filter);
-  box.innerHTML=`<div class="clause-tools">${clauseFilters.map(f=>`<button type="button" class="tab-button ${f.key===filter?'active':''}" data-clause-filter="${f.key}">${f.label} <em>${counts[f.countKey]??0}</em></button>`).join('')}<span class="lb-sel">共 <b>${counts.total}</b> 条子句 · S2 放行 <b>${counts.s2_passed}</b> · S3 判可用 <b>${counts.usable}</b> · S3 淘汰 <b>${counts.rejected_by_s3}</b></span></div>
-  <div class="label-list clause-list">${rows.map(clauseRow).join('')||'<p class="muted-empty">该分类下没有子句。</p>'}</div>`;
+  const filters=isRemix?[
+    {key:'s2',label:'字面去重后',countKey:'s2_passed'},
+    {key:'s3',label:'最终保留',countKey:'usable'},
+    {key:'s2rej',label:'字面重复',countKey:'s2_rejected'},
+    {key:'all',label:'全部',countKey:'total'}
+  ]:clauseFilters;
+  const summary=isRemix?`原始 <b>${counts.total}</b> 段 · 字面去重后 <b>${counts.s2_passed}</b> · 最终保留 <b>${counts.usable}</b> · 语义重复 <b>${counts.rejected_by_s3}</b>`:`共 <b>${counts.total}</b> 条子句 · S2 放行 <b>${counts.s2_passed}</b> · S3 判可用 <b>${counts.usable}</b> · S3 淘汰 <b>${counts.rejected_by_s3}</b>`;
+  box.innerHTML=`<div class="clause-tools">${filters.map(f=>`<button type="button" class="tab-button ${f.key===filter?'active':''}" data-clause-filter="${f.key}">${f.label} <em>${counts[f.countKey]??0}</em></button>`).join('')}<span class="lb-sel">${summary}</span></div>
+  <div class="label-list clause-list">${rows.map(c=>clauseRow(c,isRemix)).join('')||'<p class="muted-empty">该分类下没有片段。</p>'}</div>`;
   $$('[data-clause-filter]',box).forEach(btn=>btn.addEventListener('click',()=>{state.clausesFilter=btn.dataset.clauseFilter;paintJobClauses()}));
 }
 async function loadJobClauses(jobId){
@@ -254,7 +279,7 @@ async function refreshJob(jobId){
   const job=await api(`/api/jobs/${jobId}`);state.job=job;
   const connection=$('#jobConnectionState');if(connection){connection.classList.remove('offline');connection.innerHTML='<i></i>实时连接正常';}
   if(patchJobRegion('#jobControls',jobControlsHtml(job),deliverablesControlsKey(job)))bindJobControls(jobId);
-  const meta=$('#jobProgressMeta');if(meta)meta.textContent=`${Math.round(job.progress||0)}% · 当前节点 ${stageLabel(job.current_stage)||'—'}`;
+  const meta=$('#jobProgressMeta');if(meta)meta.textContent=`${Math.round(job.progress||0)}% · 当前节点 ${jobStageLabel(job,job.current_stage)||'—'}`;
   if(patchJobRegion('#jobWorkflow',workflowHtml(job),workflowKey(job)))bindStageSelection(jobId);
   if(patchJobRegion('#jobStageDetail',stageDetailHtml(job),stageDetailKey(job))){bindStageRerun(jobId);bindArtifactPreviews($('#jobStageDetail'));updateLiveTimes();}
   const heartbeat=$('[data-relative-time]');if(heartbeat)heartbeat.dataset.relativeTime=job.updated_at||'';
@@ -270,11 +295,11 @@ async function renderJob(jobId){
   setCrumb('任务详情');loading();const job=await api(`/api/jobs/${jobId}`);
   state.job=job;state.selectedStage=job.current_stage||job.stages[0]?.stage_id;
   app.innerHTML=`<a href="#/queue" class="back-link">${icons.arrow}返回队列</a>
-<div class="detail-head"><div class="detail-title"><span class="eyebrow">${escapeHtml(job.id)}</span><h1>${escapeHtml(job.title)}${job.job_type === "timeline" ? '<span class="timeline-tag">虚拟时间线</span>' : ""}</h1><p>${escapeHtml(job.source_path)}${job.target_seconds ? ` · 目标时长 ${escapeHtml(job.target_seconds)}s` : ""}</p></div><div class="detail-actions" id="jobControls" data-render-key="${escapeHtml(deliverablesControlsKey(job))}">${jobControlsHtml(job)}</div></div>
-  <div class="panel"><div class="panel-head"><div><h2>整体流程</h2><p id="jobProgressMeta">${Math.round(job.progress||0)}% · 当前节点 ${escapeHtml(stageLabel(job.current_stage)||'—')}</p></div><div class="workflow-meta"><span class="connection-state" id="jobConnectionState"><i></i>实时连接正常</span><span class="panel-hint">点击节点查看详情</span></div></div><div class="workflow" id="jobWorkflow" data-render-key="${escapeHtml(workflowKey(job))}">${workflowHtml(job)}</div></div>
+<div class="detail-head"><div class="detail-title"><span class="eyebrow">${escapeHtml(job.id)}</span><h1>${escapeHtml(job.title)}${jobTypeTag(job)}</h1><p>${escapeHtml(job.source_path)}${jobTargetText(job,'目标时长')}</p></div><div class="detail-actions" id="jobControls" data-render-key="${escapeHtml(deliverablesControlsKey(job))}">${jobControlsHtml(job)}</div></div>
+  <div class="panel"><div class="panel-head"><div><h2>整体流程</h2><p id="jobProgressMeta">${Math.round(job.progress||0)}% · 当前节点 ${escapeHtml(jobStageLabel(job,job.current_stage)||'—')}</p></div><div class="workflow-meta"><span class="connection-state" id="jobConnectionState"><i></i>实时连接正常</span><span class="panel-hint">点击节点查看详情</span></div></div><div class="workflow" id="jobWorkflow" data-render-key="${escapeHtml(workflowKey(job))}">${workflowHtml(job)}</div></div>
   <div class="detail-grid"><div><div class="panel stage-detail" id="jobStageDetail" data-render-key="${escapeHtml(stageDetailKey(job))}">${stageDetailHtml(job)}</div>
   <div class="panel"><div class="panel-head"><div><h2>任务产物</h2><p>图片、时间线、日志与视频均可打开</p></div></div><div id="jobArtifacts" data-render-key="${escapeHtml(artifactsKey(job))}">${artifactsHtml(job)}</div></div></div>
-  <div class="panel"><div class="panel-head"><div><h2>子句核验</h2><p>展示 S1 全部子句、S2 规则放行与 S3 AI 判定结果，供人工逐条核对</p></div></div><div id="jobClauses"></div></div>
+  <div class="panel"><div class="panel-head"><div><h2>${job.job_type==='remix'?'片段去重与分组':'子句核验'}</h2><p>${job.job_type==='remix'?'展示集合时间线全部片段、文字重复项、动态分类与最终顺序':'展示 S1 全部子句、S2 规则放行与 S3 AI 判定结果，供人工逐条核对'}</p></div></div><div id="jobClauses"></div></div>
   <div class="panel"><div class="panel-head"><div><h2>实时事件</h2><p>后台局部更新，不影响滚动和操作</p></div></div><div class="timeline" id="jobEvents" data-render-key="${escapeHtml(eventsKey(job))}">${eventsHtml(job)}</div></div></div>`;
   bindJobControls(jobId);bindStageSelection(jobId);bindStageRerun(jobId);bindArtifactPreviews(app);updateLiveTimes();scheduleJobPoll(jobId,job);loadJobClauses(jobId);
 }
@@ -529,9 +554,27 @@ $('#newJobDialog').addEventListener('click',e=>{if(e.target===$('#newJobDialog')
 
 function setJobMode(mode){
   const isTimeline = mode === 'timeline';
+  const isRemix = mode === 'remix';
+  const usesTimeline = isTimeline || isRemix;
   const secDirect = $('#sectionDirectMode'), secTimeline = $('#sectionTimelineMode');
-  if(secDirect) secDirect.style.display = isTimeline ? 'none' : 'grid';
-  if(secTimeline) secTimeline.style.display = isTimeline ? 'grid' : 'none';
+  if(secDirect) secDirect.style.display = usesTimeline ? 'none' : 'grid';
+  if(secTimeline) secTimeline.style.display = usesTimeline ? 'grid' : 'none';
+  if($('#timelineProductField'))$('#timelineProductField').style.display=isRemix?'none':'grid';
+  if($('#timelineExportModeField'))$('#timelineExportModeField').style.display=isRemix?'none':'grid';
+  if($('#timelineDurationSection'))$('#timelineDurationSection').style.display=isRemix?'none':'grid';
+  if($('#remixOptions'))$('#remixOptions').style.display=isRemix?'grid':'none';
+  if($('#timelineSectionTitle'))$('#timelineSectionTitle').textContent=isRemix?'同商品成片集合时间线':'剪映虚拟时间线';
+  if($('#timelineSectionHint'))$('#timelineSectionHint').textContent=isRemix?'选择已经汇总多个已发布成片片段的剪映时间线':'选择剪映草稿目录、draft_content.json 或时间线 JSON';
+  if($('#timelineFileHint'))$('#timelineFileHint').textContent=isRemix?'每个现有剪映片段保持完整，只依据口播文字去重与重排。':'AI 仅在剪映保留的 30–40 分钟内分析，底层原素材文件自动隐藏。';
+  if($('#timelineTitleInput')){
+    const input=$('#timelineTitleInput');
+    input.placeholder=isRemix?'留空则使用“时间线标题_成片重组”':'留空则使用时间线标题（如：F家限定 / 时间线01）';
+    if(input.dataset.userEdited!=='true'&&input.value){
+      if(isRemix&&!input.value.endsWith('_成片重组'))input.value=`${input.value}_成片重组`;
+      if(!isRemix&&input.value.endsWith('_成片重组'))input.value=input.value.slice(0,-5);
+    }
+  }
+  if($('#timelineTitleHint'))$('#timelineTitleHint').textContent=isRemix?'生成新的 MP4 成片，不修改原集合时间线。':'最终输出为“成片名称.mp4”。';
 }
 $$('input[name="job_mode_select"]').forEach(radio => radio.addEventListener('change', e => {
   setJobMode(e.target.value);
@@ -547,7 +590,8 @@ async function inspectTimeline(path){
     const data = await api('/api/timeline/inspect', {method:'POST', body: JSON.stringify({path})});
     resultBox.innerHTML = `<div class="timeline-inspect-head"><span class="timeline-inspect-title">${escapeHtml(data.title)}</span><span class="timeline-inspect-badge">${escapeHtml(data.duration_text)} · ${data.segment_count} 个片段</span></div><div class="timeline-inspect-meta">底层素材：${data.source_count} 个文件（对 AI 与成片展示隐藏）</div>`;
     resultBox.style.display = 'grid';
-    if(titleInput && titleInput.dataset.userEdited !== 'true') titleInput.value = data.title;
+    const mode=$('input[name="job_mode_select"]:checked')?.value||'direct';
+    if(titleInput && titleInput.dataset.userEdited !== 'true') titleInput.value = mode==='remix'?`${data.title}_成片重组`:data.title;
     error.textContent = '';
   } catch(err) {
     resultBox.style.display = 'none';
@@ -693,28 +737,36 @@ $('#newJobForm').addEventListener('submit',async e=>{
   try{
     const mode = $('input[name="job_mode_select"]:checked')?.value || 'direct';
     let payload;
-    if (mode === 'timeline') {
+    if (mode === 'timeline' || mode === 'remix') {
       const timelineInput = $('#timelineDraftInput');
       const draftPath = timelineInput?.dataset.selectedPath || timelineInput?.value.trim();
       if(!draftPath){ error.textContent = '请选择剪映草稿目录或时间线 JSON'; submit.disabled=false; submit.textContent='加入队列'; return; }
       const title = $('#timelineTitleInput')?.value.trim();
-      const targetMin = parseFloat($('#newJobForm [name="timeline_target_min"]')?.value) || 70;
-      const targetMax = parseFloat($('#newJobForm [name="timeline_target_max"]')?.value) || 90;
-      if (targetMin <= 0) throw new Error('最短时长必须大于 0 秒');
-      if (targetMax < targetMin) throw new Error('最长时长不能小于最短时长');
-      payload = {
-        job_type: 'timeline',
-        draft_path: draftPath,
-        title: title,
-        draft_name: $('#timelineTitleInput')?.dataset.draftName || '',
-        auto_title: $('#timelineTitleInput')?.dataset.autoTitle === 'true',
-        product_name: $('#newJobForm [name="timeline_product_name"]')?.value || '',
-        export_mode: $('#newJobForm [name="timeline_export_mode"]')?.value || 'merge',
-        export_dir: $('#newJobForm [name="timeline_export_dir"]')?.value || '',
-        target_min: targetMin,
-        target_max: targetMax,
-        target_seconds: `${targetMin}-${targetMax}`
-      };
+      if(mode==='remix'){
+        payload={
+          job_type:'remix',draft_path:draftPath,title:title,
+          export_mode:'merge',export_dir:$('#newJobForm [name="timeline_export_dir"]')?.value||'',
+          dedupe_strength:$('#newJobForm [name="remix_dedupe_strength"]')?.value||'standard'
+        };
+      }else{
+        const targetMin = parseFloat($('#newJobForm [name="timeline_target_min"]')?.value) || 70;
+        const targetMax = parseFloat($('#newJobForm [name="timeline_target_max"]')?.value) || 90;
+        if (targetMin <= 0) throw new Error('最短时长必须大于 0 秒');
+        if (targetMax < targetMin) throw new Error('最长时长不能小于最短时长');
+        payload = {
+           job_type: 'timeline',
+           draft_path: draftPath,
+           title: title,
+           draft_name: $('#timelineTitleInput')?.dataset.draftName || '',
+           auto_title: $('#timelineTitleInput')?.dataset.autoTitle === 'true',
+           product_name: $('#newJobForm [name="timeline_product_name"]')?.value || '',
+          export_mode: $('#newJobForm [name="timeline_export_mode"]')?.value || 'merge',
+          export_dir: $('#newJobForm [name="timeline_export_dir"]')?.value || '',
+          target_min: targetMin,
+          target_max: targetMax,
+          target_seconds: `${targetMin}-${targetMax}`
+         };
+       }
     } else {
       const f=new FormData(e.target);
       const sourcePath = f.get('source_path')?.trim();

@@ -46,7 +46,7 @@
         <button class="icon-button" type="button" data-close-new-job aria-label="关闭"><svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
       </header>
       <div class="modal-body">
-        <div class="mode-cards" style="grid-template-columns: 1fr 1fr">
+        <div class="mode-cards">
           <label class="mode-card" id="modeCardDirect">
             <input type="radio" name="job_mode_select" value="direct" checked>
             <b>原素材直接切片</b>
@@ -56,6 +56,11 @@
             <input type="radio" name="job_mode_select" value="timeline">
             <b>剪映虚拟时间线</b>
             <small>导入剪映草稿/时间线，AI 仅在筛选范围内编排并双时间轴换算</small>
+          </label>
+          <label class="mode-card" id="modeCardRemix">
+            <input type="radio" name="job_mode_select" value="remix">
+            <b>已发布成片重组</b>
+            <small>导入同商品集合时间线，仅按口播文字去重、分类并重排</small>
           </label>
         </div>
 
@@ -105,10 +110,10 @@
         </div>
 
         <section class="form-section" id="sectionTimelineMode" style="display:none">
-          <header class="section-head"><i>1</i><div><b>剪映虚拟时间线</b><small>选择剪映草稿目录、draft_content.json 或时间线 JSON</small></div></header>
+          <header class="section-head"><i>1</i><div><b id="timelineSectionTitle">剪映虚拟时间线</b><small id="timelineSectionHint">选择剪映草稿目录、draft_content.json 或时间线 JSON</small></div></header>
           <div class="file-drop" id="timelineFileDrop">
             <span class="file-drop-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6.5 12 2l8 4.5v11L12 22l-8-4.5z"/><path d="m9 8 7 4-7 4z"/></svg></span>
-            <div class="file-drop-body"><input name="draft_path" id="timelineDraftInput" placeholder="选择剪映草稿目录或时间线 JSON"><small>AI 仅在剪映保留的 30–40 分钟内分析，底层原素材文件自动隐藏。</small></div>
+            <div class="file-drop-body"><input name="draft_path" id="timelineDraftInput" placeholder="选择剪映草稿目录或时间线 JSON"><small id="timelineFileHint">AI 仅在剪映保留的 30–40 分钟内分析，底层原素材文件自动隐藏。</small></div>
             <button class="button ghost small" type="button" id="pickTimelineButton">浏览草稿</button>
           </div>
           <label class="field" id="timelineSelectorField" style="display:none">选择时间线
@@ -116,9 +121,9 @@
             <small>默认选中剪映当前活动时间线；切换后会重新显示所选时间线的时长、片段数和倍速。</small>
           </label>
           <div id="timelineInspectResult" class="timeline-inspect-card" style="display:none"></div>
-          <label class="field">成片名称<input name="timeline_title" id="timelineTitleInput" placeholder="留空则使用时间线标题（如：F家限定 / 时间线01）"><small>最终输出为“成片名称.mp4”。</small></label>
-          <label class="field">商品名称<input name="timeline_product_name" placeholder="本次要剪辑的商品，如：毛衣、裤子（可留空）"><small>与原素材方式相同，用于 AI 判断主商品并过滤跑题内容。</small></label>
-          <label class="field">输出形态
+          <label class="field">成片名称<input name="timeline_title" id="timelineTitleInput" placeholder="留空则使用时间线标题（如：F家限定 / 时间线01）"><small id="timelineTitleHint">最终输出为“成片名称.mp4”。</small></label>
+          <label class="field" id="timelineProductField">商品名称<input name="timeline_product_name" placeholder="本次要剪辑的商品，如：毛衣、裤子（可留空）"><small>与原素材方式相同，用于 AI 判断主商品并过滤跑题内容。</small></label>
+          <label class="field" id="timelineExportModeField">输出形态
             <select name="timeline_export_mode">
               <option value="merge" selected>合并版（输出一条成片）</option>
               <option value="segments">分段版（每段导出到「成片名称」子文件夹，保持源响度）</option>
@@ -129,19 +134,36 @@
             <div class="file-drop-body"><input name="timeline_export_dir" placeholder="导出位置（可留空，留空则用任务工作目录）"><small>选择一次后会记住；成片同时保留在任务工作目录，同名文件不会覆盖。</small></div>
             <button class="button ghost small" type="button" id="pickTimelineExportButton">选择文件夹</button>
           </div>
-          <header class="section-head"><i>2</i><div><b>目标时长范围</b><small>AI 从剪映保留的虚拟时间线中精选出的最终成片总时长</small></div></header>
-          <div class="range-inputs">
-            <label class="field"><span class="field-label">最短时长（秒）</span><input type="number" name="timeline_target_min" min="10" max="600" step="1" value="70"></label>
-            <span class="range-sep">至</span>
-            <label class="field"><span class="field-label">最长时长（秒）</span><input type="number" name="timeline_target_max" min="15" max="600" step="1" value="90"></label>
+          <div id="timelineDurationSection" style="display:grid;gap:1rem">
+            <header class="section-head"><i>2</i><div><b>目标时长范围</b><small>AI 从剪映保留的虚拟时间线中精选出的最终成片总时长</small></div></header>
+            <div class="range-inputs">
+              <label class="field"><span class="field-label">最短时长（秒）</span><input type="number" name="timeline_target_min" min="10" max="600" step="1" value="70"></label>
+              <span class="range-sep">至</span>
+              <label class="field"><span class="field-label">最长时长（秒）</span><input type="number" name="timeline_target_max" min="15" max="600" step="1" value="90"></label>
+            </div>
+            <div class="duration-presets" id="timelineDurationPresets">
+              <button type="button" class="preset-chip" data-min="45" data-max="60">45–60s 紧凑</button>
+              <button type="button" class="preset-chip active" data-min="70" data-max="90">70–90s 默认</button>
+              <button type="button" class="preset-chip" data-min="90" data-max="120">90–120s 充实</button>
+              <button type="button" class="preset-chip" data-min="120" data-max="180">120–180s 深度</button>
+            </div>
+            <small class="field-hint">这里控制的是最终 AI 成片时长，不是剪映草稿本身的 30–60 分钟时长。</small>
           </div>
-          <div class="duration-presets" id="timelineDurationPresets">
-            <button type="button" class="preset-chip" data-min="45" data-max="60">45–60s 紧凑</button>
-            <button type="button" class="preset-chip active" data-min="70" data-max="90">70–90s 默认</button>
-            <button type="button" class="preset-chip" data-min="90" data-max="120">90–120s 充实</button>
-            <button type="button" class="preset-chip" data-min="120" data-max="180">120–180s 深度</button>
+          <div id="remixOptions" style="display:none;gap:1rem">
+            <header class="section-head"><i>2</i><div><b>文字去重与动态重排</b><small>保留现有片段边界，不套固定视频结构</small></div></header>
+            <label class="field">去重强度
+              <select name="remix_dedupe_strength">
+                <option value="lenient">宽松：只删除高度重复表达</option>
+                <option value="standard" selected>标准：删除同一信息点的不同说法</option>
+                <option value="strict">严格：相近卖点也优先只保留一段</option>
+              </select>
+              <small>只比较口播文字；不检查商品、违禁词或画面，也不会为控制时长删除独有信息。</small>
+            </label>
+            <div class="timeline-inspect-card" style="display:grid">
+              <div class="timeline-inspect-head"><span class="timeline-inspect-title">处理边界</span><span class="timeline-inspect-badge">文字层</span></div>
+              <div class="timeline-inspect-meta">字面去重 → 语义去重 → 按实际内容动态分类 → 同类内容集中重排 → 生成新成片；原集合时间线不修改。</div>
+            </div>
           </div>
-          <small class="field-hint">这里控制的是最终 AI 成片时长，不是剪映草稿本身的 30–60 分钟时长。</small>
         </section>
       </div>
       <footer class="modal-actions">
