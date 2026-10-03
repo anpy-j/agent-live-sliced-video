@@ -333,6 +333,14 @@ class JobApiTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "ai_engine"):
             self.app.update_settings({"ai_engine": "gpt"})
 
+    def test_settings_exposes_models_by_ai_provider(self):
+        models = self.app.settings()["ai_models"]
+
+        self.assertEqual(models["auto"], [{"id": "auto", "name": "自动选择"}])
+        self.assertIn({"id": "gpt-6-astra", "name": "GPT-6 Astra"}, models["codex"])
+        self.assertIn({"id": "glm-5.1", "name": "GLM 5.1"}, models["workbuddy"])
+        self.assertEqual(models["opencode"][0]["id"], "auto")
+
     def test_inspect_and_create_timeline_job(self):
         draft_file = self.root / "draft_content.json"
         draft_content = {

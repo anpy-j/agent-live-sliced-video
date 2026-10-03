@@ -20,6 +20,12 @@ try:
 except ImportError:  # pragma: no cover - Windows fallback keeps single-process semantics only
     fcntl = None  # type: ignore[assignment]
 
+from .ai import (
+    ANTIGRAVITY_FALLBACK_MODELS,
+    CODEX_MODELS,
+    OPENCODE_FALLBACK_MODELS,
+    WORKBUDDY_MODELS,
+)
 from .db import Store, utc_now
 from .labeling import (
     activate as activate_labels, build_patch, merge_patch, prepare as prepare_labels,
@@ -652,6 +658,23 @@ try {{
             result["jev_api_key"] = ""
         result["engine_path"] = str(self.root / "agent_video" / "engine")
         result["engine_bundled"] = True
+        result["ai_models"] = {
+            "auto": [{"id": "auto", "name": "自动选择"}],
+            "opencode": [
+                {"id": model_id, "name": name}
+                for model_id, name in [("auto", "默认配置"), *OPENCODE_FALLBACK_MODELS]
+            ],
+            "codex": [
+                {"id": model_id, "name": name} for model_id, name in CODEX_MODELS
+            ],
+            "workbuddy": [
+                {"id": model_id, "name": name} for model_id, name in WORKBUDDY_MODELS
+            ],
+            "antigravity": [
+                {"id": model_id, "name": name}
+                for model_id, name in ANTIGRAVITY_FALLBACK_MODELS
+            ],
+        }
         return result
 
     def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:

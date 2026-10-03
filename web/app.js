@@ -305,6 +305,12 @@ async function renderMcp(){
 async function renderSettings(){
   setCrumb('系统设置');loading();const data=await api('/api/settings');
   const opts=(map,selected)=>Object.entries(map).map(([value,label])=>`<option value="${value}" ${value===selected?'selected':''}>${label}</option>`).join('');
+  const modelOpts=(provider,selected)=>{
+    const models=data.ai_models?.[provider]||data.ai_models?.auto||[{id:'auto',name:'自动选择'}];
+    const selectedExists=models.some(model=>model.id===selected);
+    return models.map(model=>`<option value="${escapeHtml(model.id)}" ${model.id===(selectedExists?selected:'auto')?'selected':''}>${escapeHtml(model.name)}${model.id==='auto'?'':`（${escapeHtml(model.id)}）`}</option>`).join('');
+  };
+  const selectedProvider=data.ai_provider||'auto';
   app.innerHTML=`<div class="hero"><div><span class="eyebrow">SYSTEM CONFIGURATION</span><h1>系统设置</h1><p>配置执行内核、AI 提供方和本地接入策略。</p></div></div>
   <div class="panel"><div class="panel-head"><div><h2>运行配置</h2><p>内置引擎随应用版本一起升级</p></div></div>
   <form class="settings-form" id="settingsForm">
@@ -312,8 +318,8 @@ async function renderSettings(){
     <label>引擎 Python<input name="engine_python" value="${escapeHtml(data.engine_python||'')}"><small>建议使用项目独立的 Python 3.13 环境。</small></label>
     <div class="settings-section"><b>AI 执行策略</b><small>选择编排的引擎与提供方。</small></div>
     <label>AI 引擎<select name="ai_engine">${opts({llm:'LLM（本地 CLI）',jev:'JEV（Typesafe 云）'},data.ai_engine||'llm')}</select><small>LLM 走本地 CLI，JEV 走云端判定服务。</small></label>
-    <label>AI 提供方<select name="ai_provider">${opts({auto:'自动',opencode:'OpenCode',codex:'Codex',workbuddy:'WorkBuddy',antigravity:'Antigravity'},data.ai_provider||'auto')}</select><small>auto 会按可用性自动选择。</small></label>
-    <label>AI 模型<input name="ai_model" value="${escapeHtml(data.ai_model||'')}" placeholder="auto"><small>留空或 auto 使用提供方默认模型。</small></label>
+    <label>AI 提供方<select name="ai_provider" id="aiProvider">${opts({auto:'自动',opencode:'OpenCode',codex:'Codex',workbuddy:'WorkBuddy',antigravity:'Antigravity'},selectedProvider)}</select><small>auto 会按可用性自动选择。</small></label>
+    <label>AI 模型<select name="ai_model" id="aiModel">${modelOpts(selectedProvider,data.ai_model||'auto')}</select><small>模型选项会根据 AI 提供方自动更新。</small></label>
     <div class="settings-section"><b>JEV 云端</b><small>${data.jev_api_key_configured?'已配置密钥。':'尚未配置密钥。'}</small></div>
     <label>JEV API Key<input name="jev_api_key" value="${escapeHtml(data.jev_api_key||'')}" placeholder="留空保持现有密钥"><small>仅为安全展示，留空或保持掩码不会覆盖现有密钥。</small></label>
     <label>JEV Base URL<input name="jev_base_url" value="${escapeHtml(data.jev_base_url||'')}"></label>
@@ -323,6 +329,7 @@ async function renderSettings(){
     <p class="form-error" id="settingsError" role="alert"></p>
     <button class="button primary" type="submit">保存设置</button>
   </form></div>`;
+  $('#aiProvider').addEventListener('change',e=>{$('#aiModel').innerHTML=modelOpts(e.target.value,'auto')});
   $('#settingsForm').addEventListener('submit',async e=>{
     e.preventDefault();const f=new FormData(e.target),error=$('#settingsError');error.textContent='';
     try{
