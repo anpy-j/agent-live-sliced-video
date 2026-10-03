@@ -28,6 +28,51 @@ WORKBUDDY_MODELS = [
     ("deepseek-v3-2-volc", "DeepSeek V3.2"),
 ]
 
+
+def workbuddy_model_catalog(executable: Path | None = None) -> list[tuple[str, str]]:
+    """读取已安装 WorkBuddy 的完整文本/工具调用模型目录。"""
+    roots: list[Path] = []
+    if executable:
+        executable_path = Path(executable).expanduser()
+        if executable_path.parent.name == "bin":
+            roots.append(executable_path.parent.parent)
+    roots.extend([
+        Path.home() / "AppData" / "Local" / "Programs" / "WorkBuddy" / "resources"
+        / "app.asar.unpacked" / "cli",
+        Path("/Applications/AI/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli"),
+        Path.home() / "Applications" / "WorkBuddy.app" / "Contents" / "Resources"
+        / "app.asar.unpacked" / "cli",
+    ])
+    seen_roots: set[Path] = set()
+    for root in roots:
+        root = root.resolve()
+        if root in seen_roots:
+            continue
+        seen_roots.add(root)
+        product_file = root / "product.json"
+        if not product_file.is_file():
+            continue
+        try:
+            product = json.loads(product_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        models: list[tuple[str, str]] = []
+        seen_ids: set[str] = set()
+        for item in product.get("models", []):
+            if not isinstance(item, dict) or item.get("supportsToolCall") is not True:
+                continue
+            model_id = str(item.get("id") or "").strip()
+            name = str(item.get("name") or model_id).strip()
+            if not model_id or model_id in seen_ids:
+                continue
+            seen_ids.add(model_id)
+            models.append((model_id, name))
+        if models:
+            models.sort(key=lambda item: (item[0] != "auto", item[1].lower()))
+            return models
+    return list(WORKBUDDY_MODELS)
+
+
 ANTIGRAVITY_FALLBACK_MODELS = [
     ("auto", "默认配置"),
     ("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)"),
@@ -578,6 +623,14 @@ class WorkBuddyCli(CliProvider):
     display_name = "WorkBuddy CLI"
     model_choices = WORKBUDDY_MODELS
 
+    def models(self) -> list[tuple[str, str]]:
+        return workbuddy_model_catalog(self.executable)
+
+    def _command_prefix(self) -> list[str]:
+        if sys.platform == "win32" and not self.executable.suffix:
+            return ["node", str(self.executable)]
+        return [str(self.executable)]
+
     def vision_models(self) -> list[tuple[str, str]]:
         return [(model_id, name) for model_id, name in self.models()
                 if model_id == "glm-5v-turbo"]
@@ -589,7 +642,7 @@ class WorkBuddyCli(CliProvider):
         self.validate_vision_model(model)
         image_paths = "\n".join(f"- {path.resolve()}" for path in images)
         command = [
-            str(self.executable), "-p", "--output-format", "json",
+            *self._command_prefix(), "-p", "--output-format", "json",
             "--json-schema", json.dumps(VISUAL_PLAN_SCHEMA, ensure_ascii=False,
                                          separators=(",", ":")),
             "--model", model, "--max-turns", "4", "--tools", "Read,StructuredOutput",
@@ -619,7 +672,7 @@ class WorkBuddyCli(CliProvider):
         self._ensure_available()
         self.validate_model(model)
         command = [
-            str(self.executable), "-p", "--output-format", "json",
+            *self._command_prefix(), "-p", "--output-format", "json",
             "--json-schema", json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
             "--model", model, "--max-turns", "4", "--tools", "StructuredOutput",
             "--permission-mode", "dontAsk", "--no-session-persistence",
@@ -646,7 +699,7 @@ class WorkBuddyCli(CliProvider):
         self.validate_model(model)
         required = tuple(schema.get("required") or ())
         command = [
-            str(self.executable), "-p", "--output-format", "json",
+            *self._command_prefix(), "-p", "--output-format", "json",
             "--json-schema", json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
             "--model", model, "--max-turns", "4", "--tools", "StructuredOutput",
             "--permission-mode", "dontAsk", "--no-session-persistence",

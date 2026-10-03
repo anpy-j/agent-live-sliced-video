@@ -24,7 +24,7 @@ from .ai import (
     ANTIGRAVITY_FALLBACK_MODELS,
     CODEX_MODELS,
     OPENCODE_FALLBACK_MODELS,
-    WORKBUDDY_MODELS,
+    workbuddy_model_catalog,
 )
 from .db import Store, utc_now
 from .labeling import (
@@ -668,7 +668,8 @@ try {{
                 {"id": model_id, "name": name} for model_id, name in CODEX_MODELS
             ],
             "workbuddy": [
-                {"id": model_id, "name": name} for model_id, name in WORKBUDDY_MODELS
+                {"id": model_id, "name": name}
+                for model_id, name in workbuddy_model_catalog()
             ],
             "antigravity": [
                 {"id": model_id, "name": name}

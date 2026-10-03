@@ -1,15 +1,40 @@
 import json
 import subprocess
+import tempfile
 import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 from agent_video.ai import (AntigravityCli, CodexCli, MulticaCli, OpenCodeCli,
-                            ProviderResponseError, WorkBuddyCli)
+                            ProviderResponseError, WorkBuddyCli,
+                            workbuddy_model_catalog)
 
 
 class WorkBuddyCliTest(unittest.TestCase):
+    def test_workbuddy_catalog_reads_all_tool_call_models(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cli_root = Path(tmp) / "cli"
+            executable = cli_root / "bin" / "codebuddy"
+            executable.parent.mkdir(parents=True)
+            executable.write_text("", encoding="utf-8")
+            (cli_root / "product.json").write_text(json.dumps({"models": [
+                {"id": "legacy", "name": "Legacy", "supportsToolCall": True},
+                {"id": "auto", "name": "Auto", "supportsToolCall": True},
+                {"id": "image", "name": "Image only", "supportsToolCall": False},
+            ]}), encoding="utf-8")
+
+            self.assertEqual(workbuddy_model_catalog(executable), [
+                ("auto", "Auto"), ("legacy", "Legacy")])
+            self.assertEqual(WorkBuddyCli(executable).models(), [
+                ("auto", "Auto"), ("legacy", "Legacy")])
+
+    def test_workbuddy_windows_extensionless_cli_uses_node(self):
+        provider = WorkBuddyCli(Path("C:/WorkBuddy/cli/bin/codebuddy"))
+        with patch("agent_video.ai.sys.platform", "win32"):
+            self.assertEqual(provider._command_prefix(),
+                             ["node", "C:\\WorkBuddy\\cli\\bin\\codebuddy"])
+
     def test_windows_timeout_kills_entire_provider_process_tree(self):
         provider = WorkBuddyCli(Path("C:/workbuddy.cmd"))
         process = Mock(pid=4321, stdin=None, stdout=None, stderr=None, returncode=1)
@@ -69,8 +94,9 @@ class WorkBuddyCliTest(unittest.TestCase):
         plan = {"replacements": [
             {"block_id": "body:1", "candidate_id": "C003", "reason": "同款全身"}]}
         self.assertEqual(WorkBuddyCli._find_visual_plan({"result": json.dumps(plan)}), plan)
-        self.assertEqual(WorkBuddyCli(Path("/tmp/workbuddy")).vision_models(),
-                         [("glm-5v-turbo", "GLM 5V Turbo")])
+        self.assertEqual(
+            [model_id for model_id, _ in WorkBuddyCli(Path("/tmp/workbuddy")).vision_models()],
+            ["glm-5v-turbo"])
         self.assertIn(("gpt-5.6-sol", "GPT-5.6 Sol"),
                       CodexCli(Path("/tmp/codex")).vision_models())
         self.assertEqual(AntigravityCli(Path("/tmp/agy")).vision_models(), [])

@@ -338,7 +338,7 @@ class JobApiTest(unittest.TestCase):
 
         self.assertEqual(models["auto"], [{"id": "auto", "name": "自动选择"}])
         self.assertIn({"id": "gpt-6-astra", "name": "GPT-6 Astra"}, models["codex"])
-        self.assertIn({"id": "glm-5.1", "name": "GLM 5.1"}, models["workbuddy"])
+        self.assertIn("glm-5.1", {model["id"] for model in models["workbuddy"]})
         self.assertEqual(models["opencode"][0]["id"], "auto")
 
     def test_inspect_and_create_timeline_job(self):

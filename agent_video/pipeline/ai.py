@@ -116,6 +116,9 @@ _CLI_BUILDERS = {
 _FALLBACK_EXECUTABLES: dict[str, tuple[str, ...]] = {
     # WorkBuddy 5.x 把 CLI 放进了 app.asar.unpacked/cli/bin；保留旧路径兼容旧版本。
     "workbuddy": (
+        *((str(Path.home() / "AppData" / "Local" / "Programs" / "WorkBuddy" / "resources"
+               / "app.asar.unpacked" / "cli" / "bin" / "codebuddy"),)
+          if sys.platform == "win32" else ()),
         "/Applications/AI/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy",
         "/Applications/AI/WorkBuddy.app/Contents/Resources/bin/codebuddy",
         str(Path.home() / "Applications" / "WorkBuddy.app" / "Contents"
