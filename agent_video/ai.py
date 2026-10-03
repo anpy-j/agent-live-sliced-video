@@ -29,8 +29,16 @@ WORKBUDDY_MODELS = [
 ]
 
 
-def workbuddy_model_catalog(executable: Path | None = None) -> list[tuple[str, str]]:
-    """读取已安装 WorkBuddy 的完整文本/工具调用模型目录。"""
+# WorkBuddy CLI `--help` 的 `--model` 说明会列出当前账户实时可用的模型，例如
+#   --model <model> ... Currently supported: (hy3, deepseek-v4.1-flash, glm-5.3, ...)
+# 这是登录后从服务端拉取的账户目录，比安装包里的 product.json 更新。
+_WORKBUDDY_HELP_MODELS = re.compile(r"Currently supported:\s*\(([^)]+)\)")
+_WORKBUDDY_CATALOG_TTL_SECONDS = 300
+_workbuddy_catalog_cache: dict[str, tuple[float, list[tuple[str, str]]]] = {}
+
+
+def _workbuddy_cli_roots(executable: Path | None = None) -> list[Path]:
+    """已安装 WorkBuddy CLI 的候选根目录（去重、已 resolve）。"""
     roots: list[Path] = []
     if executable:
         executable_path = Path(executable).expanduser()
@@ -43,12 +51,70 @@ def workbuddy_model_catalog(executable: Path | None = None) -> list[tuple[str, s
         Path.home() / "Applications" / "WorkBuddy.app" / "Contents" / "Resources"
         / "app.asar.unpacked" / "cli",
     ])
-    seen_roots: set[Path] = set()
+    unique: list[Path] = []
+    seen: set[Path] = set()
     for root in roots:
-        root = root.resolve()
-        if root in seen_roots:
+        resolved = root.resolve()
+        if resolved in seen:
             continue
-        seen_roots.add(root)
+        seen.add(resolved)
+        unique.append(resolved)
+    return unique
+
+
+def _workbuddy_cli_entries(executable: Path | None = None) -> list[Path]:
+    """WorkBuddy CLI 入口（bin/codebuddy），优先使用调用方给定的可执行文件。"""
+    if executable:
+        given = Path(executable).expanduser()
+        if given.is_file():
+            return [given]
+    entries: list[Path] = []
+    seen: set[Path] = set()
+    for root in _workbuddy_cli_roots(executable):
+        entry = root / "bin" / "codebuddy"
+        if entry in seen:
+            continue
+        seen.add(entry)
+        entries.append(entry)
+    return entries
+
+
+def _workbuddy_live_models(executable: Path | None = None) -> list[tuple[str, str]]:
+    """解析 WorkBuddy CLI `--help` 的账户实时模型列表（与客户端一致）。"""
+    for entry in _workbuddy_cli_entries(executable):
+        if not entry.is_file():
+            continue
+        command = [str(entry), "--help"]
+        # Windows 上 WorkBuddy 的 bin 入口是无扩展名的 Node 脚本，需显式用 node 启动。
+        if sys.platform == "win32" and not entry.suffix:
+            command = ["node", str(entry), "--help"]
+        try:
+            result = subprocess.run(
+                command, capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=30,
+                env={**os.environ, "NO_COLOR": "1"},
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        match = _WORKBUDDY_HELP_MODELS.search(result.stdout or "")
+        if not match:
+            continue
+        models: list[tuple[str, str]] = []
+        seen_ids: set[str] = set()
+        for raw in match.group(1).split(","):
+            model_id = raw.strip()
+            if not model_id or model_id in seen_ids:
+                continue
+            seen_ids.add(model_id)
+            models.append((model_id, model_id))
+        if models:
+            return models
+    return []
+
+
+def _workbuddy_product_models(executable: Path | None = None) -> list[tuple[str, str]]:
+    """读取安装目录里打包的 product.json（仅取工具调用模型）。"""
+    for root in _workbuddy_cli_roots(executable):
         product_file = root / "product.json"
         if not product_file.is_file():
             continue
@@ -70,7 +136,43 @@ def workbuddy_model_catalog(executable: Path | None = None) -> list[tuple[str, s
         if models:
             models.sort(key=lambda item: (item[0] != "auto", item[1].lower()))
             return models
-    return list(WORKBUDDY_MODELS)
+    return []
+
+
+def workbuddy_model_catalog(executable: Path | None = None) -> list[tuple[str, str]]:
+    """读取 WorkBuddy 当前可用的文本/工具调用模型目录。
+
+    三级回退：
+    1. WorkBuddy CLI `--help` 的账户实时模型列表（与客户端一致，含最新模型）；
+    2. 安装目录里打包的 product.json；
+    3. 内置静态 WORKBUDDY_MODELS。
+    """
+    cache_key = str(Path(executable).expanduser()) if executable else "*"
+    now = time.monotonic()
+    cached = _workbuddy_catalog_cache.get(cache_key)
+    if cached and now - cached[0] < _WORKBUDDY_CATALOG_TTL_SECONDS:
+        return cached[1]
+
+    product_models = _workbuddy_product_models(executable)
+    display_names = {model_id: name for model_id, name in product_models}
+    display_names.update(WORKBUDDY_MODELS)
+
+    live_models = _workbuddy_live_models(executable)
+    if live_models:
+        catalog: list[tuple[str, str]] = [("auto", "自动选择")]
+        seen_ids = {"auto"}
+        for model_id, _ in live_models:
+            if model_id in seen_ids:
+                continue
+            seen_ids.add(model_id)
+            catalog.append((model_id, display_names.get(model_id, model_id)))
+    elif product_models:
+        catalog = product_models
+    else:
+        catalog = list(WORKBUDDY_MODELS)
+
+    _workbuddy_catalog_cache[cache_key] = (now, catalog)
+    return catalog
 
 
 ANTIGRAVITY_FALLBACK_MODELS = [

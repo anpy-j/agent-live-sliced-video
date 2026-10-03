@@ -8,10 +8,13 @@ from unittest.mock import Mock, patch
 
 from agent_video.ai import (AntigravityCli, CodexCli, MulticaCli, OpenCodeCli,
                             ProviderResponseError, WorkBuddyCli,
-                            workbuddy_model_catalog)
+                            _workbuddy_catalog_cache, workbuddy_model_catalog)
 
 
 class WorkBuddyCliTest(unittest.TestCase):
+    def setUp(self):
+        _workbuddy_catalog_cache.clear()
+
     def test_workbuddy_catalog_reads_all_tool_call_models(self):
         with tempfile.TemporaryDirectory() as tmp:
             cli_root = Path(tmp) / "cli"
@@ -24,10 +27,35 @@ class WorkBuddyCliTest(unittest.TestCase):
                 {"id": "image", "name": "Image only", "supportsToolCall": False},
             ]}), encoding="utf-8")
 
-            self.assertEqual(workbuddy_model_catalog(executable), [
-                ("auto", "Auto"), ("legacy", "Legacy")])
-            self.assertEqual(WorkBuddyCli(executable).models(), [
-                ("auto", "Auto"), ("legacy", "Legacy")])
+            with patch("agent_video.ai._workbuddy_live_models", return_value=[]):
+                self.assertEqual(workbuddy_model_catalog(executable), [
+                    ("auto", "Auto"), ("legacy", "Legacy")])
+                self.assertEqual(WorkBuddyCli(executable).models(), [
+                    ("auto", "Auto"), ("legacy", "Legacy")])
+
+    def test_workbuddy_catalog_prefers_live_cli_models(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cli_root = Path(tmp) / "cli"
+            executable = cli_root / "bin" / "codebuddy"
+            executable.parent.mkdir(parents=True)
+            executable.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+            (cli_root / "product.json").write_text(json.dumps({"models": [
+                {"id": "glm-5.2", "name": "GLM-5.2", "supportsToolCall": True},
+                {"id": "image", "name": "Image only", "supportsToolCall": False},
+            ]}), encoding="utf-8")
+            result = Mock(stdout=(
+                "  --model <model>   Model for the current session. "
+                "Currently supported: (deepseek-v4.1-flash, glm-5.3, glm-5.3-flash, "
+                "glm-5.2)\n  --text-to-image-model <model>\n"))
+            with patch("agent_video.ai.subprocess.run", return_value=result):
+                catalog = workbuddy_model_catalog(executable)
+        self.assertEqual(catalog, [
+            ("auto", "自动选择"),
+            ("deepseek-v4.1-flash", "deepseek-v4.1-flash"),
+            ("glm-5.3", "glm-5.3"),
+            ("glm-5.3-flash", "glm-5.3-flash"),
+            ("glm-5.2", "GLM-5.2"),
+        ])
 
     def test_workbuddy_windows_extensionless_cli_uses_node(self):
         provider = WorkBuddyCli(Path("C:/WorkBuddy/cli/bin/codebuddy"))
@@ -94,9 +122,11 @@ class WorkBuddyCliTest(unittest.TestCase):
         plan = {"replacements": [
             {"block_id": "body:1", "candidate_id": "C003", "reason": "同款全身"}]}
         self.assertEqual(WorkBuddyCli._find_visual_plan({"result": json.dumps(plan)}), plan)
-        self.assertEqual(
-            [model_id for model_id, _ in WorkBuddyCli(Path("/tmp/workbuddy")).vision_models()],
-            ["glm-5v-turbo"])
+        with patch("agent_video.ai._workbuddy_live_models", return_value=[]):
+            self.assertEqual(
+                [model_id for model_id, _ in
+                 WorkBuddyCli(Path("/tmp/workbuddy")).vision_models()],
+                ["glm-5v-turbo"])
         self.assertIn(("gpt-5.6-sol", "GPT-5.6 Sol"),
                       CodexCli(Path("/tmp/codex")).vision_models())
         self.assertEqual(AntigravityCli(Path("/tmp/agy")).vision_models(), [])
