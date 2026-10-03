@@ -218,11 +218,15 @@ def _schema_to_questions(schema: dict[str, Any]) -> dict[str, Any]:
             questions[name] = {"type": "text",
                                "instructions": f"给出 {name}：只输出整数 id，用英文逗号分隔"}
         elif kind == "array" and (spec.get("items") or {}).get("type") == "object":
+            role_spec = (((spec.get("items") or {}).get("properties") or {}).get("role") or {})
+            roles = role_spec.get("enum") or []
+            role_hint = (f"role 只能取 {'/'.join(str(role) for role in roles)}"
+                         if roles else "role 使用简短、贴合实际内容的中文分类名")
             questions[name] = {
                 "type": "text",
                 "instructions": (
                     f"给出 {name}：每段写成 role:id1,id2 的形式，多个段之间用英文分号 ; "
-                    f"分隔；role 只能取 {'/'.join(ORDER_SECTION_ROLES)}")}
+                    f"分隔；{role_hint}")}
         else:
             raise PipelineConfigError(f"Jev 引擎暂不支持 schema 字段：{name}")
     return questions

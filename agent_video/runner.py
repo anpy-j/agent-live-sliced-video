@@ -25,6 +25,7 @@ from .db import Store, utc_now
 from .pipeline import (PipelineError, next_available_dir, next_available_output,
                        group_segments_for_export, render_segment, run_pipeline,
                        run_pipeline_stage)
+from .pipeline.remix import run_remix_pipeline
 
 HEARTBEAT_SECONDS = 5.0
 
@@ -129,7 +130,19 @@ def _run_pipeline_child(result_queue: Any, source: str, workspace: str,
             from .timeline import load_virtual_timeline
             vt = load_virtual_timeline(vt_file)
 
-        if only_stage:
+        remix_config_file = Path(workspace) / "remix_config.json"
+        if remix_config_file.is_file():
+            if vt is None:
+                raise PipelineError("成片重组任务缺少虚拟时间线")
+            try:
+                remix_config = json.loads(remix_config_file.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise PipelineError(f"成片重组配置无法读取：{exc}") from exc
+            manifest = run_remix_pipeline(
+                source, workspace, virtual_timeline=vt, output_stem=output_stem,
+                dedupe_strength=str(remix_config.get("dedupe_strength") or "standard"),
+                on_stage=on_stage)
+        elif only_stage:
             manifest = run_pipeline_stage(
                 source, workspace, only_stage, target_seconds=target_seconds,
                 product_name=product_name, output_stem=output_stem, on_stage=on_stage,
@@ -246,6 +259,20 @@ class JobRunner:
                             item.unlink(missing_ok=True)
         elif workspace:
             workspace.mkdir(parents=True, exist_ok=True)
+        timeline_meta = job.get("timeline_meta")
+        if workspace and isinstance(timeline_meta, dict) and timeline_meta.get("segments"):
+            (workspace / "virtual_timeline.json").write_text(
+                json.dumps(timeline_meta, ensure_ascii=False, indent=2), encoding="utf-8")
+            if job.get("job_type") == "remix":
+                remix_meta = timeline_meta.get("remix") or {}
+                (workspace / "remix_config.json").write_text(json.dumps({
+                    "version": 1,
+                    "dedupe_strength": remix_meta.get("dedupe_strength") or "standard",
+                    "text_only": True,
+                    "check_product": False,
+                    "check_compliance": False,
+                    "dedupe_visual": False,
+                }, ensure_ascii=False, indent=2), encoding="utf-8")
         self.store.reset_job(job_id)
         self.enqueue(job_id)
 
@@ -370,7 +397,9 @@ class JobRunner:
         workspace.mkdir(parents=True, exist_ok=True)
         heartbeat = self._start_heartbeat(job_id)
         target_seconds = self._parse_target_seconds(job.get("target_seconds"))
-        only_stage = job.get("run_stage")
+        # 成片重组的语义去重、分类和顺序是一个整体决策；局部重跑会让后续结果失配。
+        # 即使历史 UI 留下 run_stage，也按完整重组流程执行一次。
+        only_stage = None if job.get("job_type") == "remix" else job.get("run_stage")
 
         def on_stage(stage: str, status: str, message: str) -> None:
             if job_id in self._cancelled:
@@ -555,12 +584,21 @@ class JobRunner:
     def _succeed(self, job_id: str, workspace: Path, manifest: dict[str, Any],
                  export_dir: str | None = None, export_mode: str = "merge",
                  output_stem: str | None = None, media: str | None = None) -> None:
-        artifacts = [
-            ("asr", "json", "子句时间线", workspace / "timeline.json", "application/json"),
-            ("filter", "json", "规则筛结果", workspace / "clauses.filtered.json", "application/json"),
-            ("judge", "json", "AI 判定结果", workspace / "clauses.judged.json", "application/json"),
-            ("render", "json", "渲染清单", workspace / "manifest.json", "application/json"),
-        ]
+        if manifest.get("workflow") == "remix":
+            artifacts = [
+                ("asr", "json", "集合片段文字", workspace / "timeline.json", "application/json"),
+                ("filter", "json", "文字字面去重", workspace / "clauses.filtered.json", "application/json"),
+                ("judge", "json", "语义去重结果", workspace / "clauses.judged.json", "application/json"),
+                ("order", "json", "成片重组方案", workspace / "remix_plan.json", "application/json"),
+                ("render", "json", "渲染清单", workspace / "manifest.json", "application/json"),
+            ]
+        else:
+            artifacts = [
+                ("asr", "json", "子句时间线", workspace / "timeline.json", "application/json"),
+                ("filter", "json", "规则筛结果", workspace / "clauses.filtered.json", "application/json"),
+                ("judge", "json", "AI 判定结果", workspace / "clauses.judged.json", "application/json"),
+                ("render", "json", "渲染清单", workspace / "manifest.json", "application/json"),
+            ]
         for stage_id, kind, title, path, mime in artifacts:
             if path.is_file():
                 self.store.add_artifact(job_id, stage_id, kind, title, path, mime)

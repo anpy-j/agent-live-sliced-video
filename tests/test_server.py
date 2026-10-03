@@ -398,6 +398,41 @@ class JobApiTest(unittest.TestCase):
         self.assertEqual(job["source_path"], str(self.video))
         self.assertIsNone(job.get("timeline_meta"))
 
+    def test_create_remix_job_has_text_only_config(self):
+        draft_file = self.root / "remix_draft.json"
+        draft_file.write_text(json.dumps({
+            "timeline_id": "collection-1",
+            "title": "同款集合",
+            "segments": [{
+                "segment_id": "clip-1", "timeline_start": 0, "timeline_end": 5,
+                "source_path": str(self.video), "source_start": 0, "source_end": 5,
+                "speed": 1,
+            }],
+        }, ensure_ascii=False), encoding="utf-8")
+
+        job = self.app.create_job({
+            "job_type": "remix", "draft_path": str(draft_file),
+            "dedupe_strength": "strict",
+        })
+
+        self.assertEqual(job["job_type"], "remix")
+        self.assertEqual(job["title"], "同款集合_成片重组")
+        self.assertEqual(job["target_seconds"], "")
+        self.assertIsNone(job["product_name"])
+        self.assertEqual(job["timeline_meta"]["remix"]["dedupe_strength"], "strict")
+        config = json.loads((Path(job["workspace"]) / "remix_config.json").read_text(
+            encoding="utf-8"))
+        self.assertTrue(config["text_only"])
+        self.assertFalse(config["check_product"])
+        self.assertFalse(config["check_compliance"])
+        self.assertFalse(config["dedupe_visual"])
+
+        self.app.runner.restart(job["id"])
+        restored = json.loads((Path(job["workspace"]) / "remix_config.json").read_text(
+            encoding="utf-8"))
+        self.assertEqual(restored["dedupe_strength"], "strict")
+        self.assertTrue((Path(job["workspace"]) / "virtual_timeline.json").is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

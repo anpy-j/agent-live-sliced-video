@@ -88,6 +88,8 @@ class Application:
 
     def create_job(self, payload: dict[str, Any]) -> dict[str, Any]:
         job_type = str(payload.get("job_type") or "direct").lower()
+        if job_type == "remix":
+            return self._create_timeline_job(payload, job_type="remix")
         if job_type == "timeline" or "timeline_data" in payload or payload.get("draft_path"):
             return self._create_timeline_job(payload)
         return self._create_direct_job(payload)
@@ -140,7 +142,8 @@ class Application:
         self.runner.enqueue(job_id)
         return self.store.get_job(job_id) or {"id": job_id}
 
-    def _create_timeline_job(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _create_timeline_job(self, payload: dict[str, Any], *,
+                             job_type: str = "timeline") -> dict[str, Any]:
         from .timeline import load_virtual_timeline
         target = (payload.get("draft_path") or payload.get("timeline_path") or
                   payload.get("source_path") or payload.get("timeline_data"))
@@ -155,31 +158,35 @@ class Application:
         if not vt.segments:
             raise ValueError("虚拟时间线不包含任何有效片段")
 
-        if payload.get("auto_title") and payload.get("draft_name"):
+        if job_type != "remix" and payload.get("auto_title") and payload.get("draft_name"):
             from .jianying import DEFAULT_EXPORT_DIR, next_available_title
             output_dir = payload.get("export_dir") or DEFAULT_EXPORT_DIR
             title = next_available_title(
                 str(payload["draft_name"]), self.store.list_job_titles(), output_dir
             )
         else:
-            title = str(payload.get("title") or vt.title).strip()[:120]
+            default_title = f"{vt.title}_成片重组" if job_type == "remix" else vt.title
+            title = str(payload.get("title") or default_title).strip()[:120]
         if not title:
-            title = vt.title or "虚拟时间线剪辑"
+            title = "成片重组" if job_type == "remix" else (vt.title or "虚拟时间线剪辑")
 
-        target_min = payload.get("target_min")
-        target_max = payload.get("target_max")
-        target_seconds_str = str(payload.get("target_seconds") or "").strip()
-        if target_min is not None and target_max is not None:
-            try:
-                min_s = float(target_min)
-                max_s = float(target_max)
-                if min_s <= 0 or max_s < min_s:
-                    raise ValueError("最长时长不能小于最短时长，且必须大于 0")
-                target_seconds = f"{min_s:g}-{max_s:g}"
-            except (ValueError, TypeError) as exc:
-                raise ValueError(f"目标时长格式错误: {exc}") from exc
+        if job_type == "remix":
+            target_seconds = ""
         else:
-            target_seconds = target_seconds_str or "70-90"
+            target_min = payload.get("target_min")
+            target_max = payload.get("target_max")
+            target_seconds_str = str(payload.get("target_seconds") or "").strip()
+            if target_min is not None and target_max is not None:
+                try:
+                    min_s = float(target_min)
+                    max_s = float(target_max)
+                    if min_s <= 0 or max_s < min_s:
+                        raise ValueError("最长时长不能小于最短时长，且必须大于 0")
+                    target_seconds = f"{min_s:g}-{max_s:g}"
+                except (ValueError, TypeError) as exc:
+                    raise ValueError(f"目标时长格式错误: {exc}") from exc
+            else:
+                target_seconds = target_seconds_str or "70-90"
 
         raw_export = payload.get("export_dir")
         if raw_export is None or not str(raw_export).strip():
@@ -187,23 +194,31 @@ class Application:
         export_dir = self._resolve_export_dir(raw_export)
         if export_dir:
             self.store.set_setting("export_dir", export_dir)
-        product_name = str(payload.get("product_name") or "").strip()[:60] or None
+        product_name = (None if job_type == "remix" else
+                        (str(payload.get("product_name") or "").strip()[:60] or None))
         export_mode = str(payload.get("export_mode") or "merge").strip().lower()
         if export_mode not in {"merge", "segments"}:
             raise ValueError("输出形态必须是 合并版(merge) 或 分段版(segments)")
+        dedupe_strength = str(payload.get("dedupe_strength") or "standard").strip().lower()
+        if job_type == "remix" and dedupe_strength not in {"lenient", "standard", "strict"}:
+            raise ValueError("去重强度必须是 宽松、标准 或 严格")
 
+        timeline_meta = vt.to_dict()
+        if job_type == "remix":
+            timeline_meta["remix"] = {"dedupe_strength": dedupe_strength}
         digest = hashlib.sha256(json.dumps(
-            vt.to_dict(), sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:12]
+            timeline_meta, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:12]
         root = self.workspace_root / "timelines" / f"{self._path_slug(vt.timeline_id)}-{digest}"
         (root / "shared").mkdir(parents=True, exist_ok=True)
         (root / "edits").mkdir(parents=True, exist_ok=True)
 
         dur_mins = max(1, int(round(vt.total_duration / 60)))
-        source_display = f"{vt.title}（约 {dur_mins} 分钟）"
+        source_display = (f"{vt.title}（集合时间线，约 {dur_mins} 分钟）"
+                          if job_type == "remix" else f"{vt.title}（约 {dur_mins} 分钟）")
         placeholder = root / "edits" / "pending"
         job_id = self.store.create_job(title=title, source_path=source_display,
-                                       workspace=str(placeholder), job_type="timeline",
-                                       timeline_meta=vt.to_dict(),
+                                       workspace=str(placeholder), job_type=job_type,
+                                       timeline_meta=timeline_meta,
                                        target_seconds=target_seconds,
                                        export_dir=export_dir,
                                        product_name=product_name,
@@ -214,6 +229,15 @@ class Application:
         # 将解析好的 virtual_timeline.json 写入任务 workspace
         vt_file = workspace / "virtual_timeline.json"
         vt_file.write_text(json.dumps(vt.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+        if job_type == "remix":
+            (workspace / "remix_config.json").write_text(json.dumps({
+                "version": 1,
+                "dedupe_strength": dedupe_strength,
+                "text_only": True,
+                "check_product": False,
+                "check_compliance": False,
+                "dedupe_visual": False,
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
         self.store.update_job(job_id, workspace=str(workspace))
         self.runner.enqueue(job_id)
         return self.store.get_job(job_id) or {"id": job_id}
@@ -421,12 +445,15 @@ class Application:
                 "usable": bool(final.get("usable", False)),
                 "reason": str(final.get("reason") or ""),
                 "order": final.get("order"),
+                "category": str(final.get("category") or ""),
+                "duplicate_of": final.get("duplicate_of"),
             })
         clauses.sort(key=lambda c: (c["start"], c["id"] if isinstance(c["id"], int) else 0))
         s2_passed = sum(1 for c in clauses if c["s2_usable"])
         usable = sum(1 for c in clauses if c["usable"])
         return {
             "job_id": job_id,
+            "job_type": str(job.get("job_type") or "direct"),
             "ready": bool(clauses),
             "counts": {"total": len(clauses), "s2_passed": s2_passed,
                        "s2_rejected": len(clauses) - s2_passed, "usable": usable,
