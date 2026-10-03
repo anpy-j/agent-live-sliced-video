@@ -1,7 +1,7 @@
 const $ = (selector, root=document) => root.querySelector(selector);
 const $$ = (selector, root=document) => [...root.querySelectorAll(selector)];
 const app = $('#app');
-const state = { dashboard:null, job:null, poll:null, mcp:null, selectedStage:null, jianying:null, label:{session:null,decisions:{},sel:{},patch:null}, clausesJob:null, clausesData:null, clausesFilter:'s2' };
+const state = { dashboard:null, job:null, poll:null, mcp:null, selectedStage:null, jianying:null, jianyingAbort:null, label:{session:null,decisions:{},sel:{},patch:null}, clausesJob:null, clausesData:null, clausesFilter:'s2' };
 const labels = {queued:'排队中',running:'执行中',waiting_input:'待继续',completed:'已完成',failed:'执行失败',cancelled:'已取消',pending:'等待',succeeded:'完成'};
 const stageLabels = {asr:'语音转写与切分',filter:'规则粗筛',judge:'AI 可用性判定',order:'AI 排序编排',render:'渲染成片'};
 const reasonLabels = {too_short:'文本过短',non_chinese:'中文占比低',duration_gate:'时长不足',hard_vocab:'违禁词',stage_chatter:'场控话术',malformed_speech:'病句/口误',duplicate:'重复',literal_duplicate:'字面重复',semantic_duplicate:'语义重复',invalid_bounds:'时间异常'};
@@ -93,7 +93,22 @@ async function renderQueue(){
 
 async function renderJianyingDrafts(force=false){
   setCrumb('剪映草稿');
-  if(force||!state.jianying){loading();state.jianying=await api('/api/jianying/drafts');}
+  if(force||!state.jianying){
+    loading();
+    if(state.jianyingAbort)state.jianyingAbort.abort();
+    const controller=new AbortController();state.jianyingAbort=controller;
+    const timeout=setTimeout(()=>controller.abort(),120000);
+    try{
+      state.jianying=await api('/api/jianying/drafts',{signal:controller.signal});
+    }catch(err){
+      // 切走页面导致的取消不算错误，也不要回写覆盖当前页面。
+      if(controller.signal.aborted&&location.hash!=='#/jianying')return;
+      throw err;
+    }finally{
+      clearTimeout(timeout);
+      if(state.jianyingAbort===controller)state.jianyingAbort=null;
+    }
+  }
   const data=state.jianying;
   const drafts=data.drafts||[],defaults=data.defaults||{};
   const cards=drafts.map(draft=>{
@@ -535,6 +550,7 @@ function bindCommon(){
 }
 async function route(){
   clearTimeout(state.poll);const hash=location.hash||'#/dashboard';
+  if(!hash.startsWith('#/jianying')&&state.jianyingAbort){state.jianyingAbort.abort();state.jianyingAbort=null;}
   try{
     if(hash.startsWith('#/jobs/'))return await renderJob(hash.split('/')[2]);
     if(hash==='#/queue')return await renderQueue();

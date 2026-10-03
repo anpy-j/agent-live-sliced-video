@@ -5,11 +5,14 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from agent_video.jianying import draft_title_base, list_jianying_drafts, next_available_title
+from agent_video.jianying import (
+    _discovery_cache, draft_title_base, list_jianying_drafts, next_available_title,
+)
 
 
 class JianyingDraftsTest(unittest.TestCase):
     def setUp(self):
+        _discovery_cache.clear()
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.draft = self.root / "米兰"
@@ -41,6 +44,34 @@ class JianyingDraftsTest(unittest.TestCase):
         self.assertEqual(drafts[0]["timeline_count"], 2)
         self.assertEqual(drafts[0]["recommended_timeline"]["timeline_id"], "two")
         self.assertEqual(Path(drafts[0]["cover_path"]), self.draft / "cover.png")
+
+    @patch("agent_video.timeline.discover_virtual_timelines")
+    def test_repeated_listing_reuses_cached_discovery(self, discover):
+        discover.return_value = {"timelines": [
+            {"timeline_id": "one", "name": "时间线01", "timeline_duration": 20, "path": "one"},
+        ]}
+
+        list_jianying_drafts(self.root)
+        list_jianying_drafts(self.root)
+
+        self.assertEqual(discover.call_count, 1)
+
+    @patch("agent_video.timeline.discover_virtual_timelines")
+    def test_disk_cache_survives_memory_reset(self, discover):
+        discover.return_value = {"timelines": [
+            {"timeline_id": "one", "name": "时间线01", "timeline_duration": 20, "path": "one"},
+        ]}
+        cache_path = self.root / "cache" / "drafts.json"
+
+        list_jianying_drafts(self.root, cache_path=cache_path)
+        self.assertEqual(discover.call_count, 1)
+        self.assertTrue(cache_path.is_file())
+
+        _discovery_cache.clear()
+        drafts = list_jianying_drafts(self.root, cache_path=cache_path)
+
+        self.assertEqual(discover.call_count, 1)
+        self.assertEqual(drafts[0]["timeline_count"], 1)
 
     def test_unique_title_checks_jobs_and_exported_files(self):
         export_dir = self.root / "exports"

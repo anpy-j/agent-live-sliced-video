@@ -287,7 +287,9 @@ class Application:
             DEFAULT_EXPORT_DIR, draft_title_base, list_jianying_drafts, next_available_title,
         )
 
-        drafts = list_jianying_drafts()
+        drafts = list_jianying_drafts(
+            cache_path=self.root / "data" / "jianying_draft_cache.json"
+        )
         titles = self.store.list_job_titles()
         active_titles = self.store.list_active_job_titles()
         covers: dict[str, Path] = {}
