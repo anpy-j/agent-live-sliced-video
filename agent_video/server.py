@@ -33,6 +33,7 @@ from .labeling import (
 )
 from .mcp import McpEndpoint, tool_specs
 from .runner import JobRunner
+from .viral_pipeline import ViralPipelineService
 
 
 class Application:
@@ -45,6 +46,9 @@ class Application:
         self.web_root = self.root / "web"
         self.store = Store(self.data_dir / "agent.db")
         self.runner = JobRunner(self.store, self.root)
+        # V2 owns a separate database and workspace tree.  It is intentionally
+        # not registered with the legacy JobRunner.
+        self.viral = ViralPipelineService(self.root)
         self._defaults()
         self.label_overrides = self.store.get_setting("label_overrides", {}) or {}
         self.label_profile = activate_labels(self.label_overrides)
@@ -855,6 +859,22 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json_response(self.app.store.dashboard())
             if path == "/api/jobs":
                 return self.json_response({"jobs": self.app.store.list_jobs()})
+            if path == "/api/viral-v2/references":
+                return self.json_response(self.app.viral.list_references())
+            if path.startswith("/api/viral-v2/references/"):
+                reference_id = path.removeprefix("/api/viral-v2/references/").strip("/")
+                try:
+                    return self.json_response(self.app.viral.get_reference(reference_id))
+                except KeyError as exc:
+                    return self.json_response({"error": str(exc)}, 404)
+            if path == "/api/viral-v2/jobs":
+                return self.json_response(self.app.viral.list_jobs())
+            if path.startswith("/api/viral-v2/jobs/"):
+                job_id = path.removeprefix("/api/viral-v2/jobs/").strip("/")
+                try:
+                    return self.json_response(self.app.viral.get_job(job_id))
+                except KeyError as exc:
+                    return self.json_response({"error": str(exc)}, 404)
             if path == "/api/jianying/drafts":
                 return self.json_response(self.app.list_jianying_drafts())
             if path.startswith("/api/jianying/covers/"):
@@ -916,6 +936,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json_response(self.app.list_timelines(payload))
             if path == "/api/jobs":
                 return self.json_response(self.app.create_job(payload), 201)
+            if path == "/api/viral-v2/references":
+                return self.json_response(self.app.viral.create_reference(payload), 201)
+            if path.startswith("/api/viral-v2/references/") and path.endswith("/analyze"):
+                reference_id = path[len("/api/viral-v2/references/"):-len("/analyze")].strip("/")
+                return self.json_response(self.app.viral.analyze_reference(reference_id))
+            if path == "/api/viral-v2/jobs":
+                return self.json_response(self.app.viral.create_job(payload), 201)
             if path.startswith("/api/jobs/"):
                 parts = path.strip("/").split("/")
                 if len(parts) == 4:
@@ -991,6 +1018,11 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("job_id 不能为空")
                 deleted = self.app.runner.delete(job_id)
                 return self.json_response({"deleted": deleted})
+            if path.startswith("/api/viral-v2/references/"):
+                reference_id = path.removeprefix("/api/viral-v2/references/").strip("/")
+                if not reference_id:
+                    raise ValueError("reference_id 不能为空")
+                return self.json_response(self.app.viral.delete_reference(reference_id))
             self.send_error(404, "未找到端点")
         except (ValueError, KeyError) as exc:
             self.json_response({"error": str(exc)}, 400)

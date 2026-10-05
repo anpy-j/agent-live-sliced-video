@@ -91,6 +91,53 @@ async function renderQueue(){
   bindCommon();
 }
 
+function viralDnaSummary(reference){
+  const dna=reference.dna||{};
+  const hook=dna.hook||{};
+  const distribution=dna.content_distribution||{};
+  const distributionText=Object.entries(distribution)
+    .sort((a,b)=>b[1]-a[1]).slice(0,3)
+    .map(([name,value])=>`${escapeHtml(name)} ${Math.round(Number(value)*100)}%`).join(' · ');
+  if(!reference.dna)return '<span class="muted">等待解析</span>';
+  return `<div class="viral-dna"><b>${escapeHtml(dna.primary_focus||'综合表达')}</b><small>钩子：${escapeHtml(hook.mechanism||'未识别')} · ${distributionText||'暂无内容分布'}</small></div>`;
+}
+
+async function renderViralV2(){
+  setCrumb('爆款学习剪辑');loading();
+  const data=await api('/api/viral-v2/references');
+  const rows=(data.references||[]).map(item=>`<tr>
+    <td><div class="job-name"><span class="job-thumb">${icons.file}</span><div><b>${escapeHtml(item.title)}</b><small>${item.duration_seconds?`${Number(item.duration_seconds).toFixed(0)}秒 · `:''}${item.likes!=null?`${Number(item.likes).toLocaleString()}赞 · `:''}${formatTime(item.created_at)}</small></div></div></td>
+    <td>${viralDnaSummary(item)}</td>
+    <td>${status(item.status)}</td>
+    <td><div class="job-row-actions"><button class="link-button" data-analyze-viral="${escapeHtml(item.id)}">重新解析</button><button class="link-button text-danger" data-delete-viral="${escapeHtml(item.id)}">删除</button></div></td>
+  </tr>`).join('');
+  app.innerHTML=`<div class="hero"><div><span class="eyebrow">VIRAL REFERENCE PIPELINE V2</span><h1>爆款学习剪辑</h1><p>独立于现有 S1–S5。样本、分析结果和未来 V2 任务均保存到独立数据库与目录。</p></div></div>
+  <div class="stat-grid"><div class="stat-card"><span>爆款样本</span><strong>${data.total||0}</strong><small>仅收录真实爆款正样本</small></div><div class="stat-card"><span>已生成 DNA</span><strong>${data.ready||0}</strong><small>解析版本 ${escapeHtml(data.analyzer_version||'')}</small></div><div class="stat-card"><span>旧流程影响</span><strong>0</strong><small>不写入旧 jobs / stages</small></div></div>
+  <div class="panel"><div class="panel-head"><div><h2>导入爆款文本</h2><p>第一阶段使用本地基线解析，不消耗 Token；后续可用强模型重新解析同一条样本。</p></div></div>
+    <form id="viralReferenceForm" class="form-grid">
+      <label class="field"><span>样本名称</span><input name="title" required maxlength="160" placeholder="例如：上身效果型爆款 01"></label>
+      <label class="field"><span>点赞量</span><input name="likes" type="number" min="0" placeholder="可选"></label>
+      <label class="field"><span>视频时长（秒）</span><input name="duration_seconds" type="number" min="1" step="0.1" placeholder="例如 92"></label>
+      <label class="field"><span>发布时间</span><input name="published_at" type="date"></label>
+      <label class="field full"><span>爆款视频文本</span><textarea name="transcript" required rows="9" placeholder="粘贴视频完整口播文本，至少20个字符"></textarea></label>
+      <div class="form-actions full"><button class="button primary" type="submit">保存并解析</button></div>
+    </form>
+  </div>
+  <div class="panel"><div class="panel-head"><div><h2>爆款样本库</h2><p>${data.total||0} 条样本；每条只解析一次并缓存结构 DNA</p></div></div>${rows?`<table class="jobs-table"><thead><tr><th>样本</th><th>结构 DNA</th><th>状态</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table>`:`<div class="empty">${icons.empty}<h3>还没有爆款样本</h3><p>先粘贴一条真实爆款视频的完整文本。</p></div>`}</div>`;
+  $('#viralReferenceForm')?.addEventListener('submit',async event=>{
+    event.preventDefault();const form=new FormData(event.currentTarget);
+    const payload={title:form.get('title'),transcript:form.get('transcript'),likes:form.get('likes'),duration_seconds:form.get('duration_seconds'),published_at:form.get('published_at'),analyze:true};
+    try{await api('/api/viral-v2/references',{method:'POST',body:JSON.stringify(payload)});toast('爆款样本已保存并解析');await renderViralV2()}catch(err){toast(err.message)}
+  });
+  $$('[data-analyze-viral]').forEach(button=>button.addEventListener('click',async()=>{
+    try{await api(`/api/viral-v2/references/${button.dataset.analyzeViral}/analyze`,{method:'POST',body:'{}'});toast('结构 DNA 已更新');await renderViralV2()}catch(err){toast(err.message)}
+  }));
+  $$('[data-delete-viral]').forEach(button=>button.addEventListener('click',async()=>{
+    if(!confirm('删除这条爆款样本及其分析结果？'))return;
+    try{await api(`/api/viral-v2/references/${button.dataset.deleteViral}`,{method:'DELETE'});toast('样本已删除');await renderViralV2()}catch(err){toast(err.message)}
+  }));
+}
+
 async function renderJianyingDrafts(force=false){
   setCrumb('剪映草稿');
   if(force||!state.jianying){
@@ -555,6 +602,7 @@ async function route(){
     if(hash.startsWith('#/jobs/'))return await renderJob(hash.split('/')[2]);
     if(hash==='#/queue')return await renderQueue();
     if(hash==='#/jianying')return await renderJianyingDrafts();
+    if(hash==='#/viral-v2')return await renderViralV2();
     if(hash==='#/label')return await renderLabel();
     if(hash==='#/skill')return await renderSkill();
     if(hash==='#/mcp')return await renderMcp();
