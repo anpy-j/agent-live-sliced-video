@@ -55,6 +55,14 @@ class ViralServiceTest(unittest.TestCase):
         self.assertNotIn("viral_references", legacy_tables)
         self.assertEqual(self.app.store.list_jobs(), [])
 
+    def test_v2_storage_is_lazy_and_does_not_affect_legacy_startup(self):
+        fresh_root = self.root / "lazy"
+        app = Application(fresh_root)
+        self.assertFalse((fresh_root / "data" / "viral_v2").exists())
+        self.assertEqual(app.store.list_jobs(), [])
+        app.viral.list_references()
+        self.assertTrue((fresh_root / "data" / "viral_v2" / "viral_v2.db").is_file())
+
     def test_v2_job_uses_independent_stages_and_workspace(self):
         job = self.app.viral.create_job({
             "title": "参考驱动剪辑", "source_text": SAMPLE,

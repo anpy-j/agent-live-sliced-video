@@ -46,13 +46,19 @@ class Application:
         self.web_root = self.root / "web"
         self.store = Store(self.data_dir / "agent.db")
         self.runner = JobRunner(self.store, self.root)
-        # V2 owns a separate database and workspace tree.  It is intentionally
-        # not registered with the legacy JobRunner.
-        self.viral = ViralPipelineService(self.root)
+        # V2 is lazy so its database/filesystem can never block legacy startup.
+        # It is intentionally not registered with the legacy JobRunner.
+        self._viral: ViralPipelineService | None = None
         self._defaults()
         self.label_overrides = self.store.get_setting("label_overrides", {}) or {}
         self.label_profile = activate_labels(self.label_overrides)
         self.mcp = McpEndpoint(self.invoke_tool)
+
+    @property
+    def viral(self) -> ViralPipelineService:
+        if self._viral is None:
+            self._viral = ViralPipelineService(self.root)
+        return self._viral
 
     def _defaults(self) -> None:
         is_windows = sys.platform == "win32"
