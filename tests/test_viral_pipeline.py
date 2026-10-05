@@ -64,16 +64,41 @@ class ViralServiceTest(unittest.TestCase):
         self.assertTrue((fresh_root / "data" / "viral_v2" / "viral_v2.db").is_file())
 
     def test_v2_job_uses_independent_stages_and_workspace(self):
+        reference = self.app.viral.create_reference({
+            "title": "上身效果爆款", "transcript": SAMPLE,
+        })
         job = self.app.viral.create_job({
             "title": "参考驱动剪辑", "source_text": SAMPLE,
             "target_seconds": "70-120", "reference_mode": "hybrid",
+            "reference_ids": [reference["id"]],
         })
         self.assertEqual(job["status"], "draft")
         self.assertEqual([stage["stage_id"] for stage in job["stages"]], [
             "prepare", "profile", "retrieve", "blueprint", "map", "review", "render",
         ])
         self.assertIn(str(Path("data") / "viral_v2" / "jobs"), job["workspace"])
+        self.assertEqual(job["reference_ids"], [reference["id"]])
+        self.assertEqual(job["references"][0]["title"], "上身效果爆款")
         self.assertEqual(self.app.store.list_jobs(), [])
+
+    def test_reference_driven_job_requires_ready_references(self):
+        with self.assertRaisesRegex(ValueError, "至少选择一个"):
+            self.app.viral.create_job({
+                "title": "没有样本", "source_text": SAMPLE,
+                "reference_mode": "hybrid",
+            })
+        with self.assertRaisesRegex(ValueError, "不存在"):
+            self.app.viral.create_job({
+                "title": "无效样本", "source_text": SAMPLE,
+                "reference_mode": "replicate", "reference_ids": ["vr_missing"],
+            })
+
+    def test_free_mode_allows_no_reference(self):
+        job = self.app.viral.create_job({
+            "title": "自由剪辑", "source_text": SAMPLE,
+            "reference_mode": "free", "reference_ids": [],
+        })
+        self.assertEqual(job["reference_ids"], [])
 
     def test_validates_reference_input(self):
         with self.assertRaisesRegex(ValueError, "至少需要20个字符"):

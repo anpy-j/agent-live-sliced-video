@@ -90,3 +90,19 @@ button.status:hover{transform:none;background:rgba(168,255,53,.08)}
 .clause-list .lb-text{user-select:text;font-size:14px;margin-bottom:0}
 .lb-row.no{box-shadow:inset 3px 0 var(--red)}
 @media(max-width:980px){.label-columns{grid-template-columns:1fr}}
+
+/* Viral-reference pipeline V2. */
+.viral-job-form{padding:18px}
+.viral-source-row{display:flex;gap:8px;align-items:center}
+.viral-source-row input{flex:1}
+.viral-picker-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px;font-size:12px;font-weight:650}
+.viral-reference-picker{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:9px;max-height:360px;overflow:auto;padding:2px}
+.viral-reference-choice{display:grid!important;grid-template-columns:18px 1fr;align-items:start;gap:10px!important;padding:12px;border:1px solid var(--line-soft);border-radius:10px;background:#0d131a;cursor:pointer}
+.viral-reference-choice:has(input:checked){border-color:var(--accent);box-shadow:inset 3px 0 var(--accent)}
+.viral-reference-choice input{width:16px;min-height:16px;margin-top:2px;accent-color:var(--accent)}
+.viral-reference-choice b,.viral-reference-choice small{display:block}
+.viral-reference-choice small{margin-top:5px;color:var(--muted);font-weight:400}
+.viral-reference-choice .viral-dna b{font-size:11px;color:var(--blue)}
+.viral-reference-choice .viral-dna small{margin-top:2px}
+.viral-reference-tag{display:inline-block;margin:2px 5px 2px 0;padding:3px 7px;border:1px solid rgba(104,167,255,.28);border-radius:99px;background:rgba(104,167,255,.07);color:var(--blue);font-size:10px}
+@media(max-width:680px){.viral-source-row{align-items:stretch;flex-direction:column}.viral-reference-picker{grid-template-columns:1fr}}

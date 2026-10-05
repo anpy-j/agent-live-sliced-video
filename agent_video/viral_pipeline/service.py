@@ -90,11 +90,32 @@ class ViralPipelineService:
         mode = str(payload.get("reference_mode") or "hybrid").strip().lower()
         if mode not in {"replicate", "hybrid", "free"}:
             raise ValueError("参考模式必须是 replicate、hybrid 或 free")
+        raw_reference_ids = payload.get("reference_ids") or []
+        if not isinstance(raw_reference_ids, list):
+            raise ValueError("reference_ids 必须是数组")
+        reference_ids = list(dict.fromkeys(
+            str(item).strip() for item in raw_reference_ids if str(item).strip()
+        ))
+        if mode != "free" and not reference_ids:
+            raise ValueError("请至少选择一个爆款学习样本")
+        missing = []
+        not_ready = []
+        for reference_id in reference_ids:
+            reference = self.store.get_reference(reference_id)
+            if not reference:
+                missing.append(reference_id)
+            elif reference.get("status") != "ready":
+                not_ready.append(reference.get("title") or reference_id)
+        if missing:
+            raise ValueError(f"爆款样本不存在：{', '.join(missing)}")
+        if not_ready:
+            raise ValueError(f"以下样本尚未完成解析：{', '.join(not_ready)}")
         pending_workspace = self.jobs_root / "pending"
         job = self.store.create_job(
             title=title, source_kind=source_kind, source_path=source_path,
             source_text=source_text, target_seconds=target,
-            reference_mode=mode, workspace=str(pending_workspace),
+            reference_mode=mode, reference_ids=reference_ids,
+            workspace=str(pending_workspace),
         )
         workspace = self.jobs_root / job["id"]
         workspace.mkdir(parents=True, exist_ok=True)

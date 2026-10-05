@@ -104,15 +104,44 @@ function viralDnaSummary(reference){
 
 async function renderViralV2(){
   setCrumb('爆款学习剪辑');loading();
-  const data=await api('/api/viral-v2/references');
+  const [data,jobsData]=await Promise.all([
+    api('/api/viral-v2/references'),
+    api('/api/viral-v2/jobs'),
+  ]);
+  const readyReferences=(data.references||[]).filter(item=>item.status==='ready');
   const rows=(data.references||[]).map(item=>`<tr>
     <td><div class="job-name"><span class="job-thumb">${icons.file}</span><div><b>${escapeHtml(item.title)}</b><small>${item.duration_seconds?`${Number(item.duration_seconds).toFixed(0)}秒 · `:''}${item.likes!=null?`${Number(item.likes).toLocaleString()}赞 · `:''}${formatTime(item.created_at)}</small></div></div></td>
     <td>${viralDnaSummary(item)}</td>
     <td>${status(item.status)}</td>
     <td><div class="job-row-actions"><button class="link-button" data-analyze-viral="${escapeHtml(item.id)}">重新解析</button><button class="link-button text-danger" data-delete-viral="${escapeHtml(item.id)}">删除</button></div></td>
   </tr>`).join('');
-  app.innerHTML=`<div class="hero"><div><span class="eyebrow">VIRAL REFERENCE PIPELINE V2</span><h1>爆款学习剪辑</h1><p>独立于现有 S1–S5。样本、分析结果和未来 V2 任务均保存到独立数据库与目录。</p></div></div>
+  const jobRows=(jobsData.jobs||[]).map(job=>`<tr>
+    <td><div class="job-name"><span class="job-thumb">${icons.video}</span><div><b>${escapeHtml(job.title)}</b><small>${escapeHtml(job.source_path||'文本素材')} · ${escapeHtml(job.target_seconds)} 秒</small></div></div></td>
+    <td>${(job.references||[]).map(ref=>`<span class="viral-reference-tag">${escapeHtml(ref.title)}</span>`).join('')||'<span class="muted">自由模式</span>'}</td>
+    <td>${escapeHtml({replicate:'强仿结构',hybrid:'融合学习',free:'自由剪辑'}[job.reference_mode]||job.reference_mode)}</td>
+    <td>${status(job.status)}</td>
+  </tr>`).join('');
+  const referenceChoices=readyReferences.map((item,index)=>`<label class="viral-reference-choice">
+    <input type="checkbox" name="reference_ids" value="${escapeHtml(item.id)}" ${index<3?'checked':''}>
+    <div><b>${escapeHtml(item.title)}</b>${viralDnaSummary(item)}${item.likes!=null?`<small>${Number(item.likes).toLocaleString()} 赞</small>`:''}</div>
+  </label>`).join('');
+  app.innerHTML=`<div class="hero"><div><span class="eyebrow">VIRAL REFERENCE PIPELINE V2</span><h1>爆款学习剪辑</h1><p>独立于现有 S1–S5。样本、分析结果和 V2 任务均保存到独立数据库与目录。</p></div><button class="button primary" id="viralNewJob">新建 V2 剪辑任务</button></div>
   <div class="stat-grid"><div class="stat-card"><span>爆款样本</span><strong>${data.total||0}</strong><small>仅收录真实爆款正样本</small></div><div class="stat-card"><span>已生成 DNA</span><strong>${data.ready||0}</strong><small>解析版本 ${escapeHtml(data.analyzer_version||'')}</small></div><div class="stat-card"><span>旧流程影响</span><strong>0</strong><small>不写入旧 jobs / stages</small></div></div>
+  <div class="panel" id="viralJobPanel"><div class="panel-head"><div><h2>新建 V2 剪辑任务</h2><p>在这里选择本次剪辑要学习的爆款样本；选择仅对当前任务生效</p></div></div>
+    <form id="viralJobForm" class="form-grid viral-job-form">
+      <label class="field"><span>任务名称</span><input name="title" required maxlength="160" placeholder="例如：针织衫爆款学习 01"></label>
+      <label class="field"><span>目标时长</span><input name="target_seconds" value="70-120" required placeholder="例如 70-120"></label>
+      <label class="field full"><span>直播素材</span><div class="viral-source-row"><input name="source_path" required placeholder="选择视频或粘贴绝对路径"><button class="button ghost" type="button" id="viralPickSource">浏览</button></div></label>
+      <label class="field full"><span>学习方式</span><select name="reference_mode" id="viralReferenceMode"><option value="hybrid" selected>融合学习：综合多条样本，避免照搬单条结构</option><option value="replicate">强仿结构：优先复刻所选样本的节奏与重心</option><option value="free">自由剪辑：本次不使用爆款样本</option></select></label>
+      <div class="field full"><div class="viral-picker-head"><span>选择爆款学习样本</span><div><button class="link-button" type="button" id="viralSelectAll">全选</button><button class="link-button" type="button" id="viralSelectNone">取消全选</button></div></div>
+        <div class="viral-reference-picker" id="viralReferencePicker">${referenceChoices||'<div class="empty"><p>还没有可用样本，请先在下方导入并解析爆款文本。</p></div>'}</div>
+        <small id="viralSelectedCount">已选择 ${Math.min(3,readyReferences.length)} 条</small>
+      </div>
+      <p class="form-error full" id="viralJobError" role="alert"></p>
+      <div class="form-actions full"><button class="button primary" id="viralCreateJob" type="submit" ${readyReferences.length?'':'disabled'}>保存 V2 剪辑任务</button></div>
+    </form>
+  </div>
+  <div class="panel"><div class="panel-head"><div><h2>V2 剪辑任务</h2><p>${jobsData.total||0} 个任务；样本选择会随任务永久保存</p></div></div>${jobRows?`<table class="jobs-table"><thead><tr><th>任务</th><th>学习样本</th><th>方式</th><th>状态</th></tr></thead><tbody>${jobRows}</tbody></table>`:`<div class="empty"><h3>还没有 V2 任务</h3><p>选择素材和爆款样本后保存第一个任务。</p></div>`}</div>
   <div class="panel"><div class="panel-head"><div><h2>导入爆款文本</h2><p>第一阶段使用本地基线解析，不消耗 Token；后续可用强模型重新解析同一条样本。</p></div></div>
     <form id="viralReferenceForm" class="form-grid">
       <label class="field"><span>样本名称</span><input name="title" required maxlength="160" placeholder="例如：上身效果型爆款 01"></label>
@@ -124,6 +153,29 @@ async function renderViralV2(){
     </form>
   </div>
   <div class="panel"><div class="panel-head"><div><h2>爆款样本库</h2><p>${data.total||0} 条样本；每条只解析一次并缓存结构 DNA</p></div></div>${rows?`<table class="jobs-table"><thead><tr><th>样本</th><th>结构 DNA</th><th>状态</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table>`:`<div class="empty">${icons.empty}<h3>还没有爆款样本</h3><p>先粘贴一条真实爆款视频的完整文本。</p></div>`}</div>`;
+  const updateSelection=()=>{
+    const mode=$('#viralReferenceMode')?.value;
+    const boxes=$$('#viralReferencePicker input[type="checkbox"]');
+    boxes.forEach(box=>box.disabled=mode==='free');
+    const count=mode==='free'?0:boxes.filter(box=>box.checked).length;
+    const submit=$('#viralCreateJob');if(submit)submit.disabled=mode!=='free'&&!readyReferences.length;
+    const label=$('#viralSelectedCount');if(label)label.textContent=mode==='free'?'自由剪辑模式不使用样本':`已选择 ${count} 条`;
+  };
+  $('#viralNewJob')?.addEventListener('click',()=>$('#viralJobPanel')?.scrollIntoView({behavior:'smooth',block:'start'}));
+  $('#viralPickSource')?.addEventListener('click',async()=>{try{const result=await api('/api/files/pick',{method:'POST',body:JSON.stringify({kind:'video'})});if(!result.cancelled)$('#viralJobForm [name="source_path"]').value=result.path}catch(err){toast(err.message)}});
+  $('#viralReferenceMode')?.addEventListener('change',updateSelection);
+  $('#viralReferencePicker')?.addEventListener('change',updateSelection);
+  $('#viralSelectAll')?.addEventListener('click',()=>{$$('#viralReferencePicker input[type="checkbox"]').forEach(box=>box.checked=true);updateSelection()});
+  $('#viralSelectNone')?.addEventListener('click',()=>{$$('#viralReferencePicker input[type="checkbox"]').forEach(box=>box.checked=false);updateSelection()});
+  $('#viralJobForm')?.addEventListener('submit',async event=>{
+    event.preventDefault();const form=new FormData(event.currentTarget);const mode=form.get('reference_mode');
+    const reference_ids=mode==='free'?[]:form.getAll('reference_ids');
+    const error=$('#viralJobError');error.textContent='';
+    if(mode!=='free'&&!reference_ids.length){error.textContent='请至少选择一个爆款学习样本';return}
+    const payload={title:form.get('title'),source_path:form.get('source_path'),target_seconds:form.get('target_seconds'),reference_mode:mode,reference_ids};
+    try{await api('/api/viral-v2/jobs',{method:'POST',body:JSON.stringify(payload)});toast(`V2 任务已保存，使用 ${reference_ids.length} 条样本`);await renderViralV2()}catch(err){error.textContent=err.message}
+  });
+  updateSelection();
   $('#viralReferenceForm')?.addEventListener('submit',async event=>{
     event.preventDefault();const form=new FormData(event.currentTarget);
     const payload={title:form.get('title'),transcript:form.get('transcript'),likes:form.get('likes'),duration_seconds:form.get('duration_seconds'),published_at:form.get('published_at'),analyze:true};
