@@ -10,6 +10,7 @@ import secrets
 import shutil
 import subprocess
 import sys
+import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -34,6 +35,7 @@ from .labeling import (
 from .mcp import McpEndpoint, tool_specs
 from .runner import JobRunner
 from .viral_pipeline import ViralPipelineService
+from .smart_v3 import SmartService
 
 
 class Application:
@@ -49,10 +51,19 @@ class Application:
         # V2 is lazy so its database/filesystem can never block legacy startup.
         # It is intentionally not registered with the legacy JobRunner.
         self._viral: ViralPipelineService | None = None
+        self._smart: SmartService | None = None
+        self._smart_init_lock = threading.Lock()
         self._defaults()
         self.label_overrides = self.store.get_setting("label_overrides", {}) or {}
         self.label_profile = activate_labels(self.label_overrides)
         self.mcp = McpEndpoint(self.invoke_tool)
+
+    @property
+    def smart(self) -> SmartService:
+        with self._smart_init_lock:
+            if self._smart is None:
+                self._smart = SmartService(self.root)
+        return self._smart
 
     @property
     def viral(self) -> ViralPipelineService:
@@ -859,6 +870,18 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         try:
             path, _, query = self.path.partition("?")
+            if path == "/api/smart-v3/jobs":
+                return self.json_response(self.app.smart.list_jobs())
+            if path.startswith("/api/smart-v3/jobs/"):
+                parts = path.strip("/").split("/")
+                try:
+                    if len(parts) == 6 and parts[4] == "artifacts":
+                        return self.send_file(self.app.smart.artifact(parts[3], parts[5]))
+                    if len(parts) == 4:
+                        return self.json_response(self.app.smart.get_job(parts[3]))
+                    return self.json_response({"error": "Not found"}, 404)
+                except KeyError as exc:
+                    return self.json_response({"error": str(exc)}, 404)
             if path == "/api/health":
                 return self.json_response({"ok": True, "version": "0.1.0"})
             if path == "/api/dashboard":
@@ -933,6 +956,13 @@ class Handler(BaseHTTPRequestHandler):
         try:
             path = self.path.partition("?")[0]
             payload = self.read_json()
+            if path == "/api/smart-v3/jobs":
+                return self.json_response(self.app.smart.create_job(payload), 201)
+            if path.startswith("/api/smart-v3/jobs/"):
+                parts = path.strip("/").split("/")
+                if len(parts) == 5 and parts[4] in {"run", "retry"}:
+                    return self.json_response(self.app.smart.run(parts[3], retry=parts[4] == "retry"))
+                return self.json_response({"error": "Not found"}, 404)
             if path == "/api/files/pick":
                 kind = str(payload.get("kind") or "video")
                 return self.json_response(self.app.pick_file(kind=kind))
@@ -1013,6 +1043,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         try:
             path = self.path.partition("?")[0]
+            if path.startswith("/api/smart-v3/jobs/"):
+                parts = path.strip("/").split("/")
+                if len(parts) == 4:
+                    return self.json_response(self.app.smart.delete_job(parts[3]))
+                return self.json_response({"error": "Not found"}, 404)
             if path.startswith("/api/label/sessions/"):
                 session_id = path.removeprefix("/api/label/sessions/").strip("/")
                 if not session_id:

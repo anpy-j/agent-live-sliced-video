@@ -655,6 +655,7 @@ async function route(){
     if(hash==='#/queue')return await renderQueue();
     if(hash==='#/jianying')return await renderJianyingDrafts();
     if(hash==='#/viral-v2')return await renderViralV2();
+    if(hash==='#/smart-v3')return await window.renderSmartV3();
     if(hash==='#/label')return await renderLabel();
     if(hash==='#/skill')return await renderSkill();
     if(hash==='#/mcp')return await renderMcp();

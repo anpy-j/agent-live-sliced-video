@@ -107,3 +107,42 @@ python3 -m unittest discover -s tests
 - 不向 MCP 暴露任意 Shell 执行接口。
 - 文本编排进程只接收候选摘要并返回结构化 JSON；多模态阶段只接收本地生成的有界参考图和候选联系表。
 - AI 选段必须逐条来自候选摘要；伪造时间、改写原声或重复画面会在渲染前被拒绝。
+# 三个独立剪辑入口
+
+| 版本 | 页面入口 | 业务代码 | 数据库 / 任务目录 |
+| --- | --- | --- | --- |
+| Legacy S1–S5 | `#/dashboard` / `#/queue` | `agent_video/pipeline/` 等现有模块 | `data/agent.db` / 现有 `workspaces/` |
+| 爆款学习剪辑 V2 | `#/viral-v2` | `agent_video/viral_pipeline/` | `data/viral_v2/viral_v2.db` / `data/viral_v2/jobs/` |
+| 整片优化剪辑 V3 | `#/smart-v3` | `agent_video/smart_v3/` | `data/smart_v3/smart_v3.db` / `data/smart_v3/jobs/<uuid>/` |
+
+V3 使用同一个本地 HTTP 服务，但其 `/api/smart-v3/*` 接口、规则、模型 transport、状态、数据库、产物、执行锁完全独立；没有 Legacy/V2 业务模块导入。普通 Legacy 启动不会初始化 V3 目录。V3 不读取旧任务或 V2 样本库，也不使用旧设置表中的模型配置。ffmpeg、第三方 Python 库属于无状态基础设施。
+
+## 启动 V3
+
+先安装项目和跨平台 ASR：`pip install -e ".[portable-asr]"`，确保 `ffmpeg` 与 `ffprobe` 位于 PATH。设置 V3 专用环境变量（不要把密钥写入仓库）：
+
+```powershell
+$env:SMART_V3_API_KEY = "你的模型服务密钥"
+$env:SMART_V3_MODEL = "模型服务支持的模型名"
+$env:SMART_V3_BASE_URL = "https://api.openai.com/v1" # 可换为兼容 chat/completions 的服务
+$env:SMART_V3_ASR_MODEL = "small" # 可填本地 faster-whisper 模型路径
+slice-agent --host 127.0.0.1 --port 8787
+```
+
+macOS/Linux 使用 `export SMART_V3_...` 设置同名变量。V3 的 ASR 使用 faster-whisper CPU/int8，首次使用模型名会下载模型；可使用本地模型离线转写。模型服务需要支持 JSON response_format。缺少配置/依赖会将任务置为 failed 并展示错误，不会冒充 AI 审核成功。
+
+打开 `http://127.0.0.1:8787/#/smart-v3`，选择本地视频、填写商品名称和时长范围，创建后点击启动。执行请求同步阻塞到完成；服务通过独立执行锁串行运行 V3，其他 HTTP 请求仍可刷新阶段状态。没有加入 Legacy 队列。服务进程中断后可点击重试恢复；重试从 S1 重新执行。阶段状态和 JSON 结果可展开查看，S4 至少保存三条不同完整句顺序和评分，S5 保存复审报告、初选/终选句、替换记录和最终时间线；只有复审通过才渲染 `film.mp4`。删除只移除对应 V3 任务目录和记录，原素材不受影响。
+
+已有完整句转写可在可选字段提供 JSON 绝对路径（跳过 ASR，仍执行媒体时长和边界校验）：
+
+```json
+[{"start": 0.0, "end": 5.0, "text": "这件毛衣上身显瘦。"}]
+```
+
+要求有句末标点、有效完整句、顺序不重叠的真实时间边界。素材不足以组成目标范围内三条不同方案时明确失败，应调整目标范围或提供更多素材，不拼凑句子、不重复信息凑时长。
+
+V3 当前按内容画像的角色分布选择结构重心，使用 beam search 探索聚焦、密度、承接等编排方向；整片评分是启发式估计，`predicted_retention` **不是人工反馈或已验证的提升比例**。复审最多三次，每次替换同主题/同角色完整句或切换同结构候选，再校验时长和上下文。画面/镜头分析当前未实现，`scene_id`、`shot_changes` 为 null，报告明确未知；已有画面信息时保留连续同场景时长检查扩展点。S1 的依赖识别是保守规则，S3 再由模型补充上下文依赖。
+
+数据库预留 `feedback.decisions/order/deletion_reasons/human_retained_seconds/retention_ratio`，当前没有人工反馈编辑 UI。指标定义：人工最终保留时长 / 系统生成时长；无人工输入时为 null。
+
+验证命令：`python -m unittest discover -s tests -q`；前端：`node --check web/app.js` 和 `node --check web/smart-v3.js`。`tests/test_smart_v3.py` 使用可控 fake AI 覆盖上身效果型、穿搭型、面料品质型、多候选最高分选择、结构校验、复审替换和有限失败；HTTP 和真实 ffmpeg fixture 覆盖端到端闭环，旧数据库字节哈希覆盖执行/失败/重试/删除隔离。V3 脚本独立加载，入口和 app 脚本使用新的版本参数避免浏览器缓存。
