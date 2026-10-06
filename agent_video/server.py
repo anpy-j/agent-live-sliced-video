@@ -956,6 +956,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             path = self.path.partition("?")[0]
             payload = self.read_json()
+            if path == "/api/smart-v3/drafts/timelines":
+                return self.json_response(self.app.smart.list_draft_timelines(payload))
             if path == "/api/smart-v3/jobs":
                 return self.json_response(self.app.smart.create_job(payload), 201)
             if path.startswith("/api/smart-v3/jobs/"):
