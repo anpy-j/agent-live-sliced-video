@@ -19,7 +19,7 @@ window.renderSmartV3 = async function () {
     <div class="panel"><h2>创建 V3 任务</h2><form id="v3Form" class="form-grid">
       <label class="field full">输入方式<select name="source_kind" id="v3Kind"><option value="media">本地视频素材</option><option value="draft">剪映草稿 / 虚拟时间线</option></select></label>
       <label class="field full">素材或草稿路径<div style="display:flex;gap:8px"><input name="source_path" required placeholder="视频、草稿目录或 draft_content.json 绝对路径"><button type="button" class="button ghost" id="v3Pick">浏览</button></div></label>
-      <div class="field full" id="v3DraftOptions" style="display:none"><button type="button" class="button ghost" id="v3ListTimelines">读取草稿时间线</button><select name="draft_path" id="v3Timeline"><option value="">默认选择草稿活动时间线</option></select><small>仅分析草稿保留的主视频片段；支持多原素材和恒定倍速。字幕、特效、转场、叠加轨及独立音乐不复现，输出 MP4。</small></div>
+      <div class="field full" id="v3DraftOptions" style="display:none"><button type="button" class="button ghost" id="v3ListTimelines">列出全部草稿时间线</button><select name="draft_path" id="v3Timeline"><option value="">请先读取，再人工选择时间线</option></select><small id="v3TimelineCount"></small><small>仅分析所选时间线保留的主视频片段；支持多原素材和恒定倍速。字幕、特效、转场、叠加轨及独立音乐不复现，输出 MP4。</small></div>
       <label class="field">商品名称<input name="product_name" required placeholder="本次主商品"></label>
       <label class="field">最短时长（秒）<input type="number" min="1" max="600" name="target_min" value="70" required></label>
       <label class="field">最长时长（秒）<input type="number" min="1" max="600" name="target_max" value="120" required></label>
@@ -43,16 +43,21 @@ window.renderSmartV3 = async function () {
       if (!result.cancelled) {document.querySelector('#v3Form [name="source_path"]').value = result.path; clearTimelines();}
     } catch (error) {message(error.message);}
   };
-  const clearTimelines = () => {document.querySelector('#v3Timeline').innerHTML = '<option value="">默认选择草稿活动时间线</option>';};
+  const clearTimelines = () => {document.querySelector('#v3Timeline').innerHTML = '<option value="">请先读取，再人工选择时间线</option>'; document.querySelector('#v3TimelineCount').textContent = '';};
   document.querySelector('#v3Kind').onchange = event => {document.querySelector('#v3DraftOptions').style.display = event.target.value === 'draft' ? 'grid' : 'none'; clearTimelines();};
   document.querySelector('#v3Form [name="source_path"]').oninput = clearTimelines;
   document.querySelector('#v3ListTimelines').onclick = async () => {
-    try {const result = await request('/api/smart-v3/drafts/timelines', {method:'POST', body:JSON.stringify({draft_path:document.querySelector('#v3Form [name="source_path"]').value})});
-      document.querySelector('#v3Timeline').innerHTML = result.timelines.map(t => `<option value="${esc(t.path)}" ${t.active ? 'selected' : ''}>${esc(t.name)} · ${esc(t.segment_count)} 段 · ${esc(t.timeline_duration)} 秒</option>`).join('');
+    const sourcePath = document.querySelector('#v3Form [name="source_path"]').value;
+    clearTimelines();
+    try {const result = await request('/api/smart-v3/drafts/timelines', {method:'POST', body:JSON.stringify({draft_path:sourcePath})});
+      if (location.hash !== '#/smart-v3' || document.querySelector('#v3Form [name="source_path"]').value !== sourcePath) return;
+      document.querySelector('#v3Timeline').innerHTML = '<option value="">请选择一条时间线（必选）</option>' + result.timelines.map(t => `<option value="${esc(t.path)}" ${t.error ? 'disabled' : ''}>${esc(t.name)}${t.active ? '（当前活动）' : ''} · ${t.error ? esc(t.error) : `${esc(t.segment_count)} 段 · ${esc(t.timeline_duration)} 秒`}</option>`).join('');
+      document.querySelector('#v3TimelineCount').textContent = `共 ${result.timelines.length} 条时间线，请人工选择；不可用项标明原因。`;
     } catch (error) {message(error.message);}
   };
   document.querySelector('#v3Form').onsubmit = async event => {
     event.preventDefault();
+    if (document.querySelector('#v3Kind').value === 'draft' && !document.querySelector('#v3Timeline').value) {message('请先列出全部草稿时间线，并人工选择一条。'); return;}
     try {await request('/api/smart-v3/jobs', {method:'POST', body:JSON.stringify(Object.fromEntries(new FormData(event.target)))}); await window.renderSmartV3();}
     catch (error) {message(error.message);}
   };

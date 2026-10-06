@@ -41,7 +41,9 @@ class SmartService:
         source_kind = str(payload.get("source_kind") or "media")
         if source_kind not in {"media", "draft"}:
             raise ValueError("V3 source_kind must be media or draft")
-        draft_path = str(payload.get("draft_path") or payload.get("source_path") or "").strip()
+        draft_path = str(payload.get("draft_path") or "").strip()
+        if source_kind == "draft" and not draft_path:
+            raise ValueError("请读取草稿全部时间线，并人工选择一条时间线")
         try:
             draft_data = draft.snapshot(draft_path) if source_kind == "draft" and draft_path else None
         except OSError as exc:

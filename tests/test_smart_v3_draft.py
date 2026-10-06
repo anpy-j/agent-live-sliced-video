@@ -111,17 +111,37 @@ class DraftEndToEndTest(unittest.TestCase):
         child.mkdir(parents=True)
         (child / "draft_content.json").write_text(self.file.read_text(), encoding="utf-8")
         (self.root / "timeline_layout.json").write_text(json.dumps({"activeTimeline": "child", "dockItems": [{"timelineIds": ["child"], "timelineNames": ["精选"]}]}), encoding="utf-8")
-        selected = draft.snapshot(self.root)
+        with self.assertRaisesRegex(ValueError, "人工选择"):
+            draft.snapshot(self.root)
+        selected = draft.snapshot(child / "draft_content.json")
         self.assertEqual(selected["timeline"]["timeline_id"], "child")
         self.assertEqual(selected["selected_path"], str(child / "draft_content.json"))
         choices = self.service.list_draft_timelines({"draft_path": str(self.root)})
         self.assertTrue(choices["timelines"][0]["active"])
         payload = self.payload()
-        payload["draft_path"] = str(self.root)
+        payload["draft_path"] = str(child / "draft_content.json")
         job = self.service.create_job(payload)
         (child / "draft_content.json").write_text("{}", encoding="utf-8")
         # Job snapshot still describes the accepted timeline; it never rewrites the draft.
         self.assertEqual(job["input"]["draft_timeline"]["timeline"]["segment_count"], 2)
+
+    def test_all_timelines_are_listed_and_selection_is_explicit(self):
+        for name in ("active", "other", "broken"):
+            folder = self.root / "Timelines" / name
+            folder.mkdir(parents=True)
+            (folder / "draft_content.json").write_text("{}" if name == "broken" else self.file.read_text(), encoding="utf-8")
+        (self.root / "timeline_layout.json").write_text(json.dumps({"activeTimeline":"active", "dockItems":[{"timelineIds":["active","other","broken"],"timelineNames":["活动","人工选择","损坏"]}]}), encoding="utf-8")
+        choices = self.service.list_draft_timelines({"draft_path": str(self.root)})["timelines"]
+        self.assertEqual({t["name"] for t in choices}, {"活动","人工选择","损坏"})
+        self.assertTrue(next(t for t in choices if t["name"] == "损坏")["error"])
+        payload = self.payload()
+        payload.pop("draft_path")
+        payload["source_path"] = str(self.root)
+        with self.assertRaisesRegex(ValueError, "人工选择"):
+            self.service.create_job(payload)
+        payload["draft_path"] = str(self.root / "Timelines/other/draft_content.json")
+        job = self.service.create_job(payload)
+        self.assertEqual(job["input"]["draft_timeline"]["timeline"]["timeline_id"], "other")
 
     def test_cross_segment_sentence_renders_correct_original_colors(self):
         snapshot = draft.snapshot(self.file)

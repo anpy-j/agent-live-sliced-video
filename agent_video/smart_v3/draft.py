@@ -46,7 +46,12 @@ def list_timelines(path):
 
 def snapshot(path):
     choices = list_timelines(path)["timelines"]
-    selected = next((t for t in choices if t.get("selected")), None) or next((t for t in choices if t.get("active")), choices[0])
+    requested = str(Path(path).expanduser().resolve())
+    selected = next((t for t in choices if str(Path(t["path"]).resolve()) == requested), None)
+    if not selected or not Path(path).is_file():
+        raise ValueError("请读取草稿全部时间线，并人工选择一条时间线后创建任务")
+    if selected.get("error"):
+        raise ValueError(f"所选时间线不可用：{selected['error']}")
     timeline = validate(load_virtual_timeline(selected["path"]))
     return {"draft_path": str(Path(path).expanduser().resolve()), "selected_path": selected["path"],
             "source_stats": {p: {"size": Path(p).stat().st_size, "mtime_ns": Path(p).stat().st_mtime_ns} for p in timeline.source_paths},

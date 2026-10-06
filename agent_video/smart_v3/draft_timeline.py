@@ -392,8 +392,15 @@ def discover_virtual_timelines(target: str | Path) -> dict[str, Any]:
     for timeline_id, name in entries:
         draft_file = timelines_root / timeline_id / "draft_content.json"
         if not draft_file.is_file():
+            result.append({"timeline_id": timeline_id, "name": name, "path": str(draft_file),
+                           "error": "时间线文件不存在", "active": timeline_id == active_id, "selected": False})
             continue
-        timeline = load_virtual_timeline(draft_file)
+        try:
+            timeline = load_virtual_timeline(draft_file)
+        except Exception as exc:
+            result.append({"timeline_id": timeline_id, "name": name, "path": str(draft_file),
+                           "error": str(exc), "active": timeline_id == active_id, "selected": False})
+            continue
         result.append({
             "timeline_id": timeline_id,
             "name": name,
