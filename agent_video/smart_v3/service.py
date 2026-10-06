@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .ai import JsonAI
 from . import pipeline
+from . import draft
 from .store import SmartStore, STAGES
 
 
@@ -37,7 +38,15 @@ class SmartService:
     def create_job(self, payload):
         source = Path(str(payload.get("source_path") or "")).expanduser().resolve()
         product = str(payload.get("product_name") or "").strip()[:120]
-        if not source.is_file() or not product:
+        source_kind = str(payload.get("source_kind") or "media")
+        if source_kind not in {"media", "draft"}:
+            raise ValueError("V3 source_kind must be media or draft")
+        draft_path = str(payload.get("draft_path") or payload.get("source_path") or "").strip()
+        try:
+            draft_data = draft.snapshot(draft_path) if source_kind == "draft" and draft_path else None
+        except OSError as exc:
+            raise ValueError(f"V3 草稿读取失败：{exc}") from exc
+        if not product or (source_kind == "media" and not source.is_file()) or (source_kind == "draft" and not draft_data):
             raise ValueError("V3 requires an existing local media file and product name")
         low, high = float(payload.get("target_min", 70)), float(payload.get("target_max", 120))
         if not all(math.isfinite(v) for v in (low, high)) or not 1 <= low <= high <= 600:
@@ -45,7 +54,8 @@ class SmartService:
         transcript = payload.get("transcript_path")
         if transcript and not Path(str(transcript)).expanduser().is_file():
             raise ValueError("Transcript file not found")
-        clean = {"source_path": str(source), "product_name": product, "target_min": low, "target_max": high,
+        clean = {"source_path": draft_data["selected_path"] if draft_data else str(source), "product_name": product, "target_min": low, "target_max": high,
+                 "source_kind": source_kind, "draft_timeline": draft_data,
                  "transcript_path": str(Path(str(transcript)).expanduser().resolve()) if transcript else None}
         with self.lock:
             job = self.store.create(clean)
@@ -54,6 +64,15 @@ class SmartService:
 
     def list_jobs(self):
         return self.store.list()
+
+    def list_draft_timelines(self, payload):
+        try:
+            path = str(payload.get("draft_path") or "").strip()
+            if not path:
+                raise ValueError("请填写 V3 草稿路径")
+            return draft.list_timelines(path)
+        except OSError as exc:
+            raise ValueError(f"V3 草稿读取失败：{exc}") from exc
 
     def get_job(self, job_id):
         return self.store.get(job_id)
@@ -98,7 +117,13 @@ class SmartService:
 
             try:
                 inp = job["input"]
-                units = stage("S1", lambda: self.understand(inp["source_path"], workspace, inp["transcript_path"]))
+                is_draft = inp.get("source_kind") == "draft"
+                if is_draft:
+                    name = "source-timeline.json"
+                    (workspace / name).write_text(json.dumps(inp["draft_timeline"], ensure_ascii=False, indent=2), encoding="utf-8")
+                    job["artifacts"].append({"name": name, "url": f"/api/smart-v3/jobs/{job_id}/artifacts/{name}"})
+                units = stage("S1", lambda: draft.understand(self.understand, inp["draft_timeline"], workspace, inp["transcript_path"])
+                              if is_draft else self.understand(inp["source_path"], workspace, inp["transcript_path"]))
                 coarse = stage("S2", lambda: pipeline.coarse_filter(units, inp["product_name"]))
                 profiles = stage("S3", lambda: pipeline.profile(self.ai, coarse["kept"], inp["product_name"]))
                 compilation = stage("S4", lambda: pipeline.arrange(profiles, inp["target_min"], inp["target_max"]))
@@ -107,7 +132,7 @@ class SmartService:
                     raise ValueError("Whole-film review failed after 3 attempts; rendering withheld")
                 job["stages"]["S5"]["status"] = "rendering"
                 self.store.save(job)
-                output = self.render(inp["source_path"], workspace, reviewed["timeline"])
+                output = draft.render(workspace, reviewed["timeline"]) if is_draft else self.render(inp["source_path"], workspace, reviewed["timeline"])
                 if output.resolve().parent != workspace or not output.is_file():
                     raise ValueError("Renderer did not create a V3 artifact")
                 job["artifacts"].append({"name": output.name, "url": f"/api/smart-v3/jobs/{job_id}/artifacts/{output.name}"})

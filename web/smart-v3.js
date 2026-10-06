@@ -4,6 +4,9 @@ window.renderSmartV3 = async function () {
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const request = async (url, options = {}) => {
     const response = await fetch(url, {headers: {'Content-Type': 'application/json'}, ...options});
+    if (!(response.headers.get('Content-Type') || '').includes('application/json')) {
+      throw new Error('V3 接口返回了非 JSON 内容。请停止旧 LiveCut 进程，确认只有一个新版服务运行后重试。');
+    }
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || response.statusText);
     return data;
@@ -14,7 +17,9 @@ window.renderSmartV3 = async function () {
   if (location.hash !== '#/smart-v3') return;
   container.innerHTML = `<div class="hero"><div><span class="eyebrow">WHOLE FILM OPTIMIZATION V3</span><h1>整片优化剪辑 V3</h1><p>素材理解 → 确定性粗筛 → 内容画像 → 动态整片编排 → 整片复审与渲染</p></div><button class="button ghost" id="v3Refresh">刷新阶段状态</button></div>
     <div class="panel"><h2>创建 V3 任务</h2><form id="v3Form" class="form-grid">
-      <label class="field full">本地素材<div style="display:flex;gap:8px"><input name="source_path" required placeholder="视频绝对路径"><button type="button" class="button ghost" id="v3Pick">浏览</button></div></label>
+      <label class="field full">输入方式<select name="source_kind" id="v3Kind"><option value="media">本地视频素材</option><option value="draft">剪映草稿 / 虚拟时间线</option></select></label>
+      <label class="field full">素材或草稿路径<div style="display:flex;gap:8px"><input name="source_path" required placeholder="视频、草稿目录或 draft_content.json 绝对路径"><button type="button" class="button ghost" id="v3Pick">浏览</button></div></label>
+      <div class="field full" id="v3DraftOptions" style="display:none"><button type="button" class="button ghost" id="v3ListTimelines">读取草稿时间线</button><select name="draft_path" id="v3Timeline"><option value="">默认选择草稿活动时间线</option></select><small>仅分析草稿保留的主视频片段；支持多原素材和恒定倍速。字幕、特效、转场、叠加轨及独立音乐不复现，输出 MP4。</small></div>
       <label class="field">商品名称<input name="product_name" required placeholder="本次主商品"></label>
       <label class="field">最短时长（秒）<input type="number" min="1" max="600" name="target_min" value="70" required></label>
       <label class="field">最长时长（秒）<input type="number" min="1" max="600" name="target_max" value="120" required></label>
@@ -22,7 +27,7 @@ window.renderSmartV3 = async function () {
       <div class="form-actions full"><button class="button primary">创建 V3 任务</button></div><p id="v3Message" class="form-error full" role="status"></p>
     </form></div>
     <div class="panel"><h2>V3 独立任务列表</h2>${jobs.length ? jobs.map(job => `<article style="margin:16px 0;padding:16px;border:1px solid var(--border)">
-      <h3>${esc(job.input.product_name)} · ${esc(job.status)}</h3><small>${esc(job.id)} · 尝试 ${job.attempt}</small>
+      <h3>${esc(job.input.product_name)} · ${esc(job.status)}</h3><small>${esc(job.id)} · ${job.input.source_kind === 'draft' ? '剪映草稿' : '视频素材'} · 尝试 ${job.attempt}</small>
       <p>${Object.entries(job.stages).map(([s, info]) => `${s}: ${esc(info.status)}`).join(' · ')}</p>
       ${job.error ? `<p class="form-error">${esc(job.error)}</p>` : ''}
       <button class="button primary" data-v3-run="${esc(job.id)}" data-action="${job.status === 'draft' ? 'run' : 'retry'}">${job.status === 'draft' ? '启动' : '重试'}</button>
@@ -34,8 +39,16 @@ window.renderSmartV3 = async function () {
   const message = text => {const el = document.querySelector('#v3Message'); if (el) el.textContent = text;};
   document.querySelector('#v3Refresh').onclick = () => window.renderSmartV3().catch(e => message(e.message));
   document.querySelector('#v3Pick').onclick = async () => {
-    try {const result = await request('/api/files/pick', {method:'POST', body:JSON.stringify({kind:'video'})});
-      if (!result.cancelled) document.querySelector('#v3Form [name="source_path"]').value = result.path;
+    try {const result = await request('/api/files/pick', {method:'POST', body:JSON.stringify({kind:document.querySelector('#v3Kind').value === 'draft' ? 'draft' : 'video'})});
+      if (!result.cancelled) {document.querySelector('#v3Form [name="source_path"]').value = result.path; clearTimelines();}
+    } catch (error) {message(error.message);}
+  };
+  const clearTimelines = () => {document.querySelector('#v3Timeline').innerHTML = '<option value="">默认选择草稿活动时间线</option>';};
+  document.querySelector('#v3Kind').onchange = event => {document.querySelector('#v3DraftOptions').style.display = event.target.value === 'draft' ? 'grid' : 'none'; clearTimelines();};
+  document.querySelector('#v3Form [name="source_path"]').oninput = clearTimelines;
+  document.querySelector('#v3ListTimelines').onclick = async () => {
+    try {const result = await request('/api/smart-v3/drafts/timelines', {method:'POST', body:JSON.stringify({draft_path:document.querySelector('#v3Form [name="source_path"]').value})});
+      document.querySelector('#v3Timeline').innerHTML = result.timelines.map(t => `<option value="${esc(t.path)}" ${t.active ? 'selected' : ''}>${esc(t.name)} · ${esc(t.segment_count)} 段 · ${esc(t.timeline_duration)} 秒</option>`).join('');
     } catch (error) {message(error.message);}
   };
   document.querySelector('#v3Form').onsubmit = async event => {
