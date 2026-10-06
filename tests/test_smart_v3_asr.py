@@ -12,7 +12,7 @@ class ASRTailTests(unittest.TestCase):
     def understand(self, words, root):
         model = SimpleNamespace(transcribe=lambda *a, **k: ([SimpleNamespace(words=words)], None))
         module = SimpleNamespace(WhisperModel=lambda *a, **k: model)
-        with patch.dict('sys.modules', {'faster_whisper': module}), patch.object(pipeline, 'command', return_value='10'):
+        with patch.dict('sys.modules', {'faster_whisper': module}), patch.object(pipeline, 'command', return_value='10'), patch.object(pipeline, 'JsonAI', return_value=lambda *a: {'sentences': [], 'tail_start': 0}):
             return pipeline.understand('unused.wav', root)
 
     def test_complete_sentences_survive_incomplete_tail(self):
@@ -37,3 +37,15 @@ class ASRTailTests(unittest.TestCase):
             transcript.write_text(json.dumps([{'start': 0, 'end': 2, 'text': '未完成'}]), encoding='utf-8')
             with patch.object(pipeline, 'command', return_value='10'), self.assertRaisesRegex(ValueError, 'punctuated'):
                 pipeline.understand('unused.wav', root, transcript)
+
+    def test_semantic_boundaries_preserve_text_and_word_timestamps(self):
+        words = [{'start': 0, 'end': 1, 'text': '外套'}, {'start': 1, 'end': 2, 'text': '显瘦'},
+                 {'start': 3, 'end': 4, 'text': '不过'}]
+        rows, tail = pipeline.restore_sentences(words, lambda *a: {'sentences': [{'first': 0, 'last': 1}], 'tail_start': 2})
+        self.assertEqual(rows, [{'start': 0, 'end': 2, 'text': '外套显瘦。'}])
+        self.assertEqual(tail, words[2:])
+
+    def test_model_cannot_skip_words(self):
+        words = [{'start': i, 'end': i + 1, 'text': '词'} for i in range(3)]
+        with self.assertRaisesRegex(ValueError, 'boundaries'):
+            pipeline.restore_sentences(words, lambda *a: {'sentences': [{'first': 1, 'last': 2}], 'tail_start': 3})

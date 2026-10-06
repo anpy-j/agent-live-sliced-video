@@ -61,6 +61,7 @@ class JsonAI:
             raise ValueError("Set SMART_V3_API_KEY and SMART_V3_MODEL before starting V3")
         base = os.environ.get("SMART_V3_BASE_URL", "https://api.openai.com/v1").rstrip("/")
         instructions = {
+            "sentences": "将无标点 ASR 词序列按语义划分完整句。只返回 JSON {sentences:[{first:首词索引,last:末词索引}],tail_start:残缺尾句首词索引或词数}。索引从0开始，完整句必须连续覆盖从0到tail_start之前全部词，禁止改写、删除中间词或补全残句；一句可以跨 ASR segment。只有结尾真实残缺时才排除尾句。",
             "profile": "理解商品和完整句上下文。仅输出 JSON {profiles:[{id,usable:boolean,role:[]或hook/result/pain/fit/material/styling/proof/scene/close的多值,topic,claim_cluster:同一信息点同一标识,strength:0..1,hook_strength:0..1,independent:boolean,dependency:[句id],product_relevance:0..1,visual_need,reason}]}。每句恰好一个画像，不要求所有角色存在。搭配提及副商品不能误删。不要编造画面信息。",
             "review": "按提供的最终顺序复审整片，检查重复、突兀跳题、指代缺失、连续弱句、开头回商品过慢。画面信息未知必须明确未知，不能虚构。输出 JSON {passed:boolean,issues:[{unit_id,reason}],visual_assessment:string}。通过时 issues 必须为空，否则指出需替换的完整句。",
         }

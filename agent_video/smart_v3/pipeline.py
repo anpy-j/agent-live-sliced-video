@@ -7,8 +7,9 @@ import re
 import subprocess
 from collections import Counter
 from pathlib import Path
+from types import SimpleNamespace
 
-from .ai import validate_profiles, validate_review
+from .ai import JsonAI, validate_profiles, validate_review
 
 # These conservative rules belong exclusively to V3. Attraction is judged in S3.
 INVALID = re.compile(r"(场控|管理员|库存只?剩|库存只有|快递|发货|物流|拍一号链接|赶紧下单|最后一单|扣个[一1])")
@@ -20,6 +21,25 @@ def command(args):
     if result.returncode:
         raise RuntimeError(result.stderr[-2000:])
     return result.stdout
+
+
+def restore_sentences(words, ai):
+    raw = ai("sentences", {"words": [{"id": i, "text": w["text"]} for i, w in enumerate(words)]})
+    ranges = raw.get("sentences")
+    tail = raw.get("tail_start")
+    if not isinstance(ranges, list) or type(tail) is not int or not 0 <= tail <= len(words):
+        raise ValueError("Invalid ASR sentence boundaries")
+    rows, cursor = [], 0
+    for item in ranges:
+        first, last = item.get("first"), item.get("last")
+        if type(first) is not int or type(last) is not int or first != cursor or not first <= last < tail:
+            raise ValueError("Invalid/non-contiguous ASR sentence boundaries")
+        rows.append({"start": words[first]["start"], "end": words[last]["end"],
+                     "text": "".join(w["text"] for w in words[first:last + 1]) + "。"})
+        cursor = last + 1
+    if cursor != tail:
+        raise ValueError("Model omitted ASR words")
+    return rows, words[tail:]
 
 
 def understand(source, workspace, transcript=None):
@@ -41,6 +61,11 @@ def understand(source, workspace, transcript=None):
                     rows.append({"start": pending[0].start, "end": pending[-1].end,
                                  "text": "".join(w.word for w in pending)})
                     pending = []
+        if pending and not rows:
+            words = [{"start": w.start, "end": w.end, "text": w.word} for w in pending]
+            (workspace / "asr-words.json").write_text(json.dumps(words, ensure_ascii=False), encoding="utf-8")
+            rows, rejected = restore_sentences(words, JsonAI())
+            pending = [SimpleNamespace(start=w["start"], end=w["end"], word=w["text"]) for w in rejected]
         if pending:
             # Keep the rejected tail observable without admitting a cut-off sentence.
             (workspace / "asr-rejected-tail.json").write_text(json.dumps({
