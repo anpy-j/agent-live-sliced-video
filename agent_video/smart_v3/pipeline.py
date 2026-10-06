@@ -42,8 +42,13 @@ def understand(source, workspace, transcript=None):
                                  "text": "".join(w.word for w in pending)})
                     pending = []
         if pending:
-            rows.append({"start": pending[0].start, "end": pending[-1].end,
-                         "text": "".join(w.word for w in pending)})
+            # Keep the rejected tail observable without admitting a cut-off sentence.
+            (workspace / "asr-rejected-tail.json").write_text(json.dumps({
+                "reason": "incomplete_asr_tail", "start": pending[0].start,
+                "end": pending[-1].end, "text": "".join(w.word for w in pending)
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
+        (workspace / "asr-complete-sentences.json").write_text(
+            json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
     if not isinstance(rows, list) or not rows:
         raise ValueError("No complete timestamped sentences")
     units = []
