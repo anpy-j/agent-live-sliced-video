@@ -37,7 +37,7 @@ class OrderRuntimeTest(unittest.TestCase):
         self.assertEqual(len(self.calls), 4)
         self.runtime().labels(self.rows)
         self.assertEqual(len(self.calls), 4)
-        self.assertTrue(all(timeout <= 90 for _, timeout in self.calls))
+        self.assertTrue(all(timeout == 900 for _, timeout in self.calls))
 
     def test_concurrent_batches(self):
         barrier = threading.Barrier(3, timeout=5)
@@ -64,12 +64,13 @@ class OrderRuntimeTest(unittest.TestCase):
         self.runtime().labels(self.rows)
         self.assertEqual(len(self.calls), 4)
 
-    def test_budget_exhaustion_starts_no_call(self):
-        runtime = self.runtime()
-        runtime.deadline = 0
-        with self.assertRaisesRegex(AIReturnError, '总时间预算'):
+    def test_each_call_receives_full_timeout_and_ignores_old_stage_budget(self):
+        with patch.dict('os.environ', {'PIPELINE_S4_BUDGET': '1'}):
+            runtime = self.runtime()
             runtime.labels(self.rows[:1])
-        self.assertEqual(self.calls, [])
+            runtime.invoke('mock', '候选JSON：\n' + json.dumps(self.rows[:1]),
+                           {'properties': {'candidates': {}}}, 900)
+        self.assertEqual([timeout for _, timeout in self.calls], [900, 900])
 
     def test_cache_invalidated_by_text_and_model(self):
         self.runtime().labels(self.rows[:1])
@@ -108,32 +109,22 @@ class OrderRuntimeTest(unittest.TestCase):
             self.assertEqual(len(runtime.labels(self.rows)), 81)
             self.assertEqual(sorted(counts), [1, 20, 20])
 
-    def test_annotation_budget_exhaustion_skips_batches(self):
-        runtime = self.runtime()
-        runtime.annotation_deadline = 0
-        with self.assertRaisesRegex(AIReturnError, '总时间预算'):
-            runtime.labels(self.rows)
-        self.assertEqual(self.calls, [])
-
-    def test_late_batches_dropped_instead_of_failing_s4(self):
+    def test_all_batches_run_without_elapsed_time_degradation(self):
         from concurrent.futures import ThreadPoolExecutor as Real
         runtime = self.runtime()
         original = self.call
         calls = []
-        def expire_after_two(*args):
+        def record(*args):
             if 'candidates' in args[2]['properties']:
                 calls.append(args)
-                if len(calls) == 2:
-                    runtime.annotation_deadline = 0
             return original(*args)
-        runtime.call = expire_after_two
+        runtime.call = record
         with patch('agent_video.pipeline.order_runtime.ThreadPoolExecutor',
                    side_effect=lambda **kwargs: Real(max_workers=1)):
             labels = runtime.labels(self.rows)
-        # 40 + 40 annotated, the trailing 1-row batch skipped; S4 continues degraded.
-        self.assertEqual(len(labels), 80)
-        self.assertEqual(len(calls), 2)
-        self.assertNotIn(80, labels)
+        self.assertEqual(len(labels), 81)
+        self.assertEqual(len(calls), 3)
+        self.assertIn(80, labels)
 
     def test_workers_scale_with_batch_count(self):
         from concurrent.futures import ThreadPoolExecutor as Real
