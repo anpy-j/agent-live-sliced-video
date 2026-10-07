@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import time
+from threading import Event
 
 from .editorial import inventory, digest, save, obj, array, STR
 from .errors import AIReturnError
@@ -47,13 +48,34 @@ class OrderRuntime:
                 pass
         # Neighbor overlap preserves dependencies crossing a batch boundary.
         batches = []
+        batch_size = 20 if self.identity['provider'] == 'workbuddy' else 40
         for offset in range(0, len(candidates), 40):
             rows = candidates[offset:offset + 40]
             context = candidates[max(0, offset - 3):offset] + candidates[offset + 40:offset + 43]
             key = digest(dict(self.identity, rows=rows, context=context))
-            batches.append((rows, context, key))
+            # Keep existing validated 40-row cache hits, split only uncached WorkBuddy work.
+            value = self._load(key)
+            valid = False
+            if value is not None:
+                try:
+                    inventory(rows, self.model, 90, lambda *args: value, context=context)
+                    valid = True
+                except AIReturnError:
+                    pass
+            if valid or batch_size == 40:
+                batches.append((rows, context, key))
+            else:
+                for start in range(offset, min(offset + 40, len(candidates)), batch_size):
+                    subset = candidates[start:start + batch_size]
+                    neighbors = candidates[max(0, start - 3):start] + candidates[start + batch_size:start + batch_size + 3]
+                    subkey = digest(dict(self.identity, rows=subset, context=neighbors))
+                    batches.append((subset, neighbors, subkey))
         result = {}
+        stopped = Event()
+        failures = []
         def annotate(batch):
+            if stopped.is_set():
+                raise failures[0]
             rows, context, key = batch
             value = self._load(key)
             if value is not None:
@@ -61,7 +83,13 @@ class OrderRuntime:
                     return inventory(rows, self.model, 90, lambda *args: value, context=context), True
                 except AIReturnError:
                     pass
-            labels = inventory(rows, self.model, 90, self.invoke, context=context)
+            try:
+                labels = inventory(rows, self.model, 90, self.invoke, context=context)
+            except Exception as exc:
+                # Signal before this worker can be reused for another queued request.
+                failures.append(exc)
+                stopped.set()
+                raise
             save(self.root / (key + '.json'), {'candidates': list(labels.values())})
             return labels, False
         self.progress(f'S4 语义标注：{len(candidates)} 段 / {len(batches)} 批 / 并发 3')

@@ -443,7 +443,7 @@ class CliProvider:
             stdout = f"{exc.output or ''}{tail_stdout or ''}"
             stderr = f"{exc.stderr or ''}{tail_stderr or ''}"
             raise ProviderResponseError(
-                f"{self.display_name} 编排超过 {timeout // 60} 分钟，已停止",
+                f"{self.display_name} 编排超过 {timeout} 秒，已停止",
                 {"stdout": (stdout or "")[-100000:], "stderr": (stderr or "")[-20000:],
                  "timeout_seconds": timeout, "returncode": process.returncode},
             ) from None

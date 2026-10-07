@@ -1,4 +1,7 @@
 S4 now annotates candidates in batches of 40, with up to three concurrent model calls.
+WorkBuddy uses batches of 20 for uncached work; existing valid 40-row cache entries
+remain reusable. A worker failure stops queued requests before they start additional
+model calls. Already running requests are collected under their time limits.
 Three neighboring candidates on each side provide context for dependencies crossing batch boundaries.
 Completed batches are cached under the job workspace's `s4-cache/`, keyed by candidate
 content, context, model, provider setting and annotation version. Invalid cache entries are
