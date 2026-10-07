@@ -98,7 +98,7 @@ class JobApiTest(unittest.TestCase):
         self.assertEqual(job["status"], "queued")
         self.assertEqual(job["target_seconds"], "70-90")
         self.assertEqual([stage["stage_id"] for stage in job["stages"]],
-                         ["asr", "filter", "judge", "order", "render"])
+                         ["asr", "filter", "judge", "order", "review", "render"])
 
     def test_create_job_stores_custom_target_seconds(self):
         job = self.app.create_job({"source_path": str(self.video), "target_min": 60, "target_max": 80})

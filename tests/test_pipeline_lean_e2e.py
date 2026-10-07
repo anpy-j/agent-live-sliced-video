@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 from agent_video.pipeline import run as pipeline_run
 from agent_video.pipeline.ai import DECISION_SCHEMA
-from agent_video.pipeline.semantic import GROUP_SCHEMA
+from agent_video.pipeline.editorial import INVENTORY_SCHEMA, PLAN_SCHEMA, REVIEW_SCHEMA
 from agent_video.pipeline.errors import (AIReturnError, AsrError, RenderError,
                                          RuleFilterEmpty)
 from agent_video.pipeline.render import build_segments
@@ -46,17 +46,18 @@ def make_media(path):
 
 
 def fake_ai(model, prompt, schema, timeout):
-    import re
     ids = [int(value) for value in re.findall(r'"id": (\d+)', prompt)]
-    if schema is GROUP_SCHEMA:
-        return {"groups": [{"fact": "独立卖点", "ids": [cid], "keep_id": cid,
-                            "reason": "独立信息"} for cid in ids]}
+    if schema is INVENTORY_SCHEMA:
+        return {"candidates": [{"id": cid, "topic": "fabric", "facts": [str(cid)],
+                "subject": "马甲", "eligible": True, "requires": [], "reason": "独立信息"} for cid in ids]}
+    if schema is REVIEW_SCHEMA:
+        return {"passed": True, "issues": []}
     if schema is DECISION_SCHEMA:
-        return {"decisions": [{"id": cid, "usable": True, "reason": "mock 可用"}
-                              for cid in ids]}
-    return {"main_product": "马甲",
-            "sections": [{"role": "hook", "ids": ids}],
-            "ordered_ids": ids}
+        return {"decisions": [{"id": cid, "usable": True, "reason": "mock 可用"} for cid in ids]}
+    data = json.loads(prompt.splitlines()[-1])
+    ids = [c["id"] for c in data["candidates"]]
+    return {"main_product": "马甲", "opening_topic": "fabric",
+            "sections": [{"role": "hook", "topic": "fabric", "ids": ids}], "ordered_ids": ids}
 
 
 @unittest.skipUnless(FFMPEG, "ffmpeg 不可用")
@@ -78,10 +79,10 @@ class LeanPipelineEndToEndTest(unittest.TestCase):
                  {"w": "纯羊毛材质。", "s": 3., "e": 5.},
                  {"w": "贴身不会扎皮肤。", "s": 6., "e": 8.}]
         def semantic_ai(model, prompt, schema, timeout):
-            if schema is GROUP_SCHEMA and "跨段落" not in prompt:
-                return {"groups": [
-                    {"fact": "羊毛含量", "ids": [0, 1], "keep_id": 0, "reason": "更具体"},
-                    {"fact": "不扎", "ids": [2], "keep_id": 2, "reason": "新增事实"}]}
+            if schema is INVENTORY_SCHEMA:
+                data = fake_ai(model, prompt, schema, timeout)
+                data["candidates"][1]["eligible"] = False
+                return data
             return fake_ai(model, prompt, schema, timeout)
         with patch.object(pipeline_run, "ai_call", side_effect=semantic_ai):
             manifest = self.run_pipeline(transcript=([], words), target_seconds=(120., 180.))
@@ -188,14 +189,10 @@ class LeanPipelineEndToEndTest(unittest.TestCase):
     def test_below_target_material_still_renders_without_abort(self):
         def only_first(model, prompt, schema, timeout):
             ids = [int(value) for value in re.findall(r'"id": (\d+)', prompt)]
-            if schema is GROUP_SCHEMA:
-                return fake_ai(model, prompt, schema, timeout)
             if schema is DECISION_SCHEMA:
                 return {"decisions": [{"id": cid, "usable": cid == ids[0], "reason": "keep one"}
                                       for cid in ids]}
-            return {"main_product": "马甲",
-                    "sections": [{"role": "hook", "ids": ids}],
-                    "ordered_ids": ids}
+            return fake_ai(model, prompt, schema, timeout)
 
         with patch.object(pipeline_run, "ai_call", side_effect=only_first):
             manifest = self.run_pipeline()
@@ -286,6 +283,8 @@ class LeanPipelineEndToEndTest(unittest.TestCase):
         self.assertEqual(s2_path.read_bytes(), s2_before)
         self.assertEqual(s3_path.read_bytes(), s3_before)
 
+        with patch.object(pipeline_run, "ai_call", side_effect=fake_ai):
+            pipeline_run.run_pipeline_stage(self.media, self.workdir, "review", target_seconds=(8.0, 9.0))
         order_path = Path(self.workdir) / "order.json"
         order_before = order_path.read_bytes()
         with patch.object(pipeline_run, "ai_call") as ai:

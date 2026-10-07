@@ -48,32 +48,6 @@ class SemanticSelectionTest(unittest.TestCase):
         self.assertEqual(run._validate_order(order, self.candidates, (120., 180.),
                                              1., 500.)[2], 4.)
 
-    def test_full_order_applies_selection_and_cross_section_review(self):
-        selection = {"groups": [group([1, 2], 2), group([3], 3),
-                                  group([4], 4), group([5], 5)]}
-        order = {"main_product": "毛衣", "sections": [
-            {"role": "hook", "ids": [2]}, {"role": "proof", "ids": [3]},
-            {"role": "styling", "ids": [4, 5]}], "ordered_ids": [2, 3, 4, 5]}
-        # Force a second-pass duplicate to verify actual removal across roles.
-        review = {"groups": [group([2, 3], 3), group([4], 4), group([5], 5)]}
-        before = copy.deepcopy(self.candidates)
-        def call(model, prompt, schema, timeout):
-            if schema is ORDER_SCHEMA:
-                payload = json.loads(prompt.split("JSON）：\n")[-1])
-                self.assertEqual([c["id"] for c in payload], [2, 3, 4, 5])
-                return copy.deepcopy(order)
-            self.assertIs(schema, GROUP_SCHEMA)
-            return review if "跨段落" in prompt else selection
-        with tempfile.TemporaryDirectory() as workdir, patch.object(run, "ai_call", side_effect=call):
-            final = run._semantic_order(self.candidates, "auto", (120., 180.), None,
-                                         1., 10, workdir)
-            self.assertEqual(final["ordered_ids"], [3, 4, 5])
-            self.assertEqual(final["sections"][0], {"role": "hook", "ids": [3]})
-            self.assertEqual(run._validate_order(final, self.candidates, (120., 180.), 1.)[2], 12.)
-            audit = json.loads(Path(workdir, "semantic-selection.json").read_text("utf8"))
-            self.assertEqual(audit["review"]["deletions"][0]["id"], 2)
-        self.assertEqual(self.candidates, before)
-
     def test_prompt_protects_new_information_and_numeric_conflicts(self):
         prompt = group_prompt(self.candidates)
         self.assertIn("数值冲突", prompt)

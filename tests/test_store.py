@@ -40,7 +40,7 @@ class StoreTest(unittest.TestCase):
         self.assertEqual([stage["stage_id"] for stage in job["stages"]],
                          [stage_id for stage_id, _, _ in STAGE_DEFINITIONS])
         self.assertEqual([stage["stage_id"] for stage in job["stages"]],
-                         ["asr", "filter", "judge", "order", "render"])
+                         ["asr", "filter", "judge", "order", "review", "render"])
         self.assertEqual(job["events"][0]["kind"], "job_created")
 
     def test_stage_transition_is_persisted(self):
