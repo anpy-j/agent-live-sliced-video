@@ -1,6 +1,7 @@
 """Bound S4 work, persist completed batches and reconcile facts across batches."""
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
+import math
 import os
 from pathlib import Path
 import time
@@ -11,6 +12,10 @@ from .errors import AIReturnError
 
 VERSION = 1
 FACT_SCHEMA = obj({'groups': array(obj({'keys': array(STR)}))})
+CALL_TIMEOUT = 90
+MAX_WORKERS = 6
+# Annotation and composition share one budget; the composition call still needs room.
+ANNOTATION_SHARE = 0.6
 
 
 class OrderRuntime:
@@ -21,14 +26,15 @@ class OrderRuntime:
         self.started = time.monotonic()
         self.budget = min(timeout, 300)
         self.deadline = self.started + self.budget
+        self.annotation_deadline = self.started + self.budget * ANNOTATION_SHARE
         self.identity = {'version': VERSION, 'model': model,
                          'provider': os.environ.get('PIPELINE_AI_PROVIDER', 'auto')}
 
-    def invoke(self, model, prompt, schema, timeout):
-        remaining = int(self.deadline - time.monotonic())
+    def invoke(self, model, prompt, schema, timeout, *, deadline=None):
+        remaining = int((deadline or self.deadline) - time.monotonic())
         if remaining < 1:
             raise AIReturnError(f'S4 超过总时间预算 {self.budget} 秒；已完成标注已缓存')
-        return self.call(model, prompt, schema, min(timeout, remaining, 90))
+        return self.call(model, prompt, schema, min(timeout, remaining, CALL_TIMEOUT))
 
     def _load(self, key):
         try:
@@ -74,27 +80,36 @@ class OrderRuntime:
         stopped = Event()
         failures = []
         def annotate(batch):
-            if stopped.is_set():
-                raise failures[0]
+            # A batch that cannot finish in the annotation budget is dropped, not fatal:
+            # successful batches stay cached and the next rerun covers the gap.
+            limit = min(self.annotation_deadline, self.deadline)
+            if stopped.is_set() or time.monotonic() >= limit:
+                return {}, False
             rows, context, key = batch
             value = self._load(key)
             if value is not None:
                 try:
-                    return inventory(rows, self.model, 90, lambda *args: value, context=context), True
+                    return inventory(rows, self.model, CALL_TIMEOUT, lambda *args: value,
+                                     context=context), True
                 except AIReturnError:
                     pass
             try:
-                labels = inventory(rows, self.model, 90, self.invoke, context=context)
+                labels = inventory(rows, self.model, CALL_TIMEOUT,
+                                   lambda *args: self.invoke(*args, deadline=limit),
+                                   context=context)
             except Exception as exc:
                 # Signal before this worker can be reused for another queued request.
                 failures.append(exc)
                 stopped.set()
-                raise
+                return {}, False
             save(self.root / (key + '.json'), {'candidates': list(labels.values())})
             return labels, False
-        self.progress(f'S4 语义标注：{len(candidates)} 段 / {len(batches)} 批 / 并发 3')
+        # Spread the batches over as many waves as the annotation budget allows.
+        waves = max(1, int(self.budget * ANNOTATION_SHARE) // CALL_TIMEOUT)
+        workers = min(MAX_WORKERS, max(3, math.ceil(len(batches) / waves)))
+        self.progress(f'S4 语义标注：{len(candidates)} 段 / {len(batches)} 批 / 并发 {workers}')
         # Provider calls honor the remaining shared deadline; collect all workers before returning.
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = [executor.submit(annotate, batch) for batch in batches]
             try:
                 for done, future in enumerate(as_completed(futures), 1):
@@ -105,6 +120,14 @@ class OrderRuntime:
                 for future in futures:
                     future.cancel()
                 raise
+        if not result:
+            # Without any label there is nothing to compose from; surface the real cause.
+            raise failures[0] if failures else AIReturnError(
+                f'S4 超过总时间预算 {self.budget} 秒；未完成任何语义标注')
+        missing = len(candidates) - len(result)
+        if missing:
+            self.progress(f'S4 语义标注降级：{missing}/{len(candidates)} 段本轮未标注，'
+                          '仅使用已标注候选，未完成批次将在重跑时复用缓存补齐')
         # Local batch keys alone cannot ensure equivalent facts share a key globally.
         keys = sorted({fact for label in result.values() for fact in label['facts']})
         if len(batches) > 1 and keys:
@@ -129,5 +152,6 @@ class OrderRuntime:
                 raise AIReturnError('S4 全局事实合并遗漏事实')
             for label in result.values():
                 label['facts'] = sorted({mapping[k] for k in label['facts']})
-        save(self.root / (whole_key + '.json'), {'candidates': list(result.values())})
+        if not missing:
+            save(self.root / (whole_key + '.json'), {'candidates': list(result.values())})
         return result

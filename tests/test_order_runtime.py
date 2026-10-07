@@ -108,6 +108,51 @@ class OrderRuntimeTest(unittest.TestCase):
             self.assertEqual(len(runtime.labels(self.rows)), 81)
             self.assertEqual(sorted(counts), [1, 20, 20])
 
+    def test_annotation_budget_exhaustion_skips_batches(self):
+        runtime = self.runtime()
+        runtime.annotation_deadline = 0
+        with self.assertRaisesRegex(AIReturnError, '总时间预算'):
+            runtime.labels(self.rows)
+        self.assertEqual(self.calls, [])
+
+    def test_late_batches_dropped_instead_of_failing_s4(self):
+        from concurrent.futures import ThreadPoolExecutor as Real
+        runtime = self.runtime()
+        original = self.call
+        calls = []
+        def expire_after_two(*args):
+            if 'candidates' in args[2]['properties']:
+                calls.append(args)
+                if len(calls) == 2:
+                    runtime.annotation_deadline = 0
+            return original(*args)
+        runtime.call = expire_after_two
+        with patch('agent_video.pipeline.order_runtime.ThreadPoolExecutor',
+                   side_effect=lambda **kwargs: Real(max_workers=1)):
+            labels = runtime.labels(self.rows)
+        # 40 + 40 annotated, the trailing 1-row batch skipped; S4 continues degraded.
+        self.assertEqual(len(labels), 80)
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn(80, labels)
+
+    def test_workers_scale_with_batch_count(self):
+        from concurrent.futures import ThreadPoolExecutor as Real
+        sizes = []
+        def capture(**kwargs):
+            sizes.append(kwargs['max_workers'])
+            return Real(**kwargs)
+        def run(rows):
+            sizes.clear()
+            with patch('agent_video.pipeline.order_runtime.ThreadPoolExecutor',
+                       side_effect=capture):
+                self.runtime().labels(rows)
+            return sizes[0]
+        def rows(count):
+            return [{'id': n, 'text': str(n), 'start': n * 5., 'end': n * 5. + 4}
+                    for n in range(count)]
+        self.assertEqual(run(self.rows), 3)
+        self.assertEqual(run(rows(600)), 6)
+
     def test_failed_worker_does_not_start_queued_model_calls(self):
         from concurrent.futures import ThreadPoolExecutor
         runtime = self.runtime()
