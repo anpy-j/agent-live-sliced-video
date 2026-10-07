@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """精简管线编排 + 独立入口。
 
-一条命令：ASR → 规则筛 → 2 次无状态 AI 判定/排序 → 按时间戳切 → ffmpeg 拼接。
+一条命令：ASR → 规则筛 → AI 判定 → 语义分组/编排/复审 → 按时间戳切 → ffmpeg 拼接。
 
     python -m agent_video.pipeline.run --media /abs/素材.mp4 --workdir /abs/out
 
@@ -26,6 +26,7 @@ from .ai import (DEFAULT_TIMEOUT, DECISION_SCHEMA, ORDER_SCHEMA,
 from .errors import (AIReturnError, AsrError, PipelineError, RuleFilterEmpty,
                      TargetUnreachable)
 from .filter import activate_account_vocab, filter_clauses
+from .semantic import select_semantic
 from .render import build_segments, build_virtual_segments, render_video
 from .split import DEFAULT_MAX_DURATION, DEFAULT_MIN_DURATION, split_clauses
 from .units import (DEFAULT_MERGE_MAX, DEFAULT_MERGE_MIN, DEFAULT_SILENCE_GAP,
@@ -253,7 +254,7 @@ def _order_prompt(candidates: list[dict[str, Any]],
     if available is not None and available < low:
         short_note = (
             f"注意：可用句单元总时长仅 {available:.2f} 秒，已低于目标下限 {low:g} 秒；"
-            "请把可用句单元尽量全部选上，成片时长以实际可用为准。\n")
+            "只选有新增信息的优质句单元，允许短片，不必全部选上。\n")
     return (
         "直接分析并输出结果，不要调用任何工具或执行命令行。\n"
         "你在把已判定可用的口播句单元，编成一条可直接发布到抖音的短视频，"
@@ -273,7 +274,8 @@ def _order_prompt(candidates: list[dict[str, Any]],
         "- ordered_ids = 各 section 的 ids 依次拼接，必须与 sections 完全一致"
         "（不新增、不遗漏、不重复）；\n"
         "- 所有 id 只能取自输入，不得越界；\n"
-        f"- 总时长（所选 id 的 seconds 之和）落在 {low:g}~{high:g} 秒；单个超过 "
+        f"- 总时长期望落在 {low:g}~{high:g} 秒；下限只是期望，允许低于下限，"
+        "严禁为凑时长加入重复、空泛或次要话术；质量优先。单个超过 "
         f"{LONG_UNIT_SECONDS:g} 秒的句单元可正常选中，此时总时长允许相应超出上限"
         "（超出的部分交人工再剪）；\n"
         f"{short_note}"
@@ -284,6 +286,47 @@ def _order_prompt(candidates: list[dict[str, Any]],
         f"{product_line}"
         f"可用句单元（按时间序，JSON）：\n{json.dumps(payload, ensure_ascii=False)}"
     )
+
+
+def _semantic_order(candidates, model, target, product_name, tolerance,
+                    timeout, workdir):
+    """Select representatives, compose, then remove cross-section duplicates."""
+    _dump(os.path.join(workdir, "semantic-selection.json"), {"status": "selecting"})
+    selected, selection = select_semantic(candidates, model, timeout, ai_call)
+    audit = {"status": "composing", "selection": selection}
+    _dump(os.path.join(workdir, "semantic-selection.json"), audit)
+    available = sum(_duration(c) for c in selected)
+    order = ai_call(model, _order_prompt(selected, target, product_name, available),
+                    ORDER_SCHEMA, timeout)
+    _, ids, _, sections = _validate_order(order, selected, target, tolerance, available)
+    by_id = {c["id"]: c for c in selected}
+    _, review = select_semantic([by_id[cid] for cid in ids], model, timeout,
+                               ai_call, review=True)
+    audit["review"] = review
+    audit["status"] = "reviewed"
+    _dump(os.path.join(workdir, "semantic-selection.json"), audit)
+    # Put each group's best expression at its first occurrence, including hook.
+    # This preserves the opening role even when the representative came later.
+    replacement = {item["id"]: item["keep_id"] for item in review["deletions"]}
+    seen = set()
+    final_sections = []
+    for section in sections:
+        final_ids = []
+        for cid in section["ids"]:
+            representative = replacement.get(cid, cid)
+            if representative not in seen:
+                seen.add(representative)
+                final_ids.append(representative)
+        if final_ids:
+            final_sections.append({"role": section["role"], "ids": final_ids})
+    order["sections"] = final_sections
+    order["ordered_ids"] = [cid for section in final_sections for cid in section["ids"]]
+    order["semantic_summary"] = {
+        "selected_candidates": len(selected),
+        "selection_removed": len(selection["deletions"]),
+        "review_removed": len(review["deletions"]),
+    }
+    return order
 
 
 def _validate_decisions(data: dict[str, Any],
@@ -377,11 +420,8 @@ def _validate_order(data: dict[str, Any], candidates: list[dict[str, Any]],
     # 超过 6s 的句单元不拆散：它带来的超长允许顶高总时长上限，交由人工再剪。
     overflow = sum(max(0.0, _duration(by_id[cid]) - LONG_UNIT_SECONDS)
                    for cid in seen if _duration(by_id[cid]) > LONG_UNIT_SECONDS)
-    # 可用素材本身就不够目标下限时，不允许因"时长不足"中断任务：把下限放宽到实际可用量。
-    floor = low - tolerance
-    if available is not None and available < floor:
-        floor = available
-    if total < floor or total > high + tolerance + overflow:
+    # 下限只是期望；优质短片允许出片，上限仍受长单元溢出规则约束。
+    if total <= 0 or total > high + tolerance + overflow:
         raise AIReturnError(
             f"S4 排序总时长 {total:.2f}s 不在目标 {low:g}~{high:g}s 内"
             f"（长单元溢出容忍 {overflow:.2f}s）")
@@ -517,6 +557,7 @@ def run_pipeline_stage(media: str, workdir: str, stage: str, *,
             "duration": float(judged_data.get("duration") or 0.0),
             "main_product": order_data.get("main_product") or "",
             "order_sections": order_data.get("sections") or [],
+            "semantic_summary": order_data.get("semantic_summary") or {},
             "ai_calls": 0,
             "ai_engine": os.environ.get("PIPELINE_AI_ENGINE") or "llm",
             "ai_provider": os.environ.get("PIPELINE_AI_PROVIDER") or "auto",
@@ -549,8 +590,8 @@ def run_pipeline_stage(media: str, workdir: str, stage: str, *,
     else:
         _emit(on_stage, "order", "start",
               f"单独重跑 AI 排序编排（目标 {target_seconds[0]:g}~{target_seconds[1]:g}s）")
-    order = ai_call(model, _order_prompt(candidates, target_seconds, product_name, available),
-                    ORDER_SCHEMA, ai_timeout)
+    order = _semantic_order(candidates, model, target_seconds, product_name,
+                            target_tolerance, ai_timeout, workdir)
     main_product, ordered_ids, total_seconds, sections = _validate_order(
         order, candidates, target_seconds, target_tolerance, available)
     main_product = product_name or main_product
@@ -563,7 +604,8 @@ def run_pipeline_stage(media: str, workdir: str, stage: str, *,
                 "clauses": clauses}
     _dump(os.path.join(workdir, "timeline.json"), timeline)
     result = {"stage": stage, "main_product": main_product, "sections": sections,
-              "ordered_ids": ordered_ids, "total_seconds": round(total_seconds, 3)}
+              "ordered_ids": ordered_ids, "total_seconds": round(total_seconds, 3),
+              "semantic_summary": order["semantic_summary"]}
     _dump(os.path.join(workdir, "order.json"), result)
     _emit(on_stage, "order", "done",
           f"选出 {len(ordered_ids)} 段、共 {total_seconds:.2f}s；上游数据保持不变")
@@ -746,9 +788,9 @@ def run_pipeline(media: str, workdir: str, *,
     else:
         _emit(on_stage, "order",
               "start", f"AI 排序编排（目标 {target_seconds[0]:g}~{target_seconds[1]:g}s）")
-    order = ai_call(model, _order_prompt(candidates, target_seconds, product_name, available),
-                    ORDER_SCHEMA, ai_timeout)
-    ai_calls += 1
+    order = _semantic_order(candidates, model, target_seconds, product_name,
+                            target_tolerance, ai_timeout, workdir)
+    ai_calls += 3
     main_product, ordered_ids, total_seconds, sections = _validate_order(
         order, candidates, target_seconds, target_tolerance, available)
     main_product = product_name or main_product
@@ -764,6 +806,7 @@ def run_pipeline(media: str, workdir: str, *,
     _dump(os.path.join(workdir, "order.json"), {
         "stage": "order", "main_product": main_product, "sections": sections,
         "ordered_ids": ordered_ids, "total_seconds": round(total_seconds, 3),
+        "semantic_summary": order["semantic_summary"],
     })
     _emit(on_stage, "order", "done",
           f"选出 {len(ordered_clauses)} 段、共 {total_seconds:.2f}s")
@@ -791,6 +834,7 @@ def run_pipeline(media: str, workdir: str, *,
         "duration": timeline["duration"],
         "main_product": main_product,
         "order_sections": sections,
+        "semantic_summary": order["semantic_summary"],
         "ai_calls": ai_calls,
         "ai_engine": os.environ.get("PIPELINE_AI_ENGINE") or "llm",
         "ai_provider": os.environ.get("PIPELINE_AI_PROVIDER") or "auto",
@@ -820,6 +864,9 @@ def _mock_ai(model: str, prompt: str, schema: dict[str, Any],
     """仅供本地/测试的确定性替身：判定全可用，按时间序贪心凑够目标时长。"""
     import re
     ids = [int(value) for value in re.findall(r'"id":\s*(\d+)', prompt)]
+    if "groups" in schema.get("properties", {}):
+        return {"groups": [{"fact": "mock", "ids": [cid], "keep_id": cid,
+                            "reason": "mock"} for cid in ids]}
     if "decisions" in schema.get("properties", {}):
         return {"decisions": [{"id": cid, "usable": True, "reason": "mock"}
                               for cid in ids]}

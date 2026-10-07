@@ -307,9 +307,9 @@ class JobRunner:
         if not (workspace / filename).is_file():
             raise ValueError(f"{label}数据不存在，不能单独重跑该节点")
         for name in {
-            "filter": ("clauses.filtered.json", "clauses.judged.json", "order.json"),
-            "judge": ("clauses.judged.json", "order.json"),
-            "order": ("order.json",),
+            "filter": ("clauses.filtered.json", "clauses.judged.json", "order.json", "semantic-selection.json"),
+            "judge": ("clauses.judged.json", "order.json", "semantic-selection.json"),
+            "order": ("order.json", "semantic-selection.json"),
             "render": (),
         }[stage_id]:
             (workspace / name).unlink(missing_ok=True)
@@ -597,6 +597,7 @@ class JobRunner:
                 ("asr", "json", "子句时间线", workspace / "timeline.json", "application/json"),
                 ("filter", "json", "规则筛结果", workspace / "clauses.filtered.json", "application/json"),
                 ("judge", "json", "AI 判定结果", workspace / "clauses.judged.json", "application/json"),
+                ("order", "json", "语义分组与全文去重", workspace / "semantic-selection.json", "application/json"),
                 ("render", "json", "渲染清单", workspace / "manifest.json", "application/json"),
             ]
         for stage_id, kind, title, path, mime in artifacts:
@@ -649,6 +650,10 @@ class JobRunner:
         title, path = outputs[stage_id]
         if path.is_file():
             self.store.add_artifact(job_id, stage_id, "json", title, path, "application/json")
+        semantic_path = workspace / "semantic-selection.json"
+        if stage_id == "order" and semantic_path.is_file():
+            self.store.add_artifact(job_id, "order", "json", "语义分组与全文去重",
+                                    semantic_path, "application/json")
         self.store.add_event(job_id, stage_id, "success", "single_stage_completed",
                              "单节点重新执行完成", result)
         # 单节点重跑不再停在 waiting_input：自动继续到下一个节点，直到渲染出片。

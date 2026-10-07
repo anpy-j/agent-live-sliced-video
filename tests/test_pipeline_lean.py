@@ -330,10 +330,10 @@ class OrderContractTest(unittest.TestCase):
         self.assertEqual(ids, [0])
         self.assertAlmostEqual(total, 3.0)
 
-    def test_out_of_range_total_is_rejected(self):
-        with self.assertRaises(AIReturnError):
-            _validate_order(self.order([{"role": "hook", "ids": [0]}], [0]),
-                            self.candidates(), (5.0, 7.0), 1.0)
+    def test_below_target_is_accepted_with_abundant_candidates(self):
+        result = _validate_order(self.order([{"role": "hook", "ids": [0]}], [0]),
+                                 self.candidates(), (5.0, 7.0), 1.0)
+        self.assertEqual(result[2], 3.0)
 
     def test_out_of_range_id_is_rejected(self):
         with self.assertRaises(AIReturnError):
