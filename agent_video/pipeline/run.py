@@ -26,7 +26,7 @@ from .ai import (DEFAULT_TIMEOUT, DECISION_SCHEMA, ORDER_SCHEMA,
 from .errors import (AIReturnError, AsrError, PipelineError, RuleFilterEmpty,
                      TargetUnreachable)
 from .filter import activate_account_vocab, filter_clauses
-from .editorial import inventory, compose, review_and_revise, require_release, digest
+from .editorial import inventory, compose, review_and_revise, require_release, digest, dependency_blocks
 from .render import build_segments, build_virtual_segments, render_video
 from .split import DEFAULT_MAX_DURATION, DEFAULT_MIN_DURATION, split_clauses
 from .units import (DEFAULT_MERGE_MAX, DEFAULT_MERGE_MIN, DEFAULT_SILENCE_GAP,
@@ -305,8 +305,10 @@ def _semantic_order(candidates, model, target, product_name, tolerance, timeout,
     order["stage"] = "order"
     if product_name:
         order["main_product"] = product_name
-    order["semantic_summary"] = {"selected_candidates": sum(x["eligible"] for x in labels.values()),
-                                 "selection_removed": sum(not x["eligible"] for x in labels.values())}
+    feasible = dependency_blocks(candidates, labels)
+    order["semantic_summary"] = {"selected_candidates": len(feasible),
+                                 "selection_removed": len(labels) - len(feasible),
+                                 "dependency_unusable": sum(x['eligible'] for x in labels.values()) - len(feasible)}
     return order
 
 
