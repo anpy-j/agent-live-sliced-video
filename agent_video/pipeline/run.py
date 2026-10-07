@@ -27,6 +27,7 @@ from .errors import (AIReturnError, AsrError, PipelineError, RuleFilterEmpty,
                      TargetUnreachable)
 from .filter import activate_account_vocab, filter_clauses
 from .editorial import inventory, compose, review_and_revise, require_release, digest, dependency_blocks
+from .order_runtime import OrderRuntime
 from .render import build_segments, build_virtual_segments, render_video
 from .split import DEFAULT_MAX_DURATION, DEFAULT_MIN_DURATION, split_clauses
 from .units import (DEFAULT_MERGE_MAX, DEFAULT_MERGE_MIN, DEFAULT_SILENCE_GAP,
@@ -288,7 +289,7 @@ def _order_prompt(candidates: list[dict[str, Any]],
     )
 
 
-def _semantic_order(candidates, model, target, product_name, tolerance, timeout, workdir, *, call=None):
+def _semantic_order(candidates, model, target, product_name, tolerance, timeout, workdir, *, call=None, on_stage=None):
     call = call or ai_call
     audit_path = os.path.join(workdir, "review.json")
     if os.path.isfile(audit_path) and os.path.isfile(os.path.join(workdir, "order.json")):
@@ -299,9 +300,12 @@ def _semantic_order(candidates, model, target, product_name, tolerance, timeout,
         if (audit.get("source_hash") == digest({"candidates": candidates, "labels": labels, "target": target})
                 and digest(saved) in {digest(audit.get("plan")), audit.get("previous_plan_hash")}):
             return audit["plan"]
-    labels = inventory(candidates, model, timeout, call)
+    runtime = OrderRuntime(workdir, model, timeout, call,
+                           lambda message: _emit(on_stage, 'order', 'progress', message))
+    labels = runtime.labels(candidates)
     _dump(os.path.join(workdir, "semantic-selection.json"), {"labels": list(labels.values())})
-    order = compose(candidates, labels, model, timeout, call, target, tolerance, _validate_order)
+    runtime.progress('S4 正片编排：从完整依赖组挑选新信息')
+    order = compose(candidates, labels, model, timeout, runtime.invoke, target, tolerance, _validate_order)
     order["stage"] = "order"
     if product_name:
         order["main_product"] = product_name
@@ -600,7 +604,7 @@ def run_pipeline_stage(media: str, workdir: str, stage: str, *,
         _emit(on_stage, "order", "start",
               f"单独重跑 AI 排序编排（目标 {target_seconds[0]:g}~{target_seconds[1]:g}s）")
     order = _semantic_order(candidates, model, target_seconds, product_name,
-                            target_tolerance, ai_timeout, workdir)
+                            target_tolerance, ai_timeout, workdir, on_stage=on_stage)
     main_product, ordered_ids, total_seconds, sections = _validate_order(
         order, candidates, target_seconds, target_tolerance, available)
     main_product = product_name or main_product
@@ -803,7 +807,7 @@ def run_pipeline(media: str, workdir: str, *,
         editorial_calls += 1
         return ai_call(*args)
     order = _semantic_order(candidates, model, target_seconds, product_name,
-                            target_tolerance, ai_timeout, workdir, call=editorial_call)
+                            target_tolerance, ai_timeout, workdir, call=editorial_call, on_stage=on_stage)
     main_product, ordered_ids, total_seconds, sections = _validate_order(
         order, candidates, target_seconds, target_tolerance, available)
     main_product = product_name or main_product
