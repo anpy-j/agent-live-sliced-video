@@ -409,6 +409,8 @@ class JobRunner:
             self._active_stage[job_id] = stage
             if status == "start":
                 self.store.stage_start(job_id, stage, message)
+            elif status == "progress":
+                self.store.add_event(job_id, stage, "info", "stage_progress", message)
             else:
                 self.store.stage_done(job_id, stage, message)
 

@@ -22,6 +22,14 @@ def plan(ids, topics=None):
 
 
 class EditorialTest(unittest.TestCase):
+    def test_compose_collapses_equivalent_units_but_keeps_complementary_facts(self):
+        self.labels[1]['facts'] = ['0']
+        def call(model, prompt, schema, timeout):
+            data = json.loads(prompt.split('\n')[-1])
+            self.assertEqual({c['id'] for c in data['candidates']}, {0, 2, 3})
+            return plan([0, 2])
+        compose(self.candidates, self.labels, 'mock', 10, call, (10, 20), 1, _validate_order)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
