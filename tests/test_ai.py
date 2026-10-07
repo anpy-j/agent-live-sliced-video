@@ -79,7 +79,28 @@ class WorkBuddyCliTest(unittest.TestCase):
         provider = WorkBuddyCli(Path("C:/WorkBuddy/cli/bin/codebuddy"))
         with patch("agent_video.ai.sys.platform", "win32"):
             self.assertEqual(provider._command_prefix(),
-                             ["node", "C:\\WorkBuddy\\cli\\bin\\codebuddy"])
+                             ["node", "-e", "setInterval(() => {}, 1000); require(process.argv[1]);",
+                              "C:\\WorkBuddy\\cli\\bin\\codebuddy"])
+
+    def test_empty_response_preserves_diagnostics(self):
+        provider = WorkBuddyCli(Path("codebuddy"))
+        with self.assertRaises(ProviderResponseError) as caught:
+            provider._parse_response("", "startup diagnostics")
+        self.assertEqual(caught.exception.raw["stderr"], "startup diagnostics")
+
+    def test_windows_node_bootstrap_keeps_unref_work_alive(self):
+        import shutil
+        if not shutil.which("node"):
+            self.skipTest("node unavailable")
+        with tempfile.TemporaryDirectory() as tmp:
+            entry = Path(tmp) / "codebuddy"
+            entry.write_text('setTimeout(() => { console.log(JSON.stringify({ok:true})); process.exit(0); }, 50).unref();', encoding="utf-8")
+            provider = WorkBuddyCli(entry)
+            with patch("agent_video.ai.sys.platform", "win32"):
+                result = subprocess.run(provider._command_prefix(), capture_output=True,
+                                        text=True, timeout=5)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(json.loads(result.stdout), {"ok": True})
 
     def test_windows_timeout_kills_entire_provider_process_tree(self):
         provider = WorkBuddyCli(Path("C:/workbuddy.cmd"))

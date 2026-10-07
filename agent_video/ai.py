@@ -742,8 +742,22 @@ class WorkBuddyCli(CliProvider):
 
     def _command_prefix(self) -> list[str]:
         if sys.platform == "win32" and not self.executable.suffix:
-            return ["node", str(self.executable)]
+            # CLI 的异步初始化使用 unref 定时器；并发时曾在响应前因
+            # event_loop_drain 以 0 退出。保持事件循环直到 CLI 显式退出，
+            # 超时仍由 _complete 的进程树终止机制约束。
+            return ["node", "-e", "setInterval(() => {}, 1000); require(process.argv[1]);",
+                    str(self.executable)]
         return [str(self.executable)]
+
+    def _parse_response(self, stdout: str, stderr: str) -> Any:
+        try:
+            return self._parse_json(stdout)
+        except RuntimeError as exc:
+            detail = "CLI 未输出内容" if not stdout.strip() else str(exc)
+            raise ProviderResponseError(
+                f"WorkBuddy {detail}",
+                {"stdout": stdout[-100000:], "stderr": stderr[-20000:]},
+            ) from None
 
     def vision_models(self) -> list[tuple[str, str]]:
         return [(model_id, name) for model_id, name in self.models()
@@ -768,7 +782,7 @@ class WorkBuddyCli(CliProvider):
         stdout, stderr, seconds = self._complete(
             command, cwd=cwd, on_process=on_process, timeout=timeout, started=started,
             stdin_text=stdin_text)
-        envelope = self._parse_json(stdout)
+        envelope = self._parse_response(stdout, stderr)
         plan = self._find_visual_plan(envelope)
         if not plan:
             raise ProviderResponseError(
@@ -795,7 +809,7 @@ class WorkBuddyCli(CliProvider):
         stdout, stderr, seconds = self._complete(
             command, cwd=cwd, on_process=on_process, timeout=timeout, started=started,
             stdin_text=prompt)
-        envelope = self._parse_json(stdout)
+        envelope = self._parse_response(stdout, stderr)
         plan = self._find_plan(envelope)
         if not plan:
             raise ProviderResponseError(
@@ -822,7 +836,7 @@ class WorkBuddyCli(CliProvider):
         stdout, stderr, seconds = self._complete(
             command, cwd=cwd, on_process=on_process, timeout=timeout, started=started,
             stdin_text=prompt)
-        envelope = self._parse_json(stdout)
+        envelope = self._parse_response(stdout, stderr)
         data = self._find_object(envelope, required)
         if not data:
             raise ProviderResponseError(
