@@ -1,10 +1,9 @@
-"""Bound S4 work, persist completed batches and reconcile facts across batches."""
+"""Persist S4 batches and reconcile facts, without a shared stage time budget."""
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import math
 import os
 from pathlib import Path
-import time
 from threading import Event
 
 from .editorial import inventory, digest, save, obj, array, STR
@@ -12,10 +11,7 @@ from .errors import AIReturnError
 
 VERSION = 1
 FACT_SCHEMA = obj({'groups': array(obj({'keys': array(STR)}))})
-CALL_TIMEOUT = 90
 MAX_WORKERS = 6
-# Annotation and composition share one budget; the composition call still needs room.
-ANNOTATION_SHARE = 0.6
 
 
 class OrderRuntime:
@@ -23,18 +19,12 @@ class OrderRuntime:
         self.root = Path(workdir) / 's4-cache'
         self.root.mkdir(parents=True, exist_ok=True)
         self.model, self.call, self.progress = model, call, progress or (lambda _: None)
-        self.started = time.monotonic()
-        self.budget = min(timeout, 300)
-        self.deadline = self.started + self.budget
-        self.annotation_deadline = self.started + self.budget * ANNOTATION_SHARE
+        self.timeout = timeout
         self.identity = {'version': VERSION, 'model': model,
                          'provider': os.environ.get('PIPELINE_AI_PROVIDER', 'auto')}
 
-    def invoke(self, model, prompt, schema, timeout, *, deadline=None):
-        remaining = int((deadline or self.deadline) - time.monotonic())
-        if remaining < 1:
-            raise AIReturnError(f'S4 超过总时间预算 {self.budget} 秒；已完成标注已缓存')
-        return self.call(model, prompt, schema, min(timeout, remaining, CALL_TIMEOUT))
+    def invoke(self, model, prompt, schema, timeout):
+        return self.call(model, prompt, schema, min(timeout, self.timeout))
 
     def _load(self, key):
         try:
@@ -80,22 +70,18 @@ class OrderRuntime:
         stopped = Event()
         failures = []
         def annotate(batch):
-            # A batch that cannot finish in the annotation budget is dropped, not fatal:
-            # successful batches stay cached and the next rerun covers the gap.
-            limit = min(self.annotation_deadline, self.deadline)
-            if stopped.is_set() or time.monotonic() >= limit:
+            if stopped.is_set():
                 return {}, False
             rows, context, key = batch
             value = self._load(key)
             if value is not None:
                 try:
-                    return inventory(rows, self.model, CALL_TIMEOUT, lambda *args: value,
+                    return inventory(rows, self.model, self.timeout, lambda *args: value,
                                      context=context), True
                 except AIReturnError:
                     pass
             try:
-                labels = inventory(rows, self.model, CALL_TIMEOUT,
-                                   lambda *args: self.invoke(*args, deadline=limit),
+                labels = inventory(rows, self.model, self.timeout, self.invoke,
                                    context=context)
             except Exception as exc:
                 # Signal before this worker can be reused for another queued request.
@@ -104,11 +90,9 @@ class OrderRuntime:
                 return {}, False
             save(self.root / (key + '.json'), {'candidates': list(labels.values())})
             return labels, False
-        # Spread the batches over as many waves as the annotation budget allows.
-        waves = max(1, int(self.budget * ANNOTATION_SHARE) // CALL_TIMEOUT)
-        workers = min(MAX_WORKERS, max(3, math.ceil(len(batches) / waves)))
+        workers = min(MAX_WORKERS, max(3, math.ceil(len(batches) / 2)))
         self.progress(f'S4 语义标注：{len(candidates)} 段 / {len(batches)} 批 / 并发 {workers}')
-        # Provider calls honor the remaining shared deadline; collect all workers before returning.
+        # Each provider call has its own configured timeout; collect every worker.
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = [executor.submit(annotate, batch) for batch in batches]
             try:
@@ -123,7 +107,7 @@ class OrderRuntime:
         if not result:
             # Without any label there is nothing to compose from; surface the real cause.
             raise failures[0] if failures else AIReturnError(
-                f'S4 超过总时间预算 {self.budget} 秒；未完成任何语义标注')
+                'S4 未完成任何语义标注')
         missing = len(candidates) - len(result)
         if missing:
             self.progress(f'S4 语义标注降级：{missing}/{len(candidates)} 段本轮未标注，'
@@ -135,7 +119,7 @@ class OrderRuntime:
             prompt = ('将以下事实键中语义完全相同的分组，互补事实、不同对象和冲突数值不能合并。'
                       '每个输入键恰好出现一次，独立事实为单元素组。直接返回JSON，不写脚本、不调用工具。\n'
                       + json.dumps(keys, ensure_ascii=False))
-            data = self.invoke(self.model, prompt, FACT_SCHEMA, 90)
+            data = self.invoke(self.model, prompt, FACT_SCHEMA, self.timeout)
             groups = data.get('groups')
             seen, mapping = set(), {}
             if not isinstance(groups, list):
