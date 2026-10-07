@@ -281,7 +281,7 @@ class JobRunner:
         self.restart(job_id, clean=False)
 
     def rerun_stage(self, job_id: str, stage_id: str) -> None:
-        """重跑 S2/S3/S4/S6；保留上游输入并清空会失效的下游节点数据。
+        """重跑 S2/S3/S4/S5/S6；保留上游输入并清空会失效的下游节点数据。
 
         重跑选中节点后会**自动继续执行其下游节点直到出片**（见 ``_succeed_stage``），
         所以外层只需提交一次。
@@ -289,8 +289,8 @@ class JobRunner:
         job = self.store.get_job(job_id)
         if not job:
             raise KeyError("任务不存在")
-        if stage_id not in {"filter", "judge", "order", "render"}:
-            raise ValueError("仅支持重新执行 S2、S3、S4 或渲染")
+        if stage_id not in {"filter", "judge", "order", "review", "render"}:
+            raise ValueError("仅支持重新执行 S2、S3、S4、S5 或渲染")
         if job["status"] in {"queued", "running"}:
             self.cancel(job_id)
             with self._condition:
@@ -301,15 +301,17 @@ class JobRunner:
             "filter": ("clauses.json", "S1 语音转写与切分"),
             "judge": ("clauses.filtered.json", "S2 规则粗筛"),
             "order": ("clauses.judged.json", "S3 AI 可用性判定"),
+            "review": ("order.json", "S4 AI 精选编排"),
             "render": ("order.json", "S4 AI 排序编排"),
         }
         filename, label = required[stage_id]
         if not (workspace / filename).is_file():
             raise ValueError(f"{label}数据不存在，不能单独重跑该节点")
         for name in {
-            "filter": ("clauses.filtered.json", "clauses.judged.json", "order.json"),
-            "judge": ("clauses.judged.json", "order.json"),
-            "order": ("order.json",),
+            "filter": ("clauses.filtered.json", "clauses.judged.json", "order.json", "semantic-selection.json", "review.json"),
+            "judge": ("clauses.judged.json", "order.json", "semantic-selection.json", "review.json"),
+            "order": ("order.json", "semantic-selection.json", "review.json"),
+            "review": (),
             "render": (),
         }[stage_id]:
             (workspace / name).unlink(missing_ok=True)
@@ -597,6 +599,8 @@ class JobRunner:
                 ("asr", "json", "子句时间线", workspace / "timeline.json", "application/json"),
                 ("filter", "json", "规则筛结果", workspace / "clauses.filtered.json", "application/json"),
                 ("judge", "json", "AI 判定结果", workspace / "clauses.judged.json", "application/json"),
+                ("order", "json", "语义分组与全文去重", workspace / "semantic-selection.json", "application/json"),
+                ("review", "json", "正片文本筛查记录", workspace / "review.json", "application/json"),
                 ("render", "json", "渲染清单", workspace / "manifest.json", "application/json"),
             ]
         for stage_id, kind, title, path, mime in artifacts:
@@ -645,14 +649,19 @@ class JobRunner:
             "filter": ("规则筛结果", workspace / "clauses.filtered.json"),
             "judge": ("AI 判定结果", workspace / "clauses.judged.json"),
             "order": ("AI 编排结果", workspace / "order.json"),
+            "review": ("正片文本筛查记录", workspace / "review.json"),
         }
         title, path = outputs[stage_id]
         if path.is_file():
             self.store.add_artifact(job_id, stage_id, "json", title, path, "application/json")
+        semantic_path = workspace / "semantic-selection.json"
+        if stage_id == "order" and semantic_path.is_file():
+            self.store.add_artifact(job_id, "order", "json", "语义分组与全文去重",
+                                    semantic_path, "application/json")
         self.store.add_event(job_id, stage_id, "success", "single_stage_completed",
                              "单节点重新执行完成", result)
         # 单节点重跑不再停在 waiting_input：自动继续到下一个节点，直到渲染出片。
-        next_stage = {"filter": "judge", "judge": "order", "order": "render"}[stage_id]
+        next_stage = {"filter": "judge", "judge": "order", "order": "review", "review": "render"}[stage_id]
         self.store.prepare_stage_rerun(job_id, next_stage)
         self._enqueue(job_id, event=False)
 

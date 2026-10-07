@@ -16,7 +16,8 @@ STAGE_DEFINITIONS = [
     ("asr", "语音转写与切分", 20),
     ("filter", "规则粗筛", 40),
     ("judge", "AI 可用性判定", 60),
-    ("order", "AI 排序编排", 80),
+    ("order", "AI 精选编排", 75),
+    ("review", "AI 正片文本筛查", 90),
     ("render", "渲染成片", 100),
 ]
 
@@ -190,6 +191,12 @@ class Store:
                 con.execute("ALTER TABLE jobs ADD COLUMN edit_count INTEGER NOT NULL DEFAULT 0")
             if "delivered" not in columns:
                 con.execute("ALTER TABLE jobs ADD COLUMN delivered INTEGER NOT NULL DEFAULT 0")
+            # Add S5 in place: preserve historic jobs, artifacts and completed videos.
+            con.execute("INSERT OR IGNORE INTO stages(job_id,stage_id,name,position,status) "
+                        "SELECT id,'review','AI 正片文本筛查',90,"
+                        "CASE WHEN status='completed' THEN 'succeeded' "
+                        "ELSE 'pending' END FROM jobs WHERE job_type!='remix'")
+            con.execute("UPDATE stages SET position=75 WHERE stage_id='order'")
 
     def create_job(self, *, title: str, source_path: str, workspace: str,
                    job_type: str = "direct", timeline_meta: dict[str, Any] | None = None,
@@ -211,7 +218,8 @@ class Store:
             )
             con.executemany(
                 "INSERT INTO stages(job_id,stage_id,name,position) VALUES(?,?,?,?)",
-                [(job_id, stage_id, name, position) for stage_id, name, position in STAGE_DEFINITIONS],
+                [(job_id, stage_id, name, position) for stage_id, name, position in STAGE_DEFINITIONS
+                 if not (job_type == "remix" and stage_id == "review")],
             )
         event_payload: dict[str, Any] = {
             "source_path": source_path,
@@ -336,7 +344,7 @@ class Store:
     def prepare_stage_rerun(self, job_id: str, stage_id: str) -> None:
         """重置目标节点及其下游状态，同时保留上游状态和历史渲染产物。"""
         positions = {sid: position for sid, _, position in STAGE_DEFINITIONS}
-        if stage_id not in {"filter", "judge", "order", "render"}:
+        if stage_id not in {"filter", "judge", "order", "review", "render"}:
             raise ValueError(f"不支持单节点重跑：{stage_id}")
         position = positions[stage_id]
         previous_progress = max((pos for pos in positions.values() if pos < position), default=0)

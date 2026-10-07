@@ -3,7 +3,7 @@ const $$ = (selector, root=document) => [...root.querySelectorAll(selector)];
 const app = $('#app');
 const state = { dashboard:null, job:null, poll:null, mcp:null, selectedStage:null, jianying:null, jianyingAbort:null, label:{session:null,decisions:{},sel:{},patch:null}, clausesJob:null, clausesData:null, clausesFilter:'s2' };
 const labels = {queued:'排队中',running:'执行中',waiting_input:'待继续',completed:'已完成',failed:'执行失败',cancelled:'已取消',pending:'等待',succeeded:'完成'};
-const stageLabels = {asr:'语音转写与切分',filter:'规则粗筛',judge:'AI 可用性判定',order:'AI 排序编排',render:'渲染成片'};
+const stageLabels = {asr:'语音转写与切分',filter:'规则粗筛',judge:'AI 可用性判定',order:'AI 精选编排',review:'AI 正片文本筛查',render:'渲染成片'};
 const reasonLabels = {too_short:'文本过短',non_chinese:'中文占比低',duration_gate:'时长不足',hard_vocab:'违禁词',stage_chatter:'场控话术',malformed_speech:'病句/口误',duplicate:'重复',literal_duplicate:'字面重复',semantic_duplicate:'语义重复',invalid_bounds:'时间异常'};
 const icons = {
   video:'<svg viewBox="0 0 24 24"><rect x="3" y="5" width="14" height="14" rx="2"/><path d="m17 10 4-2v8l-4-2z"/></svg>',
@@ -254,7 +254,7 @@ function stageDetailHtml(job){
   if(!stage)return `<div class="empty">${icons.empty}<h3>暂无节点</h3><p>任务尚未初始化流程节点。</p></div>`;
   const events=job.events.filter(e=>e.stage_id===id),artifacts=job.artifacts.filter(a=>a.stage_id===id),isCurrent=job.current_stage===id&&jobFlags(job).active,runtime=job.runtime||{};
   const runState=isCurrent?(runtime.process_active?'本地子进程正在执行':runtime.worker_alive?'工作进程正在处理':'后台服务未运行'):(labels[stage.status]||stage.status);
-  const rerunnable=job.job_type!=='remix'&&['filter','judge','order','render'].includes(id),index=job.stages.indexOf(stage),upstreamReady=index>0&&job.stages[index-1].status==='succeeded';
+  const rerunnable=job.job_type!=='remix'&&['filter','judge','order','review','render'].includes(id),index=job.stages.indexOf(stage),upstreamReady=index>0&&job.stages[index-1].status==='succeeded';
   const canRerun=rerunnable&&upstreamReady&&!jobFlags(job).active;
   const actionLabel=id==='render'?(stage.status==='succeeded'?'重新渲染成片':'渲染成片'):(stage.status==='succeeded'?'重新执行此节点':'执行此节点');
   return `<div class="stage-detail-head"><div><span class="eyebrow">NODE ${String(index+1).padStart(2,'0')}</span><h2>${escapeHtml(jobStageLabel(job,stage.stage_id,stage.name))}</h2><p>${escapeHtml(stage.error||stage.message||'等待上游节点完成')}</p></div><div class="stage-detail-actions"><span class="runtime-state ${isCurrent&&runtime.worker_alive?'live':''}"><i></i>${escapeHtml(runState)}</span>${canRerun?`<button class="button ghost small" data-rerun-stage="${escapeHtml(id)}">${actionLabel}</button>`:''}</div></div>

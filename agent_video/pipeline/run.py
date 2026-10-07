@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """精简管线编排 + 独立入口。
 
-一条命令：ASR → 规则筛 → 2 次无状态 AI 判定/排序 → 按时间戳切 → ffmpeg 拼接。
+一条命令：ASR → 规则筛 → AI 判定 → 语义分组/编排/复审 → 按时间戳切 → ffmpeg 拼接。
 
     python -m agent_video.pipeline.run --media /abs/素材.mp4 --workdir /abs/out
 
@@ -26,13 +26,14 @@ from .ai import (DEFAULT_TIMEOUT, DECISION_SCHEMA, ORDER_SCHEMA,
 from .errors import (AIReturnError, AsrError, PipelineError, RuleFilterEmpty,
                      TargetUnreachable)
 from .filter import activate_account_vocab, filter_clauses
+from .editorial import inventory, compose, review_and_revise, require_release, digest
 from .render import build_segments, build_virtual_segments, render_video
 from .split import DEFAULT_MAX_DURATION, DEFAULT_MIN_DURATION, split_clauses
 from .units import (DEFAULT_MERGE_MAX, DEFAULT_MERGE_MIN, DEFAULT_SILENCE_GAP,
                     build_units, order_candidates)
 
 DEFAULT_TARGET = (70.0, 90.0)
-# 超过这个长度的句单元不拆散：成片总时长允许相应超出目标上限，由人工再剪。
+# 超过这个长度的完整句单元不拆散，允许相应的时长溢出。
 LONG_UNIT_SECONDS = 6.0
 # S3 单次 AI 调用的子句上限：一次编排 400 条会超时，按批切分。
 DEFAULT_JUDGE_BATCH = 120
@@ -59,7 +60,7 @@ def _dump(path: str, value: Any) -> None:
         json.dump(value, handle, ensure_ascii=False, indent=1)
 
 
-def _load_required(path: str, label: str) -> dict[str, Any]:
+def _load_required(path: str, label: str, field: str = "clauses") -> dict[str, Any]:
     if not os.path.isfile(path):
         raise PipelineError(f"{label} 不存在，无法单独重跑当前节点：{path}")
     try:
@@ -67,7 +68,7 @@ def _load_required(path: str, label: str) -> dict[str, Any]:
             value = json.load(handle)
     except (OSError, ValueError) as exc:
         raise PipelineError(f"{label} 无法读取：{exc}") from exc
-    if not isinstance(value, dict) or not isinstance(value.get("clauses"), list):
+    if not isinstance(value, dict) or not isinstance(value.get(field), list):
         raise PipelineError(f"{label} 数据格式无效")
     return value
 
@@ -253,7 +254,7 @@ def _order_prompt(candidates: list[dict[str, Any]],
     if available is not None and available < low:
         short_note = (
             f"注意：可用句单元总时长仅 {available:.2f} 秒，已低于目标下限 {low:g} 秒；"
-            "请把可用句单元尽量全部选上，成片时长以实际可用为准。\n")
+            "只选有新增信息的优质句单元，允许短片，不必全部选上。\n")
     return (
         "直接分析并输出结果，不要调用任何工具或执行命令行。\n"
         "你在把已判定可用的口播句单元，编成一条可直接发布到抖音的短视频，"
@@ -273,7 +274,8 @@ def _order_prompt(candidates: list[dict[str, Any]],
         "- ordered_ids = 各 section 的 ids 依次拼接，必须与 sections 完全一致"
         "（不新增、不遗漏、不重复）；\n"
         "- 所有 id 只能取自输入，不得越界；\n"
-        f"- 总时长（所选 id 的 seconds 之和）落在 {low:g}~{high:g} 秒；单个超过 "
+        f"- 总时长期望落在 {low:g}~{high:g} 秒；下限只是期望，允许低于下限，"
+        "严禁为凑时长加入重复、空泛或次要话术；质量优先。单个超过 "
         f"{LONG_UNIT_SECONDS:g} 秒的句单元可正常选中，此时总时长允许相应超出上限"
         "（超出的部分交人工再剪）；\n"
         f"{short_note}"
@@ -284,6 +286,38 @@ def _order_prompt(candidates: list[dict[str, Any]],
         f"{product_line}"
         f"可用句单元（按时间序，JSON）：\n{json.dumps(payload, ensure_ascii=False)}"
     )
+
+
+def _semantic_order(candidates, model, target, product_name, tolerance, timeout, workdir, *, call=None):
+    call = call or ai_call
+    audit_path = os.path.join(workdir, "review.json")
+    if os.path.isfile(audit_path) and os.path.isfile(os.path.join(workdir, "order.json")):
+        audit = _load_required(audit_path, "S5记录", "attempts")
+        data = _load_required(os.path.join(workdir, "semantic-selection.json"), "S4信息标注", "labels")
+        labels = {x["id"]: x for x in data["labels"]}
+        saved = _load_required(os.path.join(workdir, "order.json"), "S4编排", "ordered_ids")
+        if (audit.get("source_hash") == digest({"candidates": candidates, "labels": labels, "target": target})
+                and digest(saved) in {digest(audit.get("plan")), audit.get("previous_plan_hash")}):
+            return audit["plan"]
+    labels = inventory(candidates, model, timeout, call)
+    _dump(os.path.join(workdir, "semantic-selection.json"), {"labels": list(labels.values())})
+    order = compose(candidates, labels, model, timeout, call, target, tolerance, _validate_order)
+    order["stage"] = "order"
+    if product_name:
+        order["main_product"] = product_name
+    order["semantic_summary"] = {"selected_candidates": sum(x["eligible"] for x in labels.values()),
+                                 "selection_removed": sum(not x["eligible"] for x in labels.values())}
+    return order
+
+
+def _review_plan(order, candidates, model, target, tolerance, timeout, workdir, on_stage, *, call=None):
+    _emit(on_stage, "review", "start", "AI正片文本筛查（最多三次，自动修订）")
+    data = _load_required(os.path.join(workdir, "semantic-selection.json"), "S4信息标注", "labels")
+    labels = {x["id"]: x for x in data["labels"]}
+    state = review_and_revise(order, candidates, labels, model, timeout, call or ai_call,
+                              target, tolerance, _validate_order, workdir)
+    _emit(on_stage, "review", "done", f"正片文本筛查完成：{state['released']}，{len(state['attempts'])}次")
+    return state
 
 
 def _validate_decisions(data: dict[str, Any],
@@ -374,14 +408,11 @@ def _validate_order(data: dict[str, Any], candidates: list[dict[str, Any]],
         raise AIReturnError("S4 ordered_ids 与 sections 的 ids 拼接不一致")
     total = sum(_duration(by_id[cid]) for cid in seen)
     low, high = target
-    # 超过 6s 的句单元不拆散：它带来的超长允许顶高总时长上限，交由人工再剪。
+    # 超过 6s 的完整句单元不拆散，容忍其带来的小幅溢出。
     overflow = sum(max(0.0, _duration(by_id[cid]) - LONG_UNIT_SECONDS)
                    for cid in seen if _duration(by_id[cid]) > LONG_UNIT_SECONDS)
-    # 可用素材本身就不够目标下限时，不允许因"时长不足"中断任务：把下限放宽到实际可用量。
-    floor = low - tolerance
-    if available is not None and available < floor:
-        floor = available
-    if total < floor or total > high + tolerance + overflow:
+    # 下限只是期望；优质短片允许出片，上限仍受长单元溢出规则约束。
+    if total <= 0 or total > high + tolerance + overflow:
         raise AIReturnError(
             f"S4 排序总时长 {total:.2f}s 不在目标 {low:g}~{high:g}s 内"
             f"（长单元溢出容忍 {overflow:.2f}s）")
@@ -407,8 +438,8 @@ def run_pipeline_stage(media: str, workdir: str, stage: str, *,
                        | None = None,
                        on_stage: StageCallback | None = None,
                        virtual_timeline: Any | None = None) -> dict[str, Any]:
-    """只重跑 S2/S3/S4/S6 中的一个节点，并严格复用其上游落盘数据。"""
-    if stage not in {"filter", "judge", "order", "render"}:
+    """只重跑 S2/S3/S4/S5/S6 中的一个节点，并复用其上游落盘数据。"""
+    if stage not in {"filter", "judge", "order", "review", "render"}:
         raise PipelineError(f"不支持单节点重跑：{stage}")
     media = os.path.abspath(media)
     workdir = os.path.abspath(workdir)
@@ -480,6 +511,19 @@ def run_pipeline_stage(media: str, workdir: str, stage: str, *,
               f"AI 判定后剩 {len(judged)} 条可用子句；S4 已清空")
         return {"stage": stage, "usable": len(judged), "candidates": len(candidates)}
 
+    if stage == "review":
+        judged = _load_required(os.path.join(workdir, "timeline.json"), "S3数据")
+        candidates = order_candidates([c for c in judged["clauses"] if c.get("usable")])
+        order = _load_required(os.path.join(workdir, "order.json"), "S4编排", "ordered_ids")
+        state = _review_plan(order, candidates, model, target_seconds, target_tolerance,
+                             ai_timeout, workdir, on_stage)
+        member_positions = {member: index for index, cid in enumerate(state["plan"]["ordered_ids"])
+                            for member in next(c for c in candidates if c["id"] == cid).get("members", [cid])}
+        for clause in judged["clauses"]:
+            clause["order"] = member_positions.get(clause["id"])
+        _dump(os.path.join(workdir, "timeline.json"), judged)
+        return state
+
     if stage == "render":
         judged_data = _load_required(os.path.join(workdir, "timeline.json"), "S3 AI 判定数据")
         clauses = copy.deepcopy(judged_data["clauses"])
@@ -493,6 +537,7 @@ def run_pipeline_stage(media: str, workdir: str, stage: str, *,
                 order_data = json.load(handle)
         except (OSError, ValueError) as exc:
             raise PipelineError(f"S4 排序结果无法读取：{exc}") from exc
+        release = require_release(order_data, workdir, candidates)
         position = {cid: index for index, cid
                     in enumerate(order_data.get("ordered_ids") or [])}
         by_id = {candidate["id"]: candidate for candidate in candidates}
@@ -517,6 +562,9 @@ def run_pipeline_stage(media: str, workdir: str, stage: str, *,
             "duration": float(judged_data.get("duration") or 0.0),
             "main_product": order_data.get("main_product") or "",
             "order_sections": order_data.get("sections") or [],
+            "semantic_summary": order_data.get("semantic_summary") or {},
+            "review_release": release["released"],
+            "review_attempts": len(release["attempts"]),
             "ai_calls": 0,
             "ai_engine": os.environ.get("PIPELINE_AI_ENGINE") or "llm",
             "ai_provider": os.environ.get("PIPELINE_AI_PROVIDER") or "auto",
@@ -549,8 +597,8 @@ def run_pipeline_stage(media: str, workdir: str, stage: str, *,
     else:
         _emit(on_stage, "order", "start",
               f"单独重跑 AI 排序编排（目标 {target_seconds[0]:g}~{target_seconds[1]:g}s）")
-    order = ai_call(model, _order_prompt(candidates, target_seconds, product_name, available),
-                    ORDER_SCHEMA, ai_timeout)
+    order = _semantic_order(candidates, model, target_seconds, product_name,
+                            target_tolerance, ai_timeout, workdir)
     main_product, ordered_ids, total_seconds, sections = _validate_order(
         order, candidates, target_seconds, target_tolerance, available)
     main_product = product_name or main_product
@@ -562,8 +610,9 @@ def run_pipeline_stage(media: str, workdir: str, stage: str, *,
     timeline = {"source": media, "duration": float(judged_data.get("duration") or 0.0),
                 "clauses": clauses}
     _dump(os.path.join(workdir, "timeline.json"), timeline)
-    result = {"stage": stage, "main_product": main_product, "sections": sections,
-              "ordered_ids": ordered_ids, "total_seconds": round(total_seconds, 3)}
+    result = {**order, "stage": stage, "main_product": main_product, "sections": order["sections"],
+              "ordered_ids": ordered_ids, "total_seconds": round(total_seconds, 3),
+              "semantic_summary": order["semantic_summary"]}
     _dump(os.path.join(workdir, "order.json"), result)
     _emit(on_stage, "order", "done",
           f"选出 {len(ordered_ids)} 段、共 {total_seconds:.2f}s；上游数据保持不变")
@@ -746,9 +795,13 @@ def run_pipeline(media: str, workdir: str, *,
     else:
         _emit(on_stage, "order",
               "start", f"AI 排序编排（目标 {target_seconds[0]:g}~{target_seconds[1]:g}s）")
-    order = ai_call(model, _order_prompt(candidates, target_seconds, product_name, available),
-                    ORDER_SCHEMA, ai_timeout)
-    ai_calls += 1
+    editorial_calls = 0
+    def editorial_call(*args):
+        nonlocal editorial_calls
+        editorial_calls += 1
+        return ai_call(*args)
+    order = _semantic_order(candidates, model, target_seconds, product_name,
+                            target_tolerance, ai_timeout, workdir, call=editorial_call)
     main_product, ordered_ids, total_seconds, sections = _validate_order(
         order, candidates, target_seconds, target_tolerance, available)
     main_product = product_name or main_product
@@ -762,11 +815,27 @@ def run_pipeline(media: str, workdir: str, *,
                              key=lambda candidate: position[candidate["id"]])
     _dump(os.path.join(workdir, "timeline.json"), timeline)
     _dump(os.path.join(workdir, "order.json"), {
-        "stage": "order", "main_product": main_product, "sections": sections,
+        **order, "stage": "order", "main_product": main_product, "sections": order["sections"],
         "ordered_ids": ordered_ids, "total_seconds": round(total_seconds, 3),
+        "semantic_summary": order["semantic_summary"],
     })
     _emit(on_stage, "order", "done",
           f"选出 {len(ordered_clauses)} 段、共 {total_seconds:.2f}s")
+
+    saved_order = _load_required(os.path.join(workdir, "order.json"), "S4编排", "ordered_ids")
+    release = _review_plan(saved_order, candidates, model, target_seconds, target_tolerance,
+                           ai_timeout, workdir, on_stage, call=editorial_call)
+    ai_calls += editorial_calls
+    order = release["plan"]
+    main_product, ordered_ids, total_seconds, sections = _validate_order(
+        order, candidates, target_seconds, target_tolerance)
+    position = {cid: index for index, cid in enumerate(ordered_ids)}
+    for clause in clauses:
+        clause["order"] = position.get(member_candidate.get(clause["id"]))
+    ordered_clauses = sorted((c for c in candidates if c["id"] in position),
+                             key=lambda c: position[c["id"]])
+    _dump(os.path.join(workdir, "timeline.json"), timeline)
+    require_release(order, workdir, candidates)
 
     # S6 —— 渲染（确定性）
     _emit(on_stage, "render", "start", "ffmpeg 逐段剪切并拼接")
@@ -790,7 +859,10 @@ def run_pipeline(media: str, workdir: str, *,
         "virtual_timeline": virtual_timeline.to_dict() if virtual_timeline else None,
         "duration": timeline["duration"],
         "main_product": main_product,
-        "order_sections": sections,
+        "order_sections": order["sections"],
+        "semantic_summary": order["semantic_summary"],
+        "review_release": release["released"],
+        "review_attempts": len(release["attempts"]),
         "ai_calls": ai_calls,
         "ai_engine": os.environ.get("PIPELINE_AI_ENGINE") or "llm",
         "ai_provider": os.environ.get("PIPELINE_AI_PROVIDER") or "auto",
@@ -820,9 +892,33 @@ def _mock_ai(model: str, prompt: str, schema: dict[str, Any],
     """仅供本地/测试的确定性替身：判定全可用，按时间序贪心凑够目标时长。"""
     import re
     ids = [int(value) for value in re.findall(r'"id":\s*(\d+)', prompt)]
+    if "groups" in schema.get("properties", {}):
+        return {"groups": [{"fact": "mock", "ids": [cid], "keep_id": cid,
+                            "reason": "mock"} for cid in ids]}
     if "decisions" in schema.get("properties", {}):
         return {"decisions": [{"id": cid, "usable": True, "reason": "mock"}
                               for cid in ids]}
+    if "candidates" in schema.get("properties", {}):
+        return {"candidates": [{"id": cid, "topic": "fabric", "facts": [str(cid)],
+                                "subject": "mock", "eligible": True, "requires": [],
+                                "reason": "mock"} for cid in ids]}
+    if "passed" in schema.get("properties", {}):
+        return {"passed": True, "issues": []}
+    if "opening_topic" in schema.get("properties", {}):
+        data = json.loads(prompt.split("\n")[-1])
+        chosen, total = [], 0.0
+        low, high = data["target"]
+        for candidate in data["candidates"]:
+            if total + candidate["seconds"] <= high:
+                chosen.append(candidate["id"])
+                total += candidate["seconds"]
+            if total >= low:
+                break
+        if not chosen and data["candidates"]:
+            chosen = [data["candidates"][0]["id"]]
+        return {"main_product": "主商品", "opening_topic": "fabric",
+                "sections": [{"role": "hook", "topic": "fabric", "ids": chosen}],
+                "ordered_ids": chosen}
     seconds = {int(cid): float(value) for cid, value in
                re.findall(r'"id":\s*(\d+),\s*"text":\s*"[^"]*",\s*"seconds":\s*([\d.]+)', prompt)}
     match = re.search(r"落在\s*([\d.]+)~([\d.]+)\s*秒", prompt)
@@ -850,7 +946,7 @@ def _parse_target(value: str) -> tuple[float, float]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="精简切片管线（ASR→筛→2次AI→切→渲染）")
+    parser = argparse.ArgumentParser(description="自动切片管线（S1–S6，含正片文本筛查）")
     parser.add_argument("--media", required=True)
     parser.add_argument("--workdir", required=True)
     parser.add_argument("--target", type=_parse_target, default=DEFAULT_TARGET,
@@ -881,7 +977,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--words-json", help="复用已有词级时间戳，跳过 ASR")
     parser.add_argument("--sentences-json", help="复用已有句级分段（仅用于 split_from）")
     parser.add_argument("--mock-ai", action="store_true",
-                        help="用确定性替身替代 2 次 AI 调用（仅用于本地/CI 打通链路）")
+                        help="用确定性替身替代 AI 调用（仅用于本地/CI 打通链路）")
     args = parser.parse_args(argv)
 
     if args.mock_ai:

@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 from agent_video.pipeline import run as pipeline_run
 from agent_video.pipeline.ai import DECISION_SCHEMA
+from agent_video.pipeline.editorial import INVENTORY_SCHEMA, PLAN_SCHEMA, REVIEW_SCHEMA
 from agent_video.pipeline.errors import (AIReturnError, AsrError, RenderError,
                                          RuleFilterEmpty)
 from agent_video.pipeline.render import build_segments
@@ -45,14 +46,18 @@ def make_media(path):
 
 
 def fake_ai(model, prompt, schema, timeout):
-    import re
     ids = [int(value) for value in re.findall(r'"id": (\d+)', prompt)]
+    if schema is INVENTORY_SCHEMA:
+        return {"candidates": [{"id": cid, "topic": "fabric", "facts": [str(cid)],
+                "subject": "马甲", "eligible": True, "requires": [], "reason": "独立信息"} for cid in ids]}
+    if schema is REVIEW_SCHEMA:
+        return {"passed": True, "issues": []}
     if schema is DECISION_SCHEMA:
-        return {"decisions": [{"id": cid, "usable": True, "reason": "mock 可用"}
-                              for cid in ids]}
-    return {"main_product": "马甲",
-            "sections": [{"role": "hook", "ids": ids}],
-            "ordered_ids": ids}
+        return {"decisions": [{"id": cid, "usable": True, "reason": "mock 可用"} for cid in ids]}
+    data = json.loads(prompt.splitlines()[-1])
+    ids = [c["id"] for c in data["candidates"]]
+    return {"main_product": "马甲", "opening_topic": "fabric",
+            "sections": [{"role": "hook", "topic": "fabric", "ids": ids}], "ordered_ids": ids}
 
 
 @unittest.skipUnless(FFMPEG, "ffmpeg 不可用")
@@ -69,11 +74,30 @@ class LeanPipelineEndToEndTest(unittest.TestCase):
         kwargs.setdefault("target_seconds", (8.0, 9.0))
         return pipeline_run.run_pipeline(self.media, self.workdir, **kwargs)
 
-    def test_golden_path_renders_final_mp4_with_two_ai_calls(self):
+    def test_semantic_selection_removes_duplicate_from_render_and_keeps_new_fact(self):
+        words = [{"w": "百分百羊毛。", "s": 0., "e": 2.},
+                 {"w": "纯羊毛材质。", "s": 3., "e": 5.},
+                 {"w": "贴身不会扎皮肤。", "s": 6., "e": 8.}]
+        def semantic_ai(model, prompt, schema, timeout):
+            if schema is INVENTORY_SCHEMA:
+                data = fake_ai(model, prompt, schema, timeout)
+                data["candidates"][1]["eligible"] = False
+                return data
+            return fake_ai(model, prompt, schema, timeout)
+        with patch.object(pipeline_run, "ai_call", side_effect=semantic_ai):
+            manifest = self.run_pipeline(transcript=([], words), target_seconds=(120., 180.))
+        self.assertEqual([s["id"] for s in manifest["segments"]], [0, 2])
+        self.assertEqual(manifest["total_seconds"], 4.)
+        self.assertEqual(manifest["semantic_summary"]["selection_removed"], 1)
+        self.assertTrue(Path(self.workdir, manifest["output"]).is_file())
+        timeline = json.loads(Path(self.workdir, "timeline.json").read_text("utf8"))
+        self.assertIsNone(timeline["clauses"][1]["order"])
+
+    def test_golden_path_renders_final_mp4_with_semantic_selection_and_review(self):
         with patch.object(pipeline_run, "ai_call", side_effect=fake_ai) as mocked:
             manifest = self.run_pipeline()
-        self.assertEqual(manifest["ai_calls"], 2)
-        self.assertEqual(mocked.call_count, 2)
+        self.assertEqual(manifest["ai_calls"], 4)
+        self.assertEqual(mocked.call_count, 4)
         self.assertEqual(manifest["judge_concurrency"], 1)
         self.assertEqual(manifest["judge_retries"], 1)
         self.assertEqual(manifest["main_product"], "马甲")
@@ -112,7 +136,7 @@ class LeanPipelineEndToEndTest(unittest.TestCase):
         with patch.object(pipeline_run, "ai_call", side_effect=flaky):
             manifest = self.run_pipeline(judge_retries=1)
         self.assertEqual(manifest["judge_retries"], 1)
-        self.assertEqual(manifest["ai_calls"], 3)  # 1 次失败 + 1 次重试 + 1 次排序
+        self.assertEqual(manifest["ai_calls"], 5)  # 判定失败/重试 + 分组/排序/复审
         self.assertTrue(os.path.isfile(os.path.join(self.workdir, manifest["output"])))
 
     def test_contiguous_fragments_merge_and_long_unit_extends_duration(self):
@@ -168,9 +192,7 @@ class LeanPipelineEndToEndTest(unittest.TestCase):
             if schema is DECISION_SCHEMA:
                 return {"decisions": [{"id": cid, "usable": cid == ids[0], "reason": "keep one"}
                                       for cid in ids]}
-            return {"main_product": "马甲",
-                    "sections": [{"role": "hook", "ids": ids}],
-                    "ordered_ids": ids}
+            return fake_ai(model, prompt, schema, timeout)
 
         with patch.object(pipeline_run, "ai_call", side_effect=only_first):
             manifest = self.run_pipeline()
@@ -261,6 +283,8 @@ class LeanPipelineEndToEndTest(unittest.TestCase):
         self.assertEqual(s2_path.read_bytes(), s2_before)
         self.assertEqual(s3_path.read_bytes(), s3_before)
 
+        with patch.object(pipeline_run, "ai_call", side_effect=fake_ai):
+            pipeline_run.run_pipeline_stage(self.media, self.workdir, "review", target_seconds=(8.0, 9.0))
         order_path = Path(self.workdir) / "order.json"
         order_before = order_path.read_bytes()
         with patch.object(pipeline_run, "ai_call") as ai:
