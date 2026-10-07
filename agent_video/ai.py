@@ -970,9 +970,10 @@ class CodexCli(CliProvider):
                 command.extend(["--image", str(image_path.resolve())])
             if model != "auto":
                 command.extend(["--model", model])
-            command.append(prompt)
+            command.append("-")
             stdout, stderr, seconds = self._complete(
-                command, cwd=temp, on_process=on_process, timeout=timeout, started=started)
+                command, cwd=temp, on_process=on_process, timeout=timeout, started=started,
+                stdin_text=prompt)
             if not output_path.is_file():
                 raise RuntimeError("Codex 已结束，但没有生成多模态混剪结果")
             plan = self._parse_json(output_path.read_text(encoding="utf-8"))
@@ -1008,9 +1009,10 @@ class CodexCli(CliProvider):
             ]
             if model != "auto":
                 command.extend(["--model", model])
-            command.append(prompt)
+            command.append("-")
             stdout, stderr, seconds = self._complete(
-                command, cwd=temp, on_process=on_process, timeout=timeout, started=started)
+                command, cwd=temp, on_process=on_process, timeout=timeout, started=started,
+                stdin_text=prompt)
             if not output_path.is_file():
                 raise RuntimeError("Codex 已结束，但没有生成结构化编排结果")
             plan = self._parse_json(output_path.read_text(encoding="utf-8"))
@@ -1046,9 +1048,12 @@ class CodexCli(CliProvider):
             ]
             if model != "auto":
                 command.extend(["--model", model])
-            command.append(prompt)
+            # Keep the Windows command line bounded even for full candidate pools.
+            # Codex's explicit '-' positional prompt reads UTF-8 from stdin.
+            command.append("-")
             stdout, stderr, seconds = self._complete(
-                command, cwd=temp, on_process=on_process, timeout=timeout, started=started)
+                command, cwd=temp, on_process=on_process, timeout=timeout, started=started,
+                stdin_text=prompt)
             if not output_path.is_file():
                 raise ProviderResponseError(
                     "Codex 已结束，但没有生成结构化结果",
