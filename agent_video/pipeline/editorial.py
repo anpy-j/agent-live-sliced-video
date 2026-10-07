@@ -48,7 +48,7 @@ def payload(candidates):
     return [{"id": c["id"], "text": c["text"],
              "seconds": round(c["end"] - c["start"], 3)} for c in candidates]
 
-def inventory(candidates, model, timeout, call):
+def inventory(candidates, model, timeout, call, *, context=None):
     prompt = (
         "分析全部S3候选，不固定商品名称，不改写原话。为每个id给出结构化信息标注。"
         "eligible只放行有独立信息价值且可用于本片的表达；纯夸赞、Sales/大货故事、"
@@ -58,11 +58,15 @@ def inventory(candidates, model, timeout, call):
         "topic为fabric面料、fit版型、wearing上身感受、styling搭配、color颜色、"
         "care养护或other。主主题只能一个，混合句谨慎处理。requires列出不可分离的上下文补全句id："
         "当前句所需的前句或后句id，依赖组保持原素材时间顺序，不把前句移到后面；独立完整句为空。"
-        "每个输入id恰好标注一次，不得新增或遗漏。\n候选JSON：\n"
+        "每个输入id恰好标注一次，不得新增或遗漏。直接返回紧凑JSON，不写脚本、不调用工具。"
+        "reason用一句短语。上下文仅供判断依赖，不输出上下文的标注。\n候选JSON：\n"
         + json.dumps(payload(candidates), ensure_ascii=False))
+    if context:
+        prompt += '\n上下文JSON：\n' + json.dumps(payload(context), ensure_ascii=False)
     data = call(model, prompt, INVENTORY_SCHEMA, timeout)
     rows = data.get("candidates")
     expected = {c["id"] for c in candidates}
+    dependency_ids = expected | {c['id'] for c in (context or [])}
     seen = set()
     if not isinstance(rows, list):
         raise AIReturnError("S4 信息标注缺少 candidates")
@@ -77,7 +81,7 @@ def inventory(candidates, model, timeout, call):
                 or not isinstance(row.get("facts"), list)
                 or any(not isinstance(f, str) or not f.strip() for f in row["facts"])
                 or not isinstance(row.get("requires"), list)
-                or any(type(x) is not int or x not in expected or x == cid
+                or any(type(x) is not int or x not in dependency_ids or x == cid
                        for x in row["requires"])
                 or any(not isinstance(row.get(k), str) or not row[k].strip()
                        for k in ("subject", "reason"))):
@@ -195,8 +199,21 @@ def validate_plan(plan, candidates, labels, target, tolerance, validate):
 def compose(candidates, labels, model, timeout, call, target, tolerance, validate,
             *, current=None, issues=None, excluded=()):
     blocks = dependency_blocks(candidates, labels, excluded)
-    available = [dict(c, annotation=labels[c["id"]], dependency_block=blocks[c['id']])
-                 for c in payload(candidates) if c['id'] in blocks]
+    # Equivalent complete units need only one representative in the model input.
+    # Never collapse complementary facts or split a dependency unit.
+    by_id = {c['id']: c for c in candidates}
+    representatives = {}
+    for cid, block in blocks.items():
+        signature = (labels[cid]['topic'], tuple(sorted(
+            {fact for member in block for fact in labels[member]['facts']})))
+        score = (sum(by_id[member]['end'] - by_id[member]['start'] for member in block), cid)
+        previous = representatives.get(signature)
+        if previous is None or score < previous[0]:
+            representatives[signature] = (score, block)
+    retained = {cid for _, block in representatives.values() for cid in block}
+    available = [dict(c, annotation={k: labels[c['id']][k] for k in ('topic', 'facts', 'requires')},
+                      dependency_block=blocks[c['id']])
+                 for c in payload(candidates) if c['id'] in retained]
     prompt = (
         "S4精选编排：从候选选值得讲的信息与最佳完整表达，不生成新话术。"
         "先回答是什么、为什么有用、适合谁、怎么穿。开头选具体痛点/利益，后续"
