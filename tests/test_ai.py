@@ -15,6 +15,24 @@ class WorkBuddyCliTest(unittest.TestCase):
     def setUp(self):
         _workbuddy_catalog_cache.clear()
 
+    def test_standalone_cli_shared_by_catalog_and_pipeline(self):
+        from agent_video.ai import _workbuddy_cli_entries
+        from agent_video.pipeline.ai import _provider_executable
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            entry = (home / "AppData/Roaming/npm/node_modules/@tencent-ai"
+                     / "codebuddy-code/bin/codebuddy")
+            entry.parent.mkdir(parents=True)
+            entry.write_text("", encoding="utf-8")
+            with patch("agent_video.ai.Path.home", return_value=home), \
+                    patch("agent_video.ai.sys.platform", "win32"), \
+                    patch("agent_video.ai._workbuddy_live_models", return_value=[
+                        ("glm-5.3-flash", "glm-5.3-flash")]) as models:
+                self.assertEqual(_workbuddy_cli_entries(), [entry])
+                self.assertEqual(_provider_executable("workbuddy"), str(entry))
+                self.assertIn(("glm-5.3-flash", "glm-5.3-flash"), workbuddy_model_catalog())
+                models.assert_called_once_with(entry)
+
     def test_workbuddy_catalog_reads_all_tool_call_models(self):
         with tempfile.TemporaryDirectory() as tmp:
             cli_root = Path(tmp) / "cli"

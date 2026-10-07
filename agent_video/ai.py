@@ -4,6 +4,7 @@ import json
 import os
 import re
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -70,6 +71,15 @@ def _workbuddy_cli_entries(executable: Path | None = None) -> list[Path]:
             return [given]
     entries: list[Path] = []
     seen: set[Path] = set()
+    # 优先使用独立安装且可交互登录的 CodeBuddy。Windows 直接运行 Node
+    # 入口，避免 .cmd 包装层的参数转义及命令行长度限制。
+    npm_entry = (Path.home() / "AppData" / "Roaming" / "npm" / "node_modules"
+                 / "@tencent-ai" / "codebuddy-code" / "bin" / "codebuddy")
+    if sys.platform == "win32" and npm_entry.is_file():
+        return [npm_entry]
+    standalone = shutil.which("codebuddy")
+    if standalone:
+        return [Path(standalone)]
     for root in _workbuddy_cli_roots(executable):
         entry = root / "bin" / "codebuddy"
         if entry in seen:
@@ -147,6 +157,8 @@ def workbuddy_model_catalog(executable: Path | None = None) -> list[tuple[str, s
     2. 安装目录里打包的 product.json；
     3. 内置静态 WORKBUDDY_MODELS。
     """
+    if executable is None:
+        executable = next((entry for entry in _workbuddy_cli_entries() if entry.is_file()), None)
     cache_key = str(Path(executable).expanduser()) if executable else "*"
     now = time.monotonic()
     cached = _workbuddy_catalog_cache.get(cache_key)

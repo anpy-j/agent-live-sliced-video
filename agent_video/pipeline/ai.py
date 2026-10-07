@@ -26,7 +26,7 @@ from typing import Any
 
 from agent_video.ai import (AntigravityCli, CodexCli, OpenCodeCli,
                             DEFAULT_AI_TIMEOUT_SECONDS, ProviderResponseError,
-                            WorkBuddyCli)
+                            WorkBuddyCli, _workbuddy_cli_entries)
 
 from .errors import AIReturnError, PipelineConfigError
 
@@ -148,6 +148,10 @@ _WHICH = {
 
 
 def _provider_executable(provider_id: str) -> str:
+    if provider_id == "workbuddy":
+        for entry in _workbuddy_cli_entries():
+            if entry.is_file():
+                return str(entry)
     found = shutil.which(_WHICH.get(provider_id, provider_id))
     if found:
         return found

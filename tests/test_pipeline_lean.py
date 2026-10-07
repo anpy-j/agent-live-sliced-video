@@ -30,6 +30,12 @@ def word(text, start, end):
 
 
 class ProviderExecutableTest(unittest.TestCase):
+    def setUp(self):
+        # These tests exercise the legacy fallback when no shared CLI is found.
+        entries = patch.object(pipeline_ai, "_workbuddy_cli_entries", return_value=[])
+        entries.start()
+        self.addCleanup(entries.stop)
+
     def test_workbuddy_fallback_prefers_existing_candidate(self):
         existing = pipeline_ai._FALLBACK_EXECUTABLES["workbuddy"][0]
         with patch.object(pipeline_ai.shutil, "which", return_value=None), \
