@@ -56,8 +56,8 @@ def inventory(candidates, model, timeout, call):
         "对比必须完整明确。facts用具体对象+具体事实的全局统一键，同一事实不同说法"
         "必须用相同键；材质比例与保暖原理是不同事实。数值冲突不自行定真假。"
         "topic为fabric面料、fit版型、wearing上身感受、styling搭配、color颜色、"
-        "care养护或other。主主题只能一个，混合句谨慎处理。requires列出必须紧接"
-        "当前句播放的补全句id，例如最大的优势要接具体优势；独立完整句为空。"
+        "care养护或other。主主题只能一个，混合句谨慎处理。requires列出不可分离的上下文补全句id："
+        "当前句所需的前句或后句id，依赖组保持原素材时间顺序，不把前句移到后面；独立完整句为空。"
         "每个输入id恰好标注一次，不得新增或遗漏。\n候选JSON：\n"
         + json.dumps(payload(candidates), ensure_ascii=False))
     data = call(model, prompt, INVENTORY_SCHEMA, timeout)
@@ -88,6 +88,73 @@ def inventory(candidates, model, timeout, call):
         raise AIReturnError("S4 信息标注遗漏候选")
     return {row["id"]: row for row in rows}
 
+def dependency_blocks(candidates, labels, excluded=()):
+    """Resolve complete dependency units; reject unusable, cyclic or mixed-topic units."""
+    by_id = {c['id']: c for c in candidates}
+    blocked = set(excluded)
+    result = {}
+    def visit(cid, stack, found):
+        if cid in stack:
+            raise AIReturnError(f'S4 依赖循环：{cid}')
+        if cid not in by_id or cid not in labels or cid in blocked or not labels[cid]['eligible']:
+            raise AIReturnError(f'S4 依赖不可用：{cid}')
+        if cid in found:
+            return
+        stack.add(cid)
+        for dep in labels[cid]['requires']:
+            visit(dep, stack, found)
+        stack.remove(cid)
+        found.add(cid)
+    for cid in by_id:
+        found = set()
+        try:
+            visit(cid, set(), found)
+            if len({labels[x]['topic'] for x in found}) != 1:
+                raise AIReturnError('S4 依赖跨主题')
+            facts = [f for x in found for f in labels[x]['facts']]
+            if len(facts) != len(set(facts)):
+                raise AIReturnError('S4 依赖组事实重复')
+            result[cid] = sorted(found, key=lambda x: (by_id[x]['start'], by_id[x]['end'], x))
+        except AIReturnError:
+            continue
+    return result
+
+
+def complete_dependencies(plan, candidates, labels, excluded=()):
+    blocks = dependency_blocks(candidates, labels, excluded)
+    by_id = {c['id']: c for c in candidates}
+    selected = plan.get('ordered_ids', [])
+    groups = []
+    for cid in selected:
+        if cid not in blocks:
+            raise AIReturnError(f'S4 选中不可成立的依赖组：{cid}')
+        group = set(blocks[cid])
+        overlapping = [g for g in groups if g & group]
+        for g in overlapping:
+            group.update(g)
+            groups.remove(g)
+        groups.append(group)
+    ordered_groups = {cid: sorted(g, key=lambda x: (by_id[x]['start'], by_id[x]['end'], x))
+                      for g in groups for cid in g}
+    revised = copy.deepcopy(plan)
+    emitted, sections = set(), []
+    for section in revised['sections']:
+        ids = []
+        for cid in section['ids']:
+            if cid in emitted:
+                continue
+            block = ordered_groups[cid]
+            ids.extend(block)
+            emitted.update(block)
+        if ids:
+            sections.append(dict(section, ids=ids))
+    revised['sections'] = sections
+    revised['ordered_ids'] = [cid for s in sections for cid in s['ids']]
+    if revised['ordered_ids'] != selected:
+        revised['dependency_repair'] = {'before': selected, 'after': revised['ordered_ids']}
+    return revised
+
+
 def validate_plan(plan, candidates, labels, target, tolerance, validate):
     main, ids, seconds, _ = validate(plan, candidates, target, tolerance)
     for c in candidates:
@@ -113,22 +180,29 @@ def validate_plan(plan, candidates, labels, target, tolerance, validate):
             if facts & seen_facts:
                 raise AIReturnError("S4 同一具体事实重复入选")
             seen_facts.update(facts)
-            pos = ids.index(cid)
-            if ids[pos + 1:pos + 1 + len(label["requires"])] != label["requires"]:
-                raise AIReturnError("S4 缺失相邻依赖句")
+    blocks = dependency_blocks(candidates, labels)
+    for cid in ids:
+        if cid not in blocks or not set(blocks[cid]).issubset(ids):
+            raise AIReturnError(f"S4 缺失或不可用的依赖句：{cid}")
+    # Merge shared context into one contiguous unit, ordered by original source time.
+    completed = complete_dependencies(plan, candidates, labels)
+    if completed['ordered_ids'] != ids:
+        raise AIReturnError('S4 依赖组未相邻或原时间顺序错误')
     plan["total_seconds"] = round(seconds, 3)
     plan["main_product"] = main
     return plan
 
 def compose(candidates, labels, model, timeout, call, target, tolerance, validate,
             *, current=None, issues=None, excluded=()):
-    available = [dict(c, annotation=labels[c["id"]]) for c in payload(candidates)
-                 if labels[c["id"]]["eligible"] and c["id"] not in excluded]
+    blocks = dependency_blocks(candidates, labels, excluded)
+    available = [dict(c, annotation=labels[c["id"]], dependency_block=blocks[c['id']])
+                 for c in payload(candidates) if c['id'] in blocks]
     prompt = (
         "S4精选编排：从候选选值得讲的信息与最佳完整表达，不生成新话术。"
         "先回答是什么、为什么有用、适合谁、怎么穿。开头选具体痛点/利益，后续"
         "接同一主题讲完再换主题。同主题连续成块，禁止面料→颜色→面料回跳。"
-        "同一facts键只选一次，保留新增事实；必须依照requires相邻补全。"
+        "同一facts键只选一次，保留新增事实；dependency_block是程序算好的完整依赖组，"
+        "整组选取，按给定的原素材顺序连续播放，依赖可以在前或在后。"
         "sections保留hook/scene/selling_point/proof/styling/cta角色，但每段必须"
         "同时有topic；opening_topic等于首段主题。hook只一个，CTA仅最后。"
         f"目标{target[0]:g}–{target[1]:g}秒。删后在范围且完整就只删不补；"
@@ -137,13 +211,23 @@ def compose(candidates, labels, model, timeout, call, target, tolerance, validat
         "修订只改问题区域，保留无问题内容，不能重选excluded的句子。\n"
         + json.dumps({"candidates": available, "current": current,
                       "issues": issues or [], "excluded": list(excluded), "target": target}, ensure_ascii=False))
-    plan = call(model, prompt, PLAN_SCHEMA, timeout)
-    if current:
-        plan["stage"] = "order"
-        plan["semantic_summary"] = current.get("semantic_summary", {})
-    if set(plan.get("ordered_ids", [])) & set(excluded):
-        raise AIReturnError("S4 重新选入已淘汰句")
-    return validate_plan(plan, candidates, labels, target, tolerance, validate)
+    for attempt in range(2):
+        plan = call(model, prompt, PLAN_SCHEMA, timeout)
+        try:
+            # Check the AI's raw IDs/roles before deterministic additions and reordering.
+            validate(plan, candidates, target, tolerance)
+            if set(plan.get('ordered_ids', [])) - set(blocks):
+                raise AIReturnError('S4 选入不可用依赖组或已淘汰句')
+            plan = complete_dependencies(plan, candidates, labels, excluded)
+            if current:
+                plan['stage'] = 'order'
+                plan['semantic_summary'] = current.get('semantic_summary', {})
+            return validate_plan(plan, candidates, labels, target, tolerance, validate)
+        except AIReturnError as exc:
+            if attempt == 1:
+                raise
+            prompt = '上次方案未通过程序校验，请替换问题组合并重新编排：' + str(exc) + '\n' + prompt
+    raise AIReturnError('S4 未生成有效方案')
 
 def review_and_revise(plan, candidates, labels, model, timeout, call, target,
                       tolerance, validate, workdir):

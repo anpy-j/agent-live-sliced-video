@@ -7,7 +7,7 @@ from unittest.mock import Mock
 
 from agent_video.pipeline.editorial import (
     PLAN_SCHEMA, REVIEW_SCHEMA, digest, require_release, review_and_revise,
-    save, validate_plan,
+    save, validate_plan, complete_dependencies, dependency_blocks, compose,
 )
 from agent_video.pipeline.errors import AIReturnError
 from agent_video.pipeline.run import _validate_order
@@ -66,6 +66,50 @@ class EditorialTest(unittest.TestCase):
         with self.assertRaises(AIReturnError):
             self.validate(plan([0, 2, 1]))
         self.validate(plan([0, 1, 2]))
+
+    def test_previous_dependency_stays_before_the_dependent_sentence(self):
+        self.labels[1]['requires'] = [0]
+        self.validate(plan([0, 1]))
+        completed = complete_dependencies(plan([1, 2]), self.candidates, self.labels)
+        self.assertEqual(completed['ordered_ids'], [0, 1, 2])
+        self.validate(completed)
+
+    def test_forward_dependency_is_added_in_source_order(self):
+        self.labels[0]['requires'] = [1]
+        completed = complete_dependencies(plan([0, 2]), self.candidates, self.labels)
+        self.assertEqual(completed['ordered_ids'], [0, 1, 2])
+        self.validate(completed)
+
+    def test_shared_dependency_is_included_once_in_a_contiguous_group(self):
+        self.labels[1]['requires'] = [0]
+        self.labels[2]['requires'] = [0]
+        completed = complete_dependencies(plan([2, 3, 1]), self.candidates, self.labels)
+        self.assertEqual(completed['ordered_ids'], [0, 1, 2, 3])
+        self.validate(completed)
+
+    def test_unusable_cross_topic_and_cyclic_dependency_units_are_excluded(self):
+        self.labels[1]['requires'] = [0]
+        self.assertNotIn(1, dependency_blocks(self.candidates, self.labels, excluded=[0]))
+        self.labels[0]['topic'] = 'color'
+        self.assertNotIn(1, dependency_blocks(self.candidates, self.labels))
+        self.labels[0]['topic'] = 'fabric'
+        self.labels[0]['requires'] = [1]
+        self.assertNotIn(1, dependency_blocks(self.candidates, self.labels))
+
+    def test_composition_retries_an_invalid_unit_with_a_fixed_upper_bound(self):
+        self.labels[1]['requires'] = [0]
+        self.labels[0]['eligible'] = False
+        call = Mock(side_effect=[plan([1]), plan([2, 3])])
+        result = compose(self.candidates, self.labels, 'mock', 10, call, (10, 20), 1, _validate_order)
+        self.assertEqual(result['ordered_ids'], [2, 3])
+        self.assertEqual(call.call_count, 2)
+        for invoked in call.call_args_list:
+            data = json.loads(invoked.args[1].splitlines()[-1])
+            self.assertEqual([c['id'] for c in data['candidates']], [2, 3])
+        call = Mock(return_value=plan([1]))
+        with self.assertRaises(AIReturnError):
+            compose(self.candidates, self.labels, 'mock', 10, call, (10, 20), 1, _validate_order)
+        self.assertEqual(call.call_count, 2)
 
     def test_in_range_drop_keeps_other_sentences_without_composition(self):
         call = Mock(side_effect=[self.issue(), {'passed': True, 'issues': []}])
