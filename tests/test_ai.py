@@ -152,6 +152,42 @@ class WorkBuddyCliTest(unittest.TestCase):
         self.assertNotIn("test", cmd)
         self.assertEqual(complete.call_args.kwargs["stdin_text"], "test")
 
+    def test_workbuddy_commands_claim_an_explicit_endpoint_port(self):
+        """The CLI's auto-assigned endpoint port collides with other instances and
+        then it never answers; every call must pass its own free port."""
+        provider = WorkBuddyCli(Path("/tmp/workbuddy"))
+        seen = []
+        plan = '{"result": {"structured_output": {"main_product": "T恤", "picks": []}}}'
+        facts = '{"result": {"structured_output": {"ok": 1}}}'
+        visual = '{"result": {"structured_output": {"replacements": []}}}'
+        def fake_complete(command, **kwargs):
+            seen.append(command)
+            return (plan if "--json-schema" not in command or "main_product" in command
+                    else facts, "", 1)
+        with patch.object(provider, "_ensure_available"), \
+                patch.object(provider, "validate_model"), \
+                patch.object(provider, "validate_vision_model"), \
+                patch.object(provider, "_complete", side_effect=[
+                    (plan, "", 1), (facts, "", 1), (visual, "", 1)]) as complete, \
+                patch("agent_video.ai.free_endpoint_port", side_effect=[45671, 45672, 45673]):
+            provider.generate_plan(model="auto", prompt="test", cwd=Path("/tmp"))
+            provider.generate_json(model="auto", prompt="test",
+                                   schema={"type": "object", "required": ["ok"]},
+                                   cwd=Path("/tmp"))
+            provider.generate_visual_plan(model="glm-5v-turbo", prompt="test", images=[],
+                                          cwd=Path("/tmp"))
+        seen = [call.args[0] for call in complete.call_args_list]
+        self.assertEqual([cmd[cmd.index("--port") + 1] for cmd in seen],
+                         ["45671", "45672", "45673"])
+
+    def test_free_endpoint_port_is_bindable(self):
+        import socket
+        from agent_video.ai import free_endpoint_port
+        port = free_endpoint_port()
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", port))
+            self.assertEqual(probe.getsockname()[1], port)
+
     def test_all_providers_share_structured_plan_parser(self):
         envelope = {"output_text": '{"main_product":"风衣","picks":[]}'}
         self.assertEqual(AntigravityCli._find_plan(envelope)["main_product"], "风衣")

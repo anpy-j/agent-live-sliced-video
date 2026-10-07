@@ -5,6 +5,7 @@ import os
 import re
 import signal
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -36,6 +37,21 @@ WORKBUDDY_MODELS = [
 _WORKBUDDY_HELP_MODELS = re.compile(r"Currently supported:\s*\(([^)]+)\)")
 _WORKBUDDY_CATALOG_TTL_SECONDS = 300
 _workbuddy_catalog_cache: dict[str, tuple[float, list[tuple[str, str]]]] = {}
+
+
+def free_endpoint_port() -> int:
+    """Return a port that was free a moment ago.
+
+    WorkBuddy CLI starts a local endpoint server per process and auto-assigns its
+    port; the auto-assigned port collides with ports already held by other CLI
+    instances (interactive sessions, concurrent S4 batches). The CLI then dies
+    with an unhandled EADDRINUSE rejection, prints nothing and never answers, so
+    the call can only end in a timeout. Passing an explicit free port avoids the
+    collision.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
 
 
 def _workbuddy_cli_roots(executable: Path | None = None) -> list[Path]:
@@ -749,6 +765,10 @@ class WorkBuddyCli(CliProvider):
                     str(self.executable)]
         return [str(self.executable)]
 
+    def _port_args(self) -> list[str]:
+        # Each process needs its own endpoint port; see free_endpoint_port().
+        return ["--port", str(free_endpoint_port())]
+
     def _parse_response(self, stdout: str, stderr: str) -> Any:
         try:
             return self._parse_json(stdout)
@@ -776,6 +796,7 @@ class WorkBuddyCli(CliProvider):
             "--model", model, "--max-turns", "4", "--tools", "Read,StructuredOutput",
             "--add-dir", str(Path(cwd).resolve()),
             "--permission-mode", "dontAsk", "--no-session-persistence",
+            *self._port_args(),
         ]
         stdin_text = f"{prompt}\n\n请使用 Read 查看以下图片：\n{image_paths}"
         started = time.monotonic()
@@ -804,6 +825,7 @@ class WorkBuddyCli(CliProvider):
             "--json-schema", json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
             "--model", model, "--max-turns", "4", "--tools", "StructuredOutput",
             "--permission-mode", "dontAsk", "--no-session-persistence",
+            *self._port_args(),
         ]
         started = time.monotonic()
         stdout, stderr, seconds = self._complete(
@@ -831,6 +853,7 @@ class WorkBuddyCli(CliProvider):
             "--json-schema", json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
             "--model", model, "--max-turns", "4", "--tools", "StructuredOutput",
             "--permission-mode", "dontAsk", "--no-session-persistence",
+            *self._port_args(),
         ]
         started = time.monotonic()
         stdout, stderr, seconds = self._complete(
